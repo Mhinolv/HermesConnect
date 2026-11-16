@@ -1,0 +1,56 @@
+name: HermesConnect
+options:
+  bundleIdPrefix: io.mhinoverse
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: 37GMXLK849
+    CODE_SIGN_STYLE: Automatic
+packages:
+  HermesKit:
+    path: Packages/HermesKit
+  MessageKit:
+    url: https://github.com/MessageKit/MessageKit
+    from: 5.0.0
+targets:
+  HermesConnect:
+    type: application
+    platform: iOS
+    sources: [HermesConnect]
+    dependencies:
+      - package: HermesKit
+      - package: MessageKit
+    info:
+      path: HermesConnect/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Hermes
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        NSMicrophoneUsageDescription: Hermes records voice memos that you send to your agent.
+        NSPhotoLibraryUsageDescription: Hermes attaches photos that you choose to your messages.
+        NSCameraUsageDescription: Hermes takes photos that you send to your agent.
+        NSFaceIDUsageDescription: Hermes uses Face ID to unlock your SSH key.
+        NSLocationWhenInUseUsageDescription: Hermes shares your location with your agent when you ask it to.
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.mhinoverse.hermesconnect
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+  HermesConnectTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [HermesConnectTests]
+    dependencies:
+      - target: HermesConnect
+schemes:
+  HermesConnect:
+    build:
+      targets:
+        HermesConnect: all
+        HermesConnectTests: [test]
+    test:
+      targets: [HermesConnectTests]

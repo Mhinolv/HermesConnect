@@ -1,0 +1,11 @@
+name: CI
+# Light CI until the first distributable build (owner decision 2026-11-08): run by hand only.
+on:
+  workflow_dispatch:
+jobs:
+  ci-gate:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen && xcodegen generate
+      - run: SIM="iPhone 16" scripts/test.sh
