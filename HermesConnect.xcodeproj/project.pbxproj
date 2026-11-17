@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		005CA6251E125BF95E1E03B3 /* SessionListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83E296700CE9EBB2D816E590 /* SessionListTests.swift */; };
+		01B54B7A5360786DFF684DFE /* AskHermesIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EA999FDF121C5949048BC7C /* AskHermesIntent.swift */; };
 		04DC34168B66E6DCE7820198 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D3CB166FF51053854FFDA4B /* SettingsView.swift */; };
 		0AA71132C6D0F9DF6AD60D27 /* SessionListScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0EA96A6753C403E6A93EDFD /* SessionListScreen.swift */; };
 		0C197036101D133537EA865D /* LocationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5573AB405E8B46FF30CD8C89 /* LocationController.swift */; };
@@ -25,6 +26,7 @@
 		4DDC251C4FFE98D87E3C7E90 /* LocationAccessPrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF8E9D05C49A73D36F5106A7 /* LocationAccessPrompt.swift */; };
 		5C009257C4A6066ED63FC699 /* SetupFlowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7043F7690A196EB557326890 /* SetupFlowView.swift */; };
 		6788BF844A32EC9EE100DE6A /* VoiceRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27E6BC84392DF022945BB39D /* VoiceRecorder.swift */; };
+		6A7098936BAA4D4EF4A49086 /* AskHermesAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C41CED143465554FB51CC1FB /* AskHermesAppTests.swift */; };
 		6C761422A2E25F72ECC40E0E /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6150F9285784508FB2F6A3E /* AppModel.swift */; };
 		74C7DA0960EA120C51C2AF65 /* LocationControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40916C67E6E9CDFF43F23AB8 /* LocationControllerTests.swift */; };
 		75558AB7C9008A5CFE12F45B /* VoiceRecordingBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37EF80F3762ADA518CD0BE72 /* VoiceRecordingBar.swift */; };
@@ -84,6 +86,7 @@
 		5E583F634243E84B759FCEC6 /* LocationSettingsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationSettingsSection.swift; sourceTree = "<group>"; };
 		61D93DB454F3B97CC6C5DDC5 /* AttachmentImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentImport.swift; sourceTree = "<group>"; };
 		6A3CF81303C78255758A5C52 /* HermesKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = HermesKit; path = Packages/HermesKit; sourceTree = SOURCE_ROOT; };
+		6EA999FDF121C5949048BC7C /* AskHermesIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskHermesIntent.swift; sourceTree = "<group>"; };
 		7043F7690A196EB557326890 /* SetupFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupFlowView.swift; sourceTree = "<group>"; };
 		71BE1F0BBF1E0DC6C9086E97 /* ChatViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewController.swift; sourceTree = "<group>"; };
 		76E748D4ED9CB565A2F48120 /* ConnectionStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStatusView.swift; sourceTree = "<group>"; };
@@ -96,6 +99,7 @@
 		B3943AD860F04AC733085D8A /* AttachmentComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentComposer.swift; sourceTree = "<group>"; };
 		BDDF85200B57F3AFCAB1552A /* AttachmentUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentUITests.swift; sourceTree = "<group>"; };
 		BF8E9D05C49A73D36F5106A7 /* LocationAccessPrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationAccessPrompt.swift; sourceTree = "<group>"; };
+		C41CED143465554FB51CC1FB /* AskHermesAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskHermesAppTests.swift; sourceTree = "<group>"; };
 		C80A034BAA06291CE4BB4106 /* HermesConnectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesConnectTests.swift; sourceTree = "<group>"; };
 		C8A48996F2DE819FC34FF0CA /* CatchUpAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatchUpAppTests.swift; sourceTree = "<group>"; };
 		CEE713B92846B56241CD9612 /* DeviceKeyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceKeyView.swift; sourceTree = "<group>"; };
@@ -165,6 +169,7 @@
 		61FB2679F755DE99E3142CCA /* HermesConnectTests */ = {
 			isa = PBXGroup;
 			children = (
+				C41CED143465554FB51CC1FB /* AskHermesAppTests.swift */,
 				BDDF85200B57F3AFCAB1552A /* AttachmentUITests.swift */,
 				C8A48996F2DE819FC34FF0CA /* CatchUpAppTests.swift */,
 				C80A034BAA06291CE4BB4106 /* HermesConnectTests.swift */,
@@ -181,6 +186,7 @@
 			isa = PBXGroup;
 			children = (
 				A6150F9285784508FB2F6A3E /* AppModel.swift */,
+				6EA999FDF121C5949048BC7C /* AskHermesIntent.swift */,
 				3B47554FAB736FCFE8A2DAA6 /* BackgroundRefresh.swift */,
 				76E748D4ED9CB565A2F48120 /* ConnectionStatusView.swift */,
 				A1663E6E147C124EEADC03F1 /* HermesConnectApp.swift */,
@@ -351,6 +357,7 @@
 			files = (
 				B97FEBCCFBBC2C3312E79743 /* AppLockCover.swift in Sources */,
 				6C761422A2E25F72ECC40E0E /* AppModel.swift in Sources */,
+				01B54B7A5360786DFF684DFE /* AskHermesIntent.swift in Sources */,
 				D4366E8BE2F65577400AC2B0 /* AttachmentBubbles.swift in Sources */,
 				497DEE0C467C15EE7B62F601 /* AttachmentComposer.swift in Sources */,
 				A18520711874067C6CB2F686 /* AttachmentDemo.swift in Sources */,
@@ -386,6 +393,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6A7098936BAA4D4EF4A49086 /* AskHermesAppTests.swift in Sources */,
 				43E9BA6A1999EA550F1BE33C /* AttachmentUITests.swift in Sources */,
 				15447B7300590146E9C01520 /* CatchUpAppTests.swift in Sources */,
 				E230335998617506596F1F26 /* HermesConnectTests.swift in Sources */,
