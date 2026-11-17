@@ -328,7 +328,8 @@ private func transcription(_ choice: TranscriptionEngine, apple: FakeFileRecogni
         }
     }
 
-    @Test func unreadableFormatDoesNotRun() async throws {
+    /// Issue #87 (QA #86 note 2): the unreadable state is saved, so a relaunch shows it with no "Transcribe".
+    @Test func unreadableFormatDoesNotRunAndSurvivesARelaunch() async throws {
         let folder = tempDirectory()
         defer { try? FileManager.default.removeItem(at: folder) }
         let files = try loader(folder: folder, playable: false)
@@ -341,7 +342,30 @@ private func transcription(_ choice: TranscriptionEngine, apple: FakeFileRecogni
         transcripts.start(file)
         #expect(transcripts.state(for: file) == .unreadable)
         #expect(runs.withLock { $0 } == 0)
-        #expect(!FileManager.default.fileExists(atPath: transcripts.transcriptURL(for: file).path))
+        #expect(FileManager.default.fileExists(atPath: transcripts.transcriptURL(for: file).path))
+
+        let relaunched = ReceivedAudioTranscripts(files: try loader(folder: folder, playable: false)) { _, _ in
+            runs.withLock { $0 += 1 }
+            return "x"
+        }
+        #expect(relaunched.state(for: file) == .unreadable)
+        #expect(!relaunched.state(for: file).canStart)
+        relaunched.start(file)
+        #expect(runs.withLock { $0 } == 0)
+    }
+
+    /// Issue #87: a transcript that a #50 build saved (version 1) reads as before.
+    @Test func version1TranscriptsStillRead() throws {
+        let folder = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let done = folder.appending(path: "done.json")
+        let empty = folder.appending(path: "empty.json")
+        try Data(#"{"version":1,"text":"Old words."}"#.utf8).write(to: done)
+        try Data(#"{"version":1,"text":""}"#.utf8).write(to: empty)
+        #expect(ReceivedAudioTranscripts.load(done) == .done("Old words."))
+        #expect(ReceivedAudioTranscripts.load(empty) == .empty)
+        #expect(ReceivedAudioTranscripts.load(folder.appending(path: "none.json")) == nil)
     }
 
     @Test func noRunWhileTheAudioPrepares() throws {
@@ -432,5 +456,258 @@ private func transcription(_ choice: TranscriptionEngine, apple: FakeFileRecogni
         #expect(AudioFileTranscript.done("Hi").caption == "Hi")
         #expect(!AudioFileTranscript.done("Hi").canStart)
         #expect(!AudioFileTranscript.unreadable.canStart)
+    }
+}
+
+// MARK: - Issue #87: sent audio files, and the runs stop when the owner leaves the chat
+
+/// A run that waits until it is cancelled. It records the cancel, so a test sees that the engine stopped.
+private final class CancelProbe: Sendable {
+    private let started = Mutex(0)
+    private let stopped = Mutex(0)
+    var starts: Int { started.withLock { $0 } }
+    var cancels: Int { stopped.withLock { $0 } }
+
+    var transcribe: ReceivedAudioTranscripts.Transcribe {
+        { [self] _, progress in
+            started.withLock { $0 += 1 }
+            progress(0.1)
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch {
+                stopped.withLock { $0 += 1 }
+                throw error
+            }
+            return "late words"
+        }
+    }
+}
+
+@MainActor
+@Suite(.timeLimit(.minutes(1))) struct SentAudioTranscriptsTests {
+    private func tempDirectory() -> URL {
+        FileManager.default.temporaryDirectory.appending(path: "SentAudioTranscripts-\(UUID().uuidString)",
+                                                         directoryHint: .isDirectory)
+    }
+
+    /// A sent file in its private folder, as `AttachmentImport` makes it: `<folder>/<id>/<name>`.
+    private func sentFile(_ name: String, in folder: URL, mimeType: String = "audio/mp4",
+                          onDisk: Bool = true) throws -> ChatAttachment {
+        let id = UUID().uuidString
+        let url = folder.appending(path: id, directoryHint: .isDirectory).appending(path: name)
+        if onDisk {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("RIFF".utf8).write(to: url)
+        }
+        return ChatAttachment(id: id, kind: .file, name: name, byteCount: 4, fileURL: url, mimeType: mimeType,
+                              upload: .attached)
+    }
+
+    private func emptyLoader(_ folder: URL, transport: ServerCountingTransport? = nil) -> ReceivedFileLoader {
+        guard let transport else {
+            return ReceivedFileLoader(download: nil, folder: folder.appending(path: "received"), storedSessionId: { "st1" })
+        }
+        return ReceivedFileLoader(download: { path, session, maxBytes, progress in
+            try await transport.downloadReceivedFile(path: path, storedSessionId: session, maxBytes: maxBytes,
+                                                     progress: progress)
+        }, folder: folder.appending(path: "received"), storedSessionId: { "st1" })
+    }
+
+    private func waitForEnd(_ transcripts: ReceivedAudioTranscripts, _ item: ChatAttachment) async {
+        await transcripts.task(for: item)?.value
+        for _ in 0..<50 where transcripts.state(for: item).isTranscribing { await Task.yield() }
+    }
+
+    private func waitForStart(_ probe: CancelProbe, count: Int) async throws {
+        for _ in 0..<300 where probe.starts < count { try await Task.sleep(for: .milliseconds(10)) }
+    }
+
+    /// Acceptance criterion: a sent audio file shows the transcribe action, as a received one does.
+    @Test func sentAudioFileTranscribesAndSurvivesARelaunch() async throws {
+        let folder = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let item = try sentFile("Voice note.m4a", in: folder)
+        let runs = Mutex<[URL]>([])
+        let prepared = Mutex<[URL]>([])
+        let transcripts = ReceivedAudioTranscripts(files: emptyLoader(folder), transcribe: { url, _ in
+            runs.withLock { $0.append(url) }
+            return "Pick up the keys."
+        }, prepareSent: { url in
+            prepared.withLock { $0.append(url) }
+            return url
+        })
+        var sentChanges: [String] = []
+        var receivedChanges = 0
+        transcripts.onSentChange = { sentChanges.append($0.id) }
+        transcripts.onChange = { _ in receivedChanges += 1 }
+        #expect(transcripts.canTranscribe(item))
+        #expect(transcripts.state(for: item) == .none)
+        transcripts.start(item)
+        #expect(transcripts.state(for: item) == .transcribing(nil))
+        await waitForEnd(transcripts, item)
+        #expect(transcripts.state(for: item) == .done("Pick up the keys."))
+        #expect(sentChanges == [item.id, item.id])
+        #expect(receivedChanges == 0)
+        #expect(prepared.withLock { $0 } == [item.fileURL])
+        #expect(runs.withLock { $0 } == [item.fileURL])
+        // The transcript sits next to the private copy of the sent file.
+        let saved = item.fileURL.deletingLastPathComponent().appending(path: "transcript.json")
+        #expect(transcripts.transcriptURL(for: item) == saved)
+        #expect(FileManager.default.fileExists(atPath: saved.path))
+
+        let relaunched = ReceivedAudioTranscripts(files: emptyLoader(folder)) { _, _ in
+            runs.withLock { $0.append(URL(filePath: "/again")) }
+            return "other"
+        }
+        #expect(relaunched.state(for: item) == .done("Pick up the keys."))
+        relaunched.start(item)
+        #expect(relaunched.task(for: item) == nil)
+        #expect(runs.withLock { $0.count } == 1)
+    }
+
+    /// The #50 engine chain: only on-device recognizers, and no server call, for each Settings choice.
+    @Test func sentFileStaysOnThePhone() async throws {
+        let folder = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        for choice in TranscriptionEngine.allCases {
+            let transport = ServerCountingTransport()
+            let item = try sentFile("memo-\(choice.rawValue).wav", in: folder, mimeType: "audio/wav")
+            let apple = FakeFileRecognizer(.success("apple words"))
+            let parakeet = FakeFileRecognizer(.success("parakeet words"))
+            // The app engine chain (`transcribeFile`). The prepare step is a fake: the test file is not real audio.
+            let engine = transcription(choice, apple: apple, parakeet: parakeet)
+            let fake = ReceivedAudioTranscripts(files: emptyLoader(folder, transport: transport), transcribe: { url, progress in
+                try await engine.transcribeFile(at: url, permission: FakePermission(.authorized), progress: progress)
+            }, prepareSent: { $0 })
+            fake.start(item)
+            await waitForEnd(fake, item)
+            let expected = choice == .parakeet ? "parakeet words" : "apple words"
+            #expect(fake.state(for: item) == .done(expected))
+            #expect(transport.calls.isEmpty, "\(choice): \(transport.calls)")
+            #expect((apple.calls + parakeet.calls).allSatisfy { $0 == item.fileURL })
+        }
+    }
+
+    /// Acceptance criterion: the unreadable state is saved and shows after a relaunch. The real prepare step
+    /// reads the file, so bytes that are not audio give `unreadable` with no engine run.
+    @Test func sentUnreadableFormatIsSavedAndSurvivesARelaunch() async throws {
+        let folder = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let item = try sentFile("broken.mp3", in: folder, mimeType: "audio/mpeg")
+        let runs = Mutex(0)
+        let transcripts = ReceivedAudioTranscripts(files: emptyLoader(folder)) { _, _ in
+            runs.withLock { $0 += 1 }
+            return "x"
+        }
+        transcripts.start(item)
+        await waitForEnd(transcripts, item)
+        #expect(transcripts.state(for: item) == .unreadable)
+        #expect(runs.withLock { $0 } == 0)
+        #expect(FileManager.default.fileExists(atPath: transcripts.transcriptURL(for: item).path))
+
+        let relaunched = ReceivedAudioTranscripts(files: emptyLoader(folder)) { _, _ in
+            runs.withLock { $0 += 1 }
+            return "x"
+        }
+        #expect(relaunched.state(for: item) == .unreadable)
+        #expect(!relaunched.state(for: item).canStart)
+        relaunched.start(item)
+        #expect(relaunched.task(for: item) == nil)
+        #expect(runs.withLock { $0 } == 0)
+    }
+
+    @Test func onlySentAudioFilesOnThePhoneHaveTheAction() throws {
+        let folder = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let transcripts = ReceivedAudioTranscripts(files: emptyLoader(folder)) { _, _ in "x" }
+        for name in ["a.mp3", "b.M4A", "c.ogg", "d.wav"] {
+            #expect(transcripts.canTranscribe(try sentFile(name, in: folder, mimeType: "")), "\(name)")
+        }
+        // An `audio/` MIME type with no audio extension.
+        #expect(transcripts.canTranscribe(try sentFile("recording", in: folder, mimeType: "audio/mpeg")))
+        #expect(!transcripts.canTranscribe(try sentFile("Lease.pdf", in: folder, mimeType: "application/pdf")))
+        #expect(!transcripts.canTranscribe(try sentFile("notes.txt", in: folder, mimeType: "text/plain")))
+        // A cell from a server `@file:` ref, or a copy that the system cleared: no file on the phone.
+        let gone = try sentFile("gone.mp3", in: folder, onDisk: false)
+        #expect(!transcripts.canTranscribe(gone))
+        transcripts.start(gone)
+        #expect(transcripts.task(for: gone) == nil)
+        #expect(transcripts.state(for: gone) == .none)
+        // Photos and PDFs are not audio files, whatever their name.
+        var photo = try sentFile("x.mp3", in: folder)
+        photo.kind = .photo
+        #expect(!photo.isAudioFile)
+        var pdf = try sentFile("y.wav", in: folder)
+        pdf.kind = .pdf
+        #expect(!pdf.isAudioFile)
+    }
+
+    @Test func sentCancelStopsTheRunAndSavesNothing() async throws {
+        let folder = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let item = try sentFile("long.m4a", in: folder)
+        let probe = CancelProbe()
+        let transcripts = ReceivedAudioTranscripts(files: emptyLoader(folder), transcribe: probe.transcribe,
+                                                   prepareSent: { $0 })
+        transcripts.start(item)
+        try await waitForStart(probe, count: 1)
+        let task = transcripts.task(for: item)
+        transcripts.cancel(item)
+        #expect(transcripts.state(for: item) == .none)
+        await task?.value
+        #expect(probe.cancels == 1)
+        #expect(transcripts.state(for: item) == .none)
+        #expect(!FileManager.default.fileExists(atPath: transcripts.transcriptURL(for: item).path))
+    }
+
+    /// Acceptance criterion: a running transcription stops when the owner leaves the chat (QA #86 note 1).
+    /// The screen calls `cancelAll()`: the received and the sent runs stop, and nothing is saved.
+    @Test func leavingTheChatStopsEachRun() async throws {
+        let folder = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let files = ReceivedFileLoader(download: nil, folder: folder.appending(path: "received"),
+                                       storedSessionId: { "st1" },
+                                       prepareAudio: { VoiceReplyAudio(fileURL: $0, duration: 720) })
+        let received = ReceivedFile(path: "/home/hermes/.hermes/outputs/call.wav")
+        let local = files.localURL(for: received)
+        try FileManager.default.createDirectory(at: local.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("RIFF".utf8).write(to: local)
+        for _ in 0..<200 where files.audio(for: received) == .preparing { try await Task.sleep(for: .milliseconds(10)) }
+        let item = try sentFile("sent.m4a", in: folder)
+        let probe = CancelProbe()
+        let transcripts = ReceivedAudioTranscripts(files: files, transcribe: probe.transcribe, prepareSent: { $0 })
+        transcripts.start(received)
+        transcripts.start(item)
+        try await waitForStart(probe, count: 2)
+        #expect(transcripts.isRunning)
+        let tasks = [transcripts.task(for: received), transcripts.task(for: item)].compactMap(\.self)
+        #expect(tasks.count == 2)
+
+        transcripts.cancelAll()
+        #expect(!transcripts.isRunning)
+        #expect(transcripts.state(for: received) == .none)
+        #expect(transcripts.state(for: item) == .none)
+        for task in tasks { await task.value }
+        #expect(probe.cancels == 2)
+        #expect(!FileManager.default.fileExists(atPath: transcripts.transcriptURL(for: received).path))
+        #expect(!FileManager.default.fileExists(atPath: transcripts.transcriptURL(for: item).path))
+    }
+
+    /// The store goes with the screen. A run that it started does not keep the engine busy.
+    @Test func releasingTheStoreStopsTheRun() async throws {
+        let folder = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let item = try sentFile("sent.m4a", in: folder)
+        let probe = CancelProbe()
+        var transcripts: ReceivedAudioTranscripts? = ReceivedAudioTranscripts(
+            files: emptyLoader(folder), transcribe: probe.transcribe, prepareSent: { $0 })
+        transcripts?.start(item)
+        try await waitForStart(probe, count: 1)
+        let task = try #require(transcripts?.task(for: item))
+        transcripts = nil
+        await task.value
+        #expect(probe.cancels == 1)
+        #expect(!FileManager.default.fileExists(atPath: item.fileURL.deletingLastPathComponent()
+            .appending(path: "transcript.json").path))
     }
 }
