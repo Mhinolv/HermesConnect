@@ -470,9 +470,9 @@ def parse_timestamp(value):
         fraction = (fraction + "000000")[:7]
     try:
         parsed = datetime.datetime.fromisoformat(match.group(1) + fraction + match.group(3))
-    except ValueError:
+        return parsed.astimezone(datetime.timezone.utc)
+    except (ValueError, OverflowError):  # OverflowError: year 1 or 9999 moved to UTC.
         return None
-    return parsed.astimezone(datetime.timezone.utc)
 
 
 def iso_utc(moment):

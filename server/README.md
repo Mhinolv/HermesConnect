@@ -107,11 +107,11 @@ Run these commands from a computer that has a test copy of the phone key (`phone
 | State of the phone fix | Result |
 |---|---|
 | 30 minutes old or less | The phone fix: `latitude`, `longitude`, `accuracy_m`, `located_at`, `minutes_ago`, `apple_maps`, `"source": "hermesconnect"`, `"stale": false`. |
-| Missing, not valid, or older than 30 minutes | The `findmy_location` result, with `"source": "findmy"` and a `phone_fix` reason. The tool calls the findmy plugin in the same process. |
+| Missing, not valid, older than 30 minutes, or more than 5 minutes in the future (clock skew) | The `findmy_location` result, with `"source": "findmy"` and a `phone_fix` reason. The tool calls the findmy plugin in the same process, only when its `_available()` returns true. |
 | Older than 30 minutes, and no Find My result | The old phone fix with `"stale": true` and a `note`. |
 | Missing, and no Find My result | An error that tells the owner to turn on location sharing in HermesConnect. |
 
-If the Find My result is older than an old phone fix, the tool returns the phone fix. The tool looks for the findmy plugin next to its own folder, then in `$HERMES_HOME/plugins/findmy`, then in `~/.hermes/plugins/findmy`.
+If the Find My result is older than an old phone fix, the tool returns the phone fix. The tool never raises an exception to Hermes. An unexpected failure gives a tool error with the exception type only. The tool looks for the findmy plugin next to its own folder, then in `$HERMES_HOME/plugins/findmy`, then in `~/.hermes/plugins/findmy`.
 
 Install (do these steps on the server as `root`):
 

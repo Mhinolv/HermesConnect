@@ -22,6 +22,12 @@ PLUGIN = os.path.join(PLUGIN_DIR, "__init__.py")
 FAKE_FINDMY = '''
 import json, os
 from tools.registry import tool_error, tool_result
+def _available():
+    with open(os.environ["FAKE_FINDMY_CALLS"], "a") as out:
+        out.write("available\\n")
+    if os.environ.get("FAKE_FINDMY_AVAILABLE", "1") == "raise":
+        raise OSError("config unreadable")
+    return os.environ.get("FAKE_FINDMY_AVAILABLE", "1") == "1"
 def handle(args, **kw):
     with open(os.environ["FAKE_FINDMY_CALLS"], "a") as out:
         out.write("call\\n")
@@ -79,6 +85,7 @@ class PluginTestCase(unittest.TestCase):
         os.environ.pop("HERMES_HOME", None)
         os.environ.pop("FAKE_FINDMY_MODE", None)
         os.environ.pop("FAKE_FINDMY_AGE", None)
+        os.environ.pop("FAKE_FINDMY_AVAILABLE", None)
         modules = mock.patch.dict(sys.modules, fake_registry())
         modules.start()
         self.addCleanup(modules.stop)
@@ -103,9 +110,10 @@ class PluginTestCase(unittest.TestCase):
             os.environ["FAKE_FINDMY_AGE"] = str(age)
 
     def findmy_calls(self):
+        """The number of times the findmy handler ran (not counting _available checks)."""
         try:
             with open(self.calls) as stream:
-                return len(stream.read().splitlines())
+                return stream.read().splitlines().count("call")
         except OSError:
             return 0
 
@@ -137,8 +145,9 @@ class FreshFixTests(PluginTestCase):
         self.assertFalse(result["stale"])
 
     def test_small_clock_skew_into_the_future_is_age_zero(self):
-        self.write_fix(record(minutes_ago=-2))
+        self.write_fix(record(minutes_ago=-4.5))
         result = self.call()
+        self.assertEqual(result["source"], "hermesconnect")
         self.assertEqual(result["minutes_ago"], 0)
         self.assertFalse(result["stale"])
 
@@ -245,6 +254,94 @@ class FallbackTests(PluginTestCase):
                 result = self.call()
                 self.assertEqual(result["source"], "findmy")
                 self.assertEqual(result["phone_fix"], "missing: the phone location file is not valid")
+
+    def test_fix_more_than_5_minutes_in_the_future_is_clock_skew(self):
+        self.install_findmy()
+        for name, value in {"6 minutes": iso(datetime.now(timezone.utc) + timedelta(minutes=6)),
+                            "year 2099": "2099-01-01T00:00:00.000Z"}.items():
+            with self.subTest(case=name):
+                self.write_fix(record(timestamp=value))
+                result = self.call()
+                self.assertEqual(result["source"], "findmy")
+                self.assertIn("clock skew", result["phone_fix"])
+
+    def test_future_fix_without_findmy_is_an_error(self):
+        self.write_fix(record(timestamp="2099-01-01T00:00:00.000Z"))
+        result = self.call()
+        self.assertEqual(set(result), {"error"})
+        self.assertIn("clock skew", result["error"])
+
+    def test_extreme_timestamps_count_as_not_valid(self):
+        self.install_findmy()
+        for value in ("0001-01-01T00:00:00+05:00", "9999-12-31T23:59:59-05:00",
+                      "0001-01-01T00:00:00Z", "9999-12-31T23:59:59Z"):
+            with self.subTest(timestamp=value):
+                self.write_fix(record(timestamp=value))
+                result = self.call()
+                self.assertNotIn("error", result)
+                self.assertEqual(result["source"], "findmy")
+
+    def test_deeply_nested_json_counts_as_not_valid(self):
+        self.install_findmy()
+        self.write_fix("[" * 60000)
+        real_loads = json.loads
+
+        def loads(text, **kwargs):  # Python 3.9 raises RecursionError for this input. Force it everywhere.
+            if text.startswith("[[[["):
+                raise RecursionError("maximum recursion depth exceeded")
+            return real_loads(text, **kwargs)
+
+        for name, patch in {"real input": mock.patch.object(json, "loads", real_loads),
+                            "forced RecursionError": mock.patch.object(json, "loads", loads)}.items():
+            with self.subTest(case=name):
+                with patch:
+                    text = self.plugin.handle({})
+                result = real_loads(text)
+                self.assertEqual(result["source"], "findmy")
+                self.assertEqual(result["phone_fix"], "missing: the phone location file is not valid")
+
+    def test_unexpected_exception_returns_tool_error(self):
+        self.write_fix(record())
+        with mock.patch.object(self.plugin, "_read_fix", side_effect=KeyError("boom")):
+            text = self.plugin.handle({})
+        result = json.loads(text)
+        self.assertEqual(set(result), {"error"})
+        self.assertIn("phone_location failed (KeyError)", result["error"])
+
+    def test_findmy_not_set_up_is_not_called(self):
+        self.install_findmy()
+        os.environ["FAKE_FINDMY_AVAILABLE"] = "0"
+        self.write_fix(record(minutes_ago=45))
+        result = self.call()
+        self.assertEqual(result["source"], "hermesconnect")
+        self.assertIn("Find My is not set up", result["note"])
+        self.assertEqual(self.findmy_calls(), 0, "the findmy handler must not run")
+
+    def test_findmy_available_check_that_fails_is_not_set_up(self):
+        self.install_findmy()
+        os.environ["FAKE_FINDMY_AVAILABLE"] = "raise"
+        result = self.call()
+        self.assertIn("Find My is not set up", result["error"])
+        self.assertEqual(self.findmy_calls(), 0)
+
+    def test_findmy_without_available_check_is_not_called(self):
+        self.install_findmy()
+        path = os.path.join(self.home, ".hermes", "plugins", "findmy", "__init__.py")
+        with open(path) as stream:
+            source = stream.read().replace("def _available():", "def _not_available_check():")
+        with open(path, "w") as out:
+            out.write(source)
+        result = self.call()
+        self.assertIn("Find My is not set up", result["error"])
+        self.assertEqual(self.findmy_calls(), 0)
+
+    def test_fifo_at_the_file_path_does_not_block(self):
+        self.install_findmy()
+        os.makedirs(os.path.dirname(self.location))
+        os.mkfifo(self.location)
+        result = self.call()
+        self.assertEqual(result["source"], "findmy")
+        self.assertEqual(result["phone_fix"], "missing: the phone location file is not valid")
 
     def test_symlinked_file_is_not_followed(self):
         self.install_findmy()

@@ -18,6 +18,7 @@ import json
 import math
 import os
 import re
+import stat
 from datetime import datetime, timezone
 from typing import Any, Optional, Tuple
 
@@ -26,7 +27,7 @@ from tools.registry import tool_error, tool_result
 TOOLSET = "phone_location"
 STALE_MINUTES = 30
 MAX_FILE_BYTES = 65536
-FUTURE_SLACK_MINUTES = 10
+FUTURE_SLACK_MINUTES = 5
 
 SETUP_HINT = (
     "Ask the owner to turn on location sharing in the HermesConnect app on their iPhone "
@@ -89,25 +90,28 @@ def _parse_time(value: Any) -> Optional[datetime]:
         fraction = (fraction + "000000")[:7]
     try:
         return datetime.fromisoformat(match.group(1) + fraction + zone).astimezone(timezone.utc)
-    except ValueError:
+    except (ValueError, OverflowError):  # OverflowError: year 1 or 9999 moved to UTC.
         return None
 
 
-def _read_fix(path: str) -> Tuple[Optional[dict], str]:
+def _read_fix(path: str, now: datetime) -> Tuple[Optional[dict], str]:
     """Return (fix, "") or (None, reason). The reason never contains file content."""
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        # O_NONBLOCK: a FIFO at this path must not block the tool.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     except FileNotFoundError:
         return None, "no phone location has arrived yet"
     except OSError:
         return None, "the phone location file cannot be read"
     try:
         with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("not a regular file")
             raw = stream.read(MAX_FILE_BYTES + 1)
         if len(raw) > MAX_FILE_BYTES:
             raise ValueError("too large")
         data = json.loads(raw.decode("utf-8"), parse_constant=lambda name: float("nan"))
-    except (OSError, ValueError, UnicodeDecodeError):
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
         return None, "the phone location file is not valid"
     if not isinstance(data, dict):
         return None, "the phone location file is not valid"
@@ -116,6 +120,8 @@ def _read_fix(path: str) -> Tuple[Optional[dict], str]:
     if (not _finite(lat) or not -90 <= lat <= 90 or not _finite(lon) or not -180 <= lon <= 180
             or not _finite(accuracy) or accuracy < 0 or when is None):
         return None, "the phone location file is not valid"
+    if (when - now).total_seconds() > FUTURE_SLACK_MINUTES * 60:
+        return None, "the phone location time is in the future (clock skew)"
     speed, course = data.get("speed"), data.get("course")
     return {
         "lat": float(lat),
@@ -153,7 +159,11 @@ def _phone_result(fix: dict, now: datetime, note: Optional[str] = None) -> dict:
 
 
 def _findmy() -> Tuple[Optional[dict], str]:
-    """Call the findmy plugin handler in this process. Return (data, "") or (None, reason)."""
+    """Call the findmy plugin handler in this process. Return (data, "") or (None, reason).
+
+    The handler runs only when the plugin's ``_available()`` returns True: the real
+    handler starts ``doppler`` and ``node``, which must not run when Find My is not set up.
+    """
     path = next((p for p in _findmy_paths() if os.path.isfile(p)), None)
     if path is None:
         return None, "Find My is not installed"
@@ -161,6 +171,16 @@ def _findmy() -> Tuple[Optional[dict], str]:
         spec = importlib.util.spec_from_file_location("_phone_location_findmy", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)  # type: ignore[union-attr]
+    except Exception as exc:  # never include addresses, credentials or coordinates
+        return None, f"Find My failed ({type(exc).__name__})"
+    available = getattr(module, "_available", None)
+    try:
+        ready = callable(available) and available() is True
+    except Exception:
+        ready = False
+    if not ready:
+        return None, "Find My is not set up"
+    try:
         data = json.loads(module.handle({}))
     except Exception as exc:  # never include addresses, credentials or coordinates
         return None, f"Find My failed ({type(exc).__name__})"
@@ -174,8 +194,16 @@ def _findmy() -> Tuple[Optional[dict], str]:
 
 
 def handle(args: dict, **kw: Any) -> str:
+    """Tool entry point. It never raises: the Hermes gateway must not see an exception."""
+    try:
+        return _handle()
+    except Exception as exc:  # never include file content or coordinates
+        return tool_error(f"phone_location failed ({type(exc).__name__}). Try again in a minute.")
+
+
+def _handle() -> str:
     now = datetime.now(timezone.utc)
-    fix, problem = _read_fix(_location_path())
+    fix, problem = _read_fix(_location_path(), now)
     if fix is not None and (now - fix["when"]).total_seconds() <= STALE_MINUTES * 60:
         return tool_result(_phone_result(fix, now))
 

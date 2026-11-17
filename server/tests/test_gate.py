@@ -365,6 +365,8 @@ class LocationTests(GateTestCase):
             "speed huge integer": huge_int_fix("speed"),
             "course huge integer": huge_int_fix("course"),
             "timestamp huge integer": huge_int_fix("timestamp"),
+            "timestamp year 1 east of UTC": fix(timestamp="0001-01-01T00:00:00+05:00"),
+            "timestamp year 9999 west of UTC": fix(timestamp="9999-12-31T23:59:59-05:00"),
         }
         for name, payload in cases.items():
             with self.subTest(case=name):
