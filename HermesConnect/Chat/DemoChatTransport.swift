@@ -24,6 +24,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case listEmpty = "list-empty"
         /// The session list before the first answer, with no cache (placeholder rows).
         case listLoading = "list-loading"
+        /// Issue #8: photo, file and location bubbles, a failed upload, rings, and 3 items in the strip.
+        case attachments
 
         static var current: Scenario? {
             ProcessInfo.processInfo.environment["HERMES_DEMO"].flatMap(Scenario.init(rawValue:))
@@ -34,7 +36,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             switch self {
             case .streaming: "What's the weather in Austin this weekend?"
             case .failed: "Can you check the server logs?"
-            case .live, .thread, .empty, .list, .listEmpty, .listLoading: nil
+            case .live, .thread, .empty, .list, .listEmpty, .listLoading, .attachments: nil
             }
         }
 
@@ -217,6 +219,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                                         date: recent.addingTimeInterval(100), reply: .failed(message: nil),
                                         promptId: "d7"))
         }
+        if scenario == .attachments { messages += AttachmentDemo.messages(now: now) }
         return messages
     }
 }

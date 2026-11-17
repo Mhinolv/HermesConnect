@@ -27,8 +27,14 @@ public enum ChatHistory {
                 let existing = row.rowId.flatMap { promptIdsByRow[$0] }.flatMap { used.contains($0) ? nil : $0 }
                 let id = existing ?? historyId(row, index: index)
                 used.insert(id)
-                result.append(ChatMessage(id: id, role: .user, text: text, date: date, delivery: .delivered,
-                                          userRowId: row.rowId))
+                var prompt = ChatMessage(id: id, role: .user, text: text, date: date, delivery: .delivered,
+                                         userRowId: row.rowId)
+                // Issue #8: the server text has the `@file:` refs. The bubble keeps the local text and items.
+                if let shown = existing.flatMap({ id in current.first { $0.id == id } }), !shown.attachments.isEmpty {
+                    prompt.text = shown.text
+                    prompt.attachments = shown.attachments
+                }
+                result.append(prompt)
                 promptId = id
                 replyIndex = nil
             case "assistant":

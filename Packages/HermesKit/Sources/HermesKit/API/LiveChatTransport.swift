@@ -143,7 +143,7 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport {
     // MARK: ChatTransport
 
     /// The current client, connected. A dropped socket reconnects once if the reason allows it.
-    private func readyClient() async throws -> GatewayClient {
+    func readyClient() async throws -> GatewayClient {
         guard let client else { throw GatewayError.notConnected }
         if let connectTask { await connectTask.value }
         guard client === self.client else { throw GatewayError.notConnected }

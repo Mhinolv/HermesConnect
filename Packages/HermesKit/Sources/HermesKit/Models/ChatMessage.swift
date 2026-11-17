@@ -39,9 +39,12 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
     public var userRowId: Int?
     /// For a reply: the id of the prompt that started the turn.
     public var promptId: String?
+    /// Issue #8: photos, files and the location card of an outgoing message, in pick order.
+    public var attachments: [ChatAttachment]
 
     public init(id: String, role: Role, text: String, date: Date, delivery: Delivery? = nil,
-                reply: Reply? = nil, userRowId: Int? = nil, promptId: String? = nil) {
+                reply: Reply? = nil, userRowId: Int? = nil, promptId: String? = nil,
+                attachments: [ChatAttachment] = []) {
         self.id = id
         self.role = role
         self.text = text
@@ -50,6 +53,7 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
         self.reply = reply
         self.userRowId = userRowId
         self.promptId = promptId
+        self.attachments = attachments
     }
 
     public var isFailed: Bool {

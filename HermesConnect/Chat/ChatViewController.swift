@@ -15,6 +15,8 @@ final class ChatViewController: MessagesViewController {
     private var pinnedToBottom = true
     private let scrollButton = UIButton(configuration: .glass())
     private var composerText = ""
+    /// Issue #8: the `plus` menu and the pending photos and files.
+    private let attachments = AttachmentComposer()
 
     init(model: ChatViewModel) {
         self.model = model
@@ -38,6 +40,7 @@ final class ChatViewController: MessagesViewController {
         maintainPositionOnInputBarHeightChanged = true
         configureLayout()
         configureComposer()
+        configureAttachments()
         restoreDraft()
         configureScrollButton()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, _) in
@@ -128,8 +131,23 @@ final class ChatViewController: MessagesViewController {
         send.tintColor = .systemBlue
         send.imageView?.contentMode = .scaleAspectFit
         bar.setRightStackViewWidthConstant(to: 36, animated: false)
-        bar.setLeftStackViewWidthConstant(to: 0, animated: false)
+        attachments.install(in: bar, presenter: self)
         updateSendButton()
+    }
+
+    private func configureAttachments() {
+        attachments.onChange = { [weak self] in self?.updateSendButton() }
+        attachments.sendNow = { [weak self] text, items in self?.model.send(text, attachments: items) }
+        AttachmentThumbnails.onReady[ObjectIdentifier(self)] = { [weak self] in self?.thumbnailsReady() }
+    }
+
+    /// A photo thumbnail finished decoding: put it in the visible photo bubbles.
+    private func thumbnailsReady() {
+        for case let cell as MediaMessageCell in messagesCollectionView.visibleCells {
+            guard let indexPath = messagesCollectionView.indexPath(for: cell),
+                  let item = bubble(at: indexPath)?.part.attachment else { continue }
+            cell.imageView.image = AttachmentThumbnails.image(for: item)
+        }
     }
 
     /// The draft of this session (issue #7) goes back into the composer.
@@ -177,6 +195,7 @@ final class ChatViewController: MessagesViewController {
     /// Send while there is text. Stop while a reply runs and the text is empty (owner decision 2026-11-16).
     private var showsStop: Bool {
         model.isReplyActive && composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !attachments.hasPending
     }
 
     private func updateSendButton() {
@@ -190,7 +209,9 @@ final class ChatViewController: MessagesViewController {
         } else {
             send.image = UIImage(systemName: "arrow.up.circle.fill", withConfiguration: symbol)
             send.tintColor = .systemBlue
+            // Issue #8: pending attachments also send, with no text.
             send.isEnabled = !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || attachments.hasPending
             send.accessibilityLabel = "Send"
         }
     }
@@ -229,10 +250,19 @@ final class ChatViewController: MessagesViewController {
         return text
     }
 
+    private func makeBubble(_ part: ChatBubblePart) -> ChatBubble {
+        guard let item = part.attachment else { return ChatBubble(part: part, text: styledText(for: part.row.message)) }
+        if item.showsAsImage {
+            return ChatBubble(part: part, text: NSAttributedString(), thumbnail: AttachmentThumbnails.image(for: item))
+        }
+        let text = AttachmentFileText.make(item, outgoing: part.row.message.role == .user, traits: traitCollection)
+        return ChatBubble(part: part, text: text)
+    }
+
     private func render() {
         guard isViewLoaded else { return }
         let rows = ChatTimeline.rows(for: model.messages, statusLine: model.statusLine)
-        let next = rows.map { ChatBubble(row: $0, text: styledText(for: $0.message)) }
+        let next = ChatBubbleParts.parts(for: rows).map(makeBubble)
         let old = bubbles
         let newOutgoing = next.last.map { last in
             last.row.message.role == .user && !old.contains { $0.row.id == last.row.id }
@@ -245,7 +275,7 @@ final class ChatViewController: MessagesViewController {
         }
 
         bubbles = next
-        if old.map(\.row.id) == next.map(\.row.id) {
+        if old.map(\.messageId) == next.map(\.messageId) {
             let changed = next.indices.filter { old[$0].row != next[$0].row }
             if !changed.isEmpty {
                 UIView.performWithoutAnimation {
@@ -324,6 +354,9 @@ final class ChatViewController: MessagesViewController {
     /// The pin state (tests).
     var isPinnedToBottom: Bool { pinnedToBottom }
 
+    /// The attachment composer (tests).
+    var attachmentComposer: AttachmentComposer? { attachments }
+
     // MARK: Rows
 
     private func bubble(at indexPath: IndexPath) -> ChatBubble? {
@@ -337,9 +370,10 @@ final class ChatViewController: MessagesViewController {
     override func collectionView(_ collectionView: UICollectionView,
                                  cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let cell = super.collectionView(collectionView, cellForItemAt: indexPath)
-        guard let row = bubble(at: indexPath)?.row else { return cell }
+        guard let part = bubble(at: indexPath)?.part else { return cell }
+        let row = part.row
         cell.isAccessibilityElement = true
-        cell.accessibilityLabel = ChatTimeline.accessibilityLabel(for: row)
+        cell.accessibilityLabel = ChatBubbleParts.accessibilityLabel(for: part)
         cell.accessibilityHint = switch row.footnote {
         case .notDelivered: "Double-tap for options."
         case .replyFailed: "Double-tap to retry."
@@ -370,10 +404,15 @@ final class ChatViewController: MessagesViewController {
     @objc func collectionView(_ collectionView: UICollectionView,
                               contextMenuConfigurationForItemsAt indexPaths: [IndexPath],
                               point _: CGPoint) -> UIContextMenuConfiguration? {
-        guard let indexPath = indexPaths.first, let row = bubble(at: indexPath)?.row else { return nil }
+        guard let indexPath = indexPaths.first, let part = bubble(at: indexPath)?.part else { return nil }
+        let row = part.row
         return UIContextMenuConfiguration(identifier: indexPath as NSIndexPath, previewProvider: nil) { [weak self] _ in
             var actions: [UIMenuElement] = [UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
-                UIPasteboard.general.string = row.message.text
+                if let item = part.attachment, item.showsAsImage {
+                    UIPasteboard.general.image = UIImage(contentsOfFile: item.fileURL.path)
+                } else {
+                    UIPasteboard.general.string = part.attachment?.name ?? row.message.text
+                }
             }]
             if row.message.delivery == .failed, let self {
                 actions += self.sendFailureActions(for: row)
@@ -418,6 +457,11 @@ final class ChatViewController: MessagesViewController {
 
     private func handleTap(in cell: MessageCollectionViewCell) {
         guard let indexPath = messagesCollectionView.indexPath(for: cell), let row = bubble(at: indexPath)?.row else {
+            return
+        }
+        // Issue #8: each part of a message that was not delivered opens the options.
+        if row.message.delivery == .failed {
+            showSendFailureOptions(for: row, from: cell)
             return
         }
         switch row.footnote {
@@ -539,7 +583,16 @@ extension ChatViewController: MessagesDisplayDelegate {
     func configureAccessoryView(_ accessoryView: UIView, for message: MessageType, at _: IndexPath,
                                 in _: MessagesCollectionView) {
         accessoryView.subviews.forEach { $0.removeFromSuperview() }
-        guard row(for: message)?.message.delivery == .failed else { return }
+        // Issue #8: a file part shows a spinner until its attach call returns.
+        if let bubble = message as? ChatBubble, let item = bubble.part.attachment, !item.showsAsImage,
+           Self.isUploading(item, in: bubble.row) {
+            let spinner = UIActivityIndicatorView(style: .medium)
+            spinner.frame = accessoryView.bounds
+            spinner.startAnimating()
+            accessoryView.addSubview(spinner)
+            return
+        }
+        guard row(for: message)?.footnote == .notDelivered else { return }
         let icon = UIImageView(image: UIImage(systemName: "exclamationmark.circle.fill"))
         icon.tintColor = .systemRed
         icon.contentMode = .scaleAspectFit
@@ -550,6 +603,21 @@ extension ChatViewController: MessagesDisplayDelegate {
     }
 
     func enabledDetectors(for _: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> [DetectorType] { [] }
+
+    /// Issue #8: the progress ring on a photo bubble until its attach call returns.
+    func configureMediaMessageImageView(_ imageView: UIImageView, for message: MessageType, at _: IndexPath,
+                                        in _: MessagesCollectionView) {
+        guard let bubble = message as? ChatBubble, let item = bubble.part.attachment else { return }
+        imageView.contentMode = .scaleAspectFill
+        imageView.backgroundColor = .secondarySystemFill
+        AttachmentProgressRing.update(on: imageView, uploading: Self.isUploading(item, in: bubble.row),
+                                      failed: item.upload == .failed)
+    }
+
+    /// The attach call runs, or waits for its turn while the message sends.
+    static func isUploading(_ item: ChatAttachment, in row: ChatRow) -> Bool {
+        item.upload == .uploading || (item.upload == .pending && row.message.delivery == .sending)
+    }
 }
 
 // MARK: - Taps
@@ -558,6 +626,7 @@ extension ChatViewController: @preconcurrency MessageCellDelegate {
     func didTapMessage(in cell: MessageCollectionViewCell) { handleTap(in: cell) }
     func didTapMessageBottomLabel(in cell: MessageCollectionViewCell) { handleTap(in: cell) }
     func didTapAccessoryView(in cell: MessageCollectionViewCell) { handleTap(in: cell) }
+    func didTapImage(in cell: MessageCollectionViewCell) { handleTap(in: cell) }
 }
 
 // MARK: - Composer
@@ -568,7 +637,8 @@ extension ChatViewController: InputBarAccessoryViewDelegate {
             model.stop()
             return
         }
-        guard model.send(text) != nil else { return }
+        guard model.send(text, attachments: attachments.pending) != nil else { return }
+        _ = attachments.takeAll()
         inputBar.inputTextView.text = ""
         composerText = ""
         model.updateDraft("")

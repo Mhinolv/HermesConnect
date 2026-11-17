@@ -10,15 +10,24 @@ struct ChatSender: SenderType {
     static let hermes = ChatSender(senderId: "hermes", displayName: "Hermes")
 }
 
-/// One MessageKit message: a `ChatRow` with its styled text.
+/// One MessageKit message: one part of a `ChatRow` with its styled text.
+/// Issue #8: a photo or location part draws as a photo, a file part as its file text.
 struct ChatBubble: MessageType {
-    let row: ChatRow
+    let part: ChatBubblePart
     let text: NSAttributedString
+    /// The photo of a photo part, if it is decoded.
+    var thumbnail: UIImage?
 
+    var row: ChatRow { part.row }
     var sender: SenderType { row.message.role == .user ? ChatSender.owner : ChatSender.hermes }
-    var messageId: String { row.id }
+    var messageId: String { part.id }
     var sentDate: Date { row.message.date }
-    var kind: MessageKind { .attributedText(text) }
+    var kind: MessageKind {
+        if let item = part.attachment, item.showsAsImage {
+            return .photo(AttachmentPhotoItem(attachment: item, image: thumbnail))
+        }
+        return .attributedText(text)
+    }
 }
 
 /// Bubble text: inline Markdown, code blocks and links, with Dynamic Type fonts (issue #6).

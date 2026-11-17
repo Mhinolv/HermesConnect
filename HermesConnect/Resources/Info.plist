@@ -28,7 +28,7 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>Hermes takes photos that you send to your agent.</string>
+	<string>Hermes uses the camera to take photos that you send to your agent.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Hermes uses Face ID to unlock the app.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
