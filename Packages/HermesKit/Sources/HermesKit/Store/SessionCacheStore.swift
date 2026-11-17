@@ -23,7 +23,8 @@ public enum SessionCache {
     public static let transcriptLimit = 500
     /// The file format version. Readers accept every version: missing keys get defaults.
     /// Version 2 (issue #10): voice memos, memos that were not delivered, and the audio of voice replies.
-    public static let formatVersion = 2
+    /// Version 3 (issue #11): agent acks and owner tapbacks.
+    public static let formatVersion = 3
     /// Issue #36: the transcript key of the new chat that has no server row yet. Its memos stay here,
     /// so a failed memo survives a quit. No stored id starts with `#`.
     public static let newChatId = "#new-chat"
@@ -138,6 +139,10 @@ struct CachedMessage: Codable, Equatable {
     var notDelivered: Bool
     var voice: CachedVoice?
     var speech: CachedSpeech?
+    /// Version 3: the raw value of `AgentAck`. Older files have no key.
+    var ack: String?
+    /// Version 3: the raw value of `Tapback`. Older files have no key.
+    var tapback: String?
 
     init(_ message: ChatMessage) {
         id = message.id
@@ -150,21 +155,27 @@ struct CachedMessage: Codable, Equatable {
         notDelivered = message.role == .user && message.delivery != .delivered
         voice = message.voice.map(CachedVoice.init)
         speech = message.spokenReply.map(CachedSpeech.init)
+        ack = message.agentAck?.rawValue
+        tapback = message.tapback?.rawValue
     }
 
     var message: ChatMessage {
+        let tapback = tapback.flatMap(Tapback.init(rawValue:))
         if role == "user" {
             let memo = voice?.memo(text: text)
+            // The eyes of a turn that ran at the last save: the turn state is not known now.
+            let ack = ack.flatMap(AgentAck.init(rawValue:)).flatMap { $0 == .seen ? nil : $0 }
             return ChatMessage(id: id, role: .user, text: memo.map { $0.transcript.text ?? "" } ?? text, date: date,
-                               delivery: notDelivered ? .failed : .delivered, userRowId: userRowId, voice: memo)
+                               delivery: notDelivered ? .failed : .delivered, userRowId: userRowId, voice: memo,
+                               agentAck: ack, tapback: tapback)
         }
         return ChatMessage(id: id, role: .assistant, text: text, date: date,
                            reply: interrupted ? .interrupted : .complete, promptId: promptId,
-                           spokenReply: speech?.spoken)
+                           spokenReply: speech?.spoken, tapback: tapback)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, text, date, userRowId, promptId, interrupted, notDelivered, voice, speech
+        case id, role, text, date, userRowId, promptId, interrupted, notDelivered, voice, speech, ack, tapback
     }
 
     init(from decoder: any Decoder) throws {
@@ -180,6 +191,9 @@ struct CachedMessage: Codable, Equatable {
         // A broken memo or speech entry drops only that part, never the message.
         voice = (try? container.decodeIfPresent(CachedVoice.self, forKey: .voice)) ?? nil
         speech = (try? container.decodeIfPresent(CachedSpeech.self, forKey: .speech)) ?? nil
+        // A broken or unknown reaction drops only the reaction.
+        ack = (try? container.decodeIfPresent(String.self, forKey: .ack)) ?? nil
+        tapback = (try? container.decodeIfPresent(String.self, forKey: .tapback)) ?? nil
     }
 }
 
