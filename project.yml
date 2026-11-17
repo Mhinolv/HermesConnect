@@ -32,7 +32,7 @@ targets:
         NSMicrophoneUsageDescription: Hermes records voice memos that you send to your agent.
         NSPhotoLibraryUsageDescription: Hermes attaches photos that you choose to your messages.
         NSCameraUsageDescription: Hermes takes photos that you send to your agent.
-        NSFaceIDUsageDescription: Hermes uses Face ID to unlock your SSH key.
+        NSFaceIDUsageDescription: Hermes uses Face ID to unlock the app.
         NSLocationWhenInUseUsageDescription: Hermes shares your location with your agent when you ask it to.
         ITSAppUsesNonExemptEncryption: false
     settings:
