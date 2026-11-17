@@ -50,7 +50,11 @@ targets:
   HermesConnectTests:
     type: bundle.unit-test
     platform: iOS
-    sources: [HermesConnectTests]
+    sources:
+      - HermesConnectTests
+      # Issue #42: the Ogg Opus reply fixture of the HermesKit tests, so the decode runs on iOS too.
+      - path: Packages/HermesKit/Tests/HermesKitTests/Fixtures/voice-reply.ogg
+        buildPhase: resources
     dependencies:
       - target: HermesConnect
 schemes:

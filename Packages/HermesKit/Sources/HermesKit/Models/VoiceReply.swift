@@ -115,7 +115,7 @@ public enum VoiceReplySettings {
 
 /// Issue #36: why a voice reply has no audio.
 public enum VoiceReplyError: Error, Equatable {
-    /// iOS has no decoder for the audio (for example `.ogg` Opus) or the bytes are not audio.
+    /// The bytes are not audio that iOS plays, or a broken Ogg Opus stream (issue #42).
     case cannotDecode
 }
 
@@ -143,19 +143,34 @@ public enum VoiceReplyFiles {
     /// Writes the audio to a new file in `folder` and reads its length.
     /// Issue #36: audio that does not decode, or has no length, throws `VoiceReplyError.cannotDecode`
     /// and leaves no file. The bubble then shows the error state with retry, not a ready 0 s bubble.
+    /// Issue #42: Ogg Opus (found by its "OggS" bytes, for any MIME type) is decoded to a WAV file first.
+    /// AVAudioPlayer opens an Ogg file and reads its length, but it cannot play it.
     public static func save(_ audio: SpokenAudio, in folder: URL = directory()) throws -> VoiceReplyAudio {
+        let isOgg = OggOpus.isOgg(audio.data)
+        let data = isOgg ? try OggOpus.wav(from: audio.data) : audio.data
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let url = folder.appending(path: "\(UUID().uuidString).\(fileExtension(mimeType: audio.mimeType))")
+        let ext = isOgg ? "wav" : fileExtension(mimeType: audio.mimeType)
+        let url = folder.appending(path: "\(UUID().uuidString).\(ext)")
         var options: Data.WritingOptions = [.atomic]
         #if os(iOS)
         options.insert(.completeFileProtectionUntilFirstUserAuthentication)
         #endif
-        try audio.data.write(to: url, options: options)
-        let duration = (try? AVAudioPlayer(contentsOf: url).duration) ?? 0
-        guard duration.isFinite, duration > 0 else {
+        try data.write(to: url, options: options)
+        guard let duration = playableDuration(url) else {
             try? FileManager.default.removeItem(at: url)
             throw VoiceReplyError.cannotDecode
         }
         return VoiceReplyAudio(fileURL: url, duration: duration)
+    }
+
+    /// The length of a file that the player opens and that decodes to audio frames, else `nil`.
+    /// Issue #42: the length alone is not enough, because AVAudioPlayer reads it from an Ogg file too.
+    /// The check reads a few frames and does not touch the audio session, so other audio keeps playing.
+    static func playableDuration(_ url: URL) -> TimeInterval? {
+        guard let duration = try? AVAudioPlayer(contentsOf: url).duration, duration.isFinite, duration > 0,
+              let file = try? AVAudioFile(forReading: url),
+              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 4_096),
+              (try? file.read(into: buffer, frameCount: 4_096)) != nil, buffer.frameLength > 0 else { return nil }
+        return duration
     }
 }

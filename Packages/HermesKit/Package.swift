@@ -10,6 +10,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "HermesKit", dependencies: [.product(name: "Citadel", package: "Citadel")]),
-        .testTarget(name: "HermesKitTests", dependencies: ["HermesKit", .product(name: "Citadel", package: "Citadel")]),
+        .testTarget(name: "HermesKitTests", dependencies: ["HermesKit", .product(name: "Citadel", package: "Citadel")],
+                    resources: [.copy("Fixtures")]),
     ]
 )
