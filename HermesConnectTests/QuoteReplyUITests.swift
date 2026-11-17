@@ -68,6 +68,18 @@ import UIKit
         #expect(!bubble.text.string.contains(">"))
     }
 
+    /// QA #80 defect 1: a reply of a photo only shows the quote line in its own text bubble.
+    @Test func aPhotoOnlyReplyShowsTheQuoteLine() throws {
+        let photo = ChatAttachment(id: "p1", kind: .photo, name: "IMG_1.jpg", byteCount: 10,
+                                   fileURL: URL(fileURLWithPath: "/tmp/IMG_1.jpg"), mimeType: "image/jpeg")
+        let quote = ChatQuote(messageId: "a1", author: .assistant, time: "9:41 AM", excerpt: "The call is at 3:00 PM.")
+        let sent = ChatMessage(id: "u9", role: .user, text: "", date: date, delivery: .delivered, attachments: [photo],
+                               quote: quote)
+        let text = ChatBubbleText.make(sent, traits: UITraitCollection(preferredContentSizeCategory: .large))
+        #expect(text.string == "The call is at 3:00 PM.")
+        #expect(text.attribute(ChatQuoteText.tapKey, at: 0, effectiveRange: nil) != nil)
+    }
+
     @Test func voiceOverReadsTheQuoteFirstAndHasReplyActions() throws {
         let (controller, _) = makeController()
         let quoted = try cell(controller, section: 2)

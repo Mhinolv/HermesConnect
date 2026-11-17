@@ -54,6 +54,12 @@ enum ChatBubbleText {
     /// `width` is the widest text line of the bubble. A table shows as a grid only when it fits in it.
     static func make(_ message: ChatMessage, traits: UITraitCollection, width: CGFloat? = nil) -> NSAttributedString {
         let outgoing = message.role == .user
+        if message.text.isEmpty, let quote = message.quote {
+            // Issue #17 (QA #80): a reply of attachments only. The text bubble is the quote line.
+            let line = ChatQuoteText.make(quote, style: ChatMarkdownText.Style(traits: traits, outgoing: outgoing))
+            line.deleteCharacters(in: NSRange(location: line.length - 1, length: 1))
+            return line
+        }
         if message.text.isEmpty {
             // A failed reply with no text.
             let body = UIFont.preferredFont(forTextStyle: .body, compatibleWith: traits)

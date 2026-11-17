@@ -43,7 +43,7 @@ final class QuoteComposerView: UIView {
         textGroup.addSubview(stack)
         var config = UIButton.Configuration.plain()
         config.image = UIImage(systemName: "xmark.circle.fill",
-                               withConfiguration: UIImage.SymbolConfiguration(textStyle: .body, scale: .large))
+                               withConfiguration: UIImage.SymbolConfiguration(pointSize: 22))
         config.baseForegroundColor = .secondaryLabel
         config.contentInsets = .zero
         cancelButton.configuration = config
@@ -72,7 +72,8 @@ final class QuoteComposerView: UIView {
             stack.leadingAnchor.constraint(equalTo: textGroup.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: textGroup.trailingAnchor),
             // A 44 pt hit area for "Cancel Reply".
-            cancelButton.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            // The circle stays inside the 44 pt area at every text size, with space from the edge (QA #80).
+            cancelButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -4),
             cancelButton.centerYAnchor.constraint(equalTo: content.centerYAnchor),
             cancelButton.widthAnchor.constraint(equalToConstant: 44),
             cancelButton.heightAnchor.constraint(equalToConstant: 44),
@@ -286,6 +287,9 @@ enum QuoteDemo: String {
         case .sent: break
         case .swipe:
             Task { @MainActor in
+                // At large text sizes the bubble is above the screen: scroll to it first (QA #80).
+                try? await Task.sleep(for: .milliseconds(300))
+                controller.scrollToMessageForDemo(id: "d4")
                 // The status line reloads the rows, so the demo holds the swipe for 10 s.
                 for _ in 0..<20 {
                     try? await Task.sleep(for: .milliseconds(500))

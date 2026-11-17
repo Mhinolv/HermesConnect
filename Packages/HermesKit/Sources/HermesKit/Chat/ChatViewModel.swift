@@ -362,6 +362,8 @@ public final class ChatViewModel {
     public func sendVoiceMemo(_ memo: VoiceMemo) -> Task<Void, Never> {
         let id = makeId()
         thread.addOutgoingVoice(id: id, memo: memo, date: now())
+        // Issue #17 (QA #80): a memo does not quote. The reply ends, so the composer box goes away.
+        replyQuote = nil
         redrawNow()
         // The owner never loses a recording: the memo is in the cache before the upload starts.
         saveTranscript()

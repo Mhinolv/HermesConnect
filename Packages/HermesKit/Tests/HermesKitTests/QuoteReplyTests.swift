@@ -182,6 +182,17 @@ private func tempDirectory() -> URL {
         #expect(transport.submits[1].text.hasSuffix("\n> Hi\n\nHello"))
     }
 
+    /// QA #80: a voice memo does not quote. It clears the quote, so the box does not quote the next text.
+    @Test func aVoiceMemoClearsTheQuote() async {
+        let transport = FakeChatTransport()
+        let vm = model(transport, messages: [reply("Hi")])
+        vm.startReply(to: "a1")
+        let memo = VoiceMemo(fileURL: URL(fileURLWithPath: "/tmp/quote-memo.m4a"), duration: 2, waveform: [0.5])
+        _ = vm.sendVoiceMemo(memo)
+        #expect(vm.replyQuote == nil)
+        #expect(vm.messages.last?.quote == nil)
+    }
+
     @Test func aTapOnTheQuoteFindsTheOriginal() async throws {
         let transport = FakeChatTransport()
         let vm = model(transport, messages: [reply("Older", id: "a0"), reply("The call is at 3.")])
@@ -276,5 +287,24 @@ private final class QuoteCounter: @unchecked Sendable {
         store.saveTranscript(loaded, sessionId: "k1")
         let raw = try String(contentsOf: url, encoding: .utf8)
         #expect(raw.contains(#""version":6"#))
+    }
+}
+
+/// QA #80 defect 1: a reply with attachments and no text still shows its quote line.
+@Suite struct QuoteReplyPartsTests {
+    @Test func aReplyOfAttachmentsOnlyHasATextPartForTheQuote() throws {
+        let photo = ChatAttachment(id: "p1", kind: .photo, name: "IMG_1.jpg", byteCount: 10,
+                                   fileURL: URL(fileURLWithPath: "/tmp/IMG_1.jpg"), mimeType: "image/jpeg")
+        let sent = ChatMessage(id: "u1", role: .user, text: "", date: nineFortyOne, delivery: .delivered,
+                               attachments: [photo], quote: quote("The call is at 3."))
+        let row = try #require(ChatTimeline.rows(for: [sent]).first)
+        let parts = ChatBubbleParts.parts(for: row)
+        #expect(parts.map(\.id) == ["u1#p1", "u1#text"])
+        #expect(parts.last?.content == .text)
+        // No quote: the photo only, as before.
+        var plain = sent
+        plain.quote = nil
+        let plainRow = try #require(ChatTimeline.rows(for: [plain]).first)
+        #expect(ChatBubbleParts.parts(for: plainRow).map(\.id) == ["u1#p1"])
     }
 }

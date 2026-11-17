@@ -58,7 +58,8 @@ public enum ChatBubbleParts {
             parts = files.isEmpty || !row.message.text.isEmpty ? [ChatBubblePart(row: row, content: .text, id: row.id)] : []
         } else {
             parts = items.map { ChatBubblePart(row: row, content: .attachment($0), id: "\(row.id)#\($0.id)") }
-            if !row.message.text.isEmpty {
+            // Issue #17 (QA #80): a reply of attachments only keeps a text bubble for its quote line.
+            if !row.message.text.isEmpty || row.message.quote != nil {
                 parts.append(ChatBubblePart(row: row, content: .text, id: "\(row.id)#text"))
             }
         }
