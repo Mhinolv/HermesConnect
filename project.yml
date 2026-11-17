@@ -7,7 +7,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    DEVELOPMENT_TEAM: 37GMXLK849
+    DEVELOPMENT_TEAM: V8X3GYRTNK
     CODE_SIGN_STYLE: Automatic
 packages:
   HermesKit:
