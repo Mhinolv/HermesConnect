@@ -102,7 +102,7 @@ private func tempFolder() -> URL {
         #expect(loaded == [reply])
         #expect(loaded.first?.spokenReply?.audio?.waveform == levels)
         let raw = try String(contentsOf: cache.transcriptURL(sessionId: "k"), encoding: .utf8)
-        #expect(raw.contains(#""version":4"#))
+        #expect(raw.contains("\"version\":\(SessionCache.formatVersion)"))
         #expect(raw.contains(#""waveform""#))
     }
 

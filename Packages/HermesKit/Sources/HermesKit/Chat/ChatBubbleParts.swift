@@ -11,6 +11,8 @@ public struct ChatBubblePart: Sendable, Equatable, Identifiable {
         /// with ready audio, as the only bubble of the reply, with the reply text under it. While the audio is
         /// on its way, or after it failed, the text bubble shows with a caption row (QA #54).
         case spokenReply
+        /// Issue #12: one file of a `MEDIA:` tag, as its own incoming bubble after the text, in tag order.
+        case receivedFile(ReceivedFile)
     }
 
     /// The row with the labels of this part only.
@@ -22,24 +24,47 @@ public struct ChatBubblePart: Sendable, Equatable, Identifiable {
         if case .attachment(let item) = content { return item }
         return nil
     }
+
+    public var receivedFile: ReceivedFile? {
+        if case .receivedFile(let file) = content { return file }
+        return nil
+    }
 }
 
 public enum ChatBubbleParts {
     public static func parts(for row: ChatRow) -> [ChatBubblePart] {
+        var row = row
         let items = row.message.attachments
         var parts: [ChatBubblePart]
+        // Issue #12: the `MEDIA:` tags leave the text. Their files show after it when the reply has ended.
+        var files: [ReceivedFile] = []
+        if row.message.role == .assistant, row.message.text.contains("MEDIA:") {
+            let split = MediaTags.split(row.message.text)
+            if row.message.reply == .streaming {
+                // A tag that is still on its way does not flash in the bubble.
+                if !split.text.isEmpty { row.message.text = split.text }
+            } else {
+                row.message.text = split.text
+                files = split.files
+            }
+        }
         if let spoken = row.message.spokenReply, spoken.audio != nil, items.isEmpty {
             // Issue #49: one voice bubble with the row id. The text bubble had the same id, so the row reloads
             // in place and the scroll does not jump. "Preparing audio…" and the retry line are the text
             // bubble footnote (QA #54), so there is no empty audio bubble.
-            return [ChatBubblePart(row: row, content: .spokenReply, id: row.id)]
+            parts = [ChatBubblePart(row: row, content: .spokenReply, id: row.id)]
         } else if items.isEmpty {
-            return [ChatBubblePart(row: row, content: .text, id: row.id)]
+            // Issue #12: a reply of tags only shows only its file bubbles. The first one keeps the row id.
+            parts = files.isEmpty || !row.message.text.isEmpty ? [ChatBubblePart(row: row, content: .text, id: row.id)] : []
         } else {
             parts = items.map { ChatBubblePart(row: row, content: .attachment($0), id: "\(row.id)#\($0.id)") }
             if !row.message.text.isEmpty {
                 parts.append(ChatBubblePart(row: row, content: .text, id: "\(row.id)#text"))
             }
+        }
+        for (index, file) in files.enumerated() {
+            let id = parts.isEmpty ? row.id : "\(row.id)#file\(index)"
+            parts.append(ChatBubblePart(row: row, content: .receivedFile(file), id: id))
         }
         for index in parts.indices {
             if index > 0 {
@@ -86,6 +111,7 @@ public enum ChatBubbleParts {
             return ([spokenReplyLabel(spoken)] + (text.isEmpty ? [] : [text])
                 + ChatTimeline.reactionLabels(for: part.row)).joined(separator: ", ")
         }
+        if let file = part.receivedFile { return receivedFileLabel(file, byteCount: nil, row: part.row) }
         guard let item = part.attachment else { return ChatTimeline.accessibilityLabel(for: part.row) }
         var parts: [String]
         switch item.kind {
@@ -100,6 +126,21 @@ public enum ChatBubbleParts {
         }
         parts += ChatTimeline.reactionLabels(for: part.row)
         if let footnote = part.row.footnote, footnote == .notDelivered { parts.append(footnote.text) }
+        return parts.joined(separator: ", ")
+    }
+
+    /// Issue #12: "Hermes sent a photo", or "Hermes sent a file, report.pdf, 2 MB" when the size is known.
+    public static func receivedFileLabel(_ file: ReceivedFile, byteCount: Int?, row: ChatRow,
+                                         state: String? = nil) -> String {
+        var parts: [String]
+        switch file.kind {
+        case .image: parts = ["Hermes sent a photo"]
+        case .audio: parts = ["Hermes sent an audio file", file.name]
+        case .file: parts = ["Hermes sent a file", file.name]
+        }
+        if let byteCount, file.kind != .image { parts.append(AttachmentPayload.sizeText(byteCount)) }
+        if let state { parts.append(state) }
+        parts += ChatTimeline.reactionLabels(for: row)
         return parts.joined(separator: ", ")
     }
 

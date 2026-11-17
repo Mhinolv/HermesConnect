@@ -72,6 +72,8 @@ public final class ChatViewModel {
     @ObservationIgnored private(set) var keepsNewChat: Bool
     /// Issue #67: the prompt text of a `send` or `skill` result, by message id. The bubble shows `display`.
     @ObservationIgnored private var commandPrompts: [String: String] = [:]
+    /// Issue #12: the downloads of the `MEDIA:` files of this chat.
+    @ObservationIgnored public let receivedFiles: ReceivedFileLoader
     /// Metadata only: ids, counts and states. Never the text of a message (issue #18).
     @ObservationIgnored private let log = HermesLog(category: "chat")
 
@@ -87,8 +89,10 @@ public final class ChatViewModel {
                 loadAudio: @escaping @Sendable (URL) throws -> Data = { try Data(contentsOf: $0) },
                 removeAudio: @escaping @Sendable (URL) -> Void = { try? FileManager.default.removeItem(at: $0) },
                 saveSpeech: @escaping @Sendable (SpokenAudio) throws -> VoiceReplyAudio = { try VoiceReplyFiles.save($0) },
-                transcription: VoiceTranscription = .server) {
+                transcription: VoiceTranscription = .server,
+                receivedFiles: ReceivedFileLoader? = nil) {
         self.transport = transport
+        self.receivedFiles = receivedFiles ?? ReceivedFileLoader(transport: transport, storedSessionId: { nil })
         self.transcription = transcription
         self.saveSpeech = saveSpeech
         self.loadAudio = loadAudio
@@ -111,6 +115,7 @@ public final class ChatViewModel {
         }
         self.thread = ChatThread(messages: initial)
         self.messages = initial
+        self.receivedFiles.storedSessionId = { [weak self] in self?.storedSessionId }
     }
 
     /// The composer text that the owner did not send. One draft per session.

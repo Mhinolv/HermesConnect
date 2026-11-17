@@ -56,6 +56,10 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case tapbacks
         /// Issue #11: the same thread with the tapback capsule open on a reply.
         case tapbacksPicker = "tapbacks-picker"
+        /// Issue #12: a reply with `MEDIA:` files in each state: image, PDF, audio, a ring, an error, a large file.
+        case receivedFiles = "received-files"
+        /// Issue #12: the same thread with the PDF open in Quick Look.
+        case receivedFilesPreview = "received-files-preview"
 
         /// Issue #56: the owner's grocery table reply.
         case markdownTable = "markdown-table"
@@ -95,7 +99,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             case .streaming: "What's the weather in Austin this weekend?"
             case .failed: "Can you check the server logs?"
             case .live, .thread, .keyboard, .empty, .list, .listEmpty, .listLoading, .voice, .recording, .hold, .paused,
-                 .attachments, .voiceReplies, .voiceRepliesPaused, .voiceReplyText, .tapbacks, .tapbacksPicker, .markdownTable, .markdownTableTop, .markdownSheet, .markdownBlocks,
+                 .attachments, .voiceReplies, .voiceRepliesPaused, .voiceReplyText, .tapbacks, .tapbacksPicker, .receivedFiles, .receivedFilesPreview, .markdownTable, .markdownTableTop, .markdownSheet, .markdownBlocks,
                  .markdownBlocksTop, .catchUp, .catchUpPill,
                  .notificationSettings, .notificationsOff, .voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading,
                  .voiceSettingsReady, .voiceSettingsDamaged, .slashCommands: nil
@@ -414,6 +418,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                                         command: ChatCommandCard(command: "/foo", output: "Unknown command: /foo",
                                                                  isError: true)))
         }
+        if scenario == .receivedFiles || scenario == .receivedFilesPreview { messages += ReceivedFileDemo.messages(now: now) }
         if scenario.showsTapbacks { messages += Self.tapbackMessages(now: now) }
         if scenario.showsMarkdown {
             let late = now.addingTimeInterval(-60)
@@ -567,6 +572,16 @@ final class DemoVoiceRecorder: VoiceRecording {
         default:
             break
         }
+    }
+}
+#endif
+
+#if DEBUG
+/// Issue #12: fixture downloads for `HERMES_DEMO=received-files`. No network. The path picks the result.
+extension DemoChatTransport: ReceivedFileDownloading {
+    func downloadReceivedFile(path: String, storedSessionId _: String?, maxBytes: Int?,
+                              progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
+        try await ReceivedFileDemo.download(path: path, maxBytes: maxBytes, progress: progress)
     }
 }
 #endif
