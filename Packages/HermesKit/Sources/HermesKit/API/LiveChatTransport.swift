@@ -209,6 +209,17 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
         }
     }
 
+    /// Issue #64: one REST call on the forwarded port, as `transcribe`. A refused token asks for a new session once.
+    func withREST<Output>(_ body: (HermesRESTClient) async throws -> Output) async throws -> Output {
+        guard let endpoint else { throw GatewayError.notConnected }
+        do {
+            return try await body(makeREST(endpoint))
+        } catch {
+            if Self.isStaleToken(error), endpoint == self.endpoint, status == .ready { staleToken() }
+            throw error
+        }
+    }
+
     public func history(sessionId: String) async throws -> [TranscriptMessage] {
         try await readyClient().history(sessionId: sessionId)
     }

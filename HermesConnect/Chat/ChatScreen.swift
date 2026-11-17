@@ -7,9 +7,27 @@ import SwiftUI
 struct ChatScreen: View {
     let model: ChatViewModel
     var link: LiveChatTransport?
+    /// Issue #64: the title menu renames the session through the list. `nil` (previews) shows no menu.
+    var sessions: SessionListModel?
     /// The server has no row for this session (`session.resume` 4007). The root drops it and shows the list.
     var onSessionGone: () -> Void = {}
     @Environment(NotificationController.self) private var notifications: NotificationController?
+    @State private var actions = SessionActionState()
+
+    init(model: ChatViewModel, link: LiveChatTransport? = nil, sessions: SessionListModel? = nil,
+         onSessionGone: @escaping () -> Void = {}) {
+        self.model = model
+        self.link = link
+        self.sessions = sessions
+        self.onSessionGone = onSessionGone
+    }
+
+    /// Issue #64: "Rename" in the title menu. A new chat with no stored id has no menu.
+    private var renameAction: (() -> Void)? {
+        guard sessions != nil, let id = model.storedSessionId else { return nil }
+        let title = model.title ?? ""
+        return { actions.startRename(SessionActionTarget(id: id, title: title)) }
+    }
 
     var body: some View {
         ChatThreadView(model: model)
@@ -25,9 +43,10 @@ struct ChatScreen: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
-                    ChatNavigationTitle(title: model.title, link: link, updating: model.isUpdating)
+                    ChatNavigationTitle(title: model.title, link: link, updating: model.isUpdating, onRename: renameAction)
                 }
             }
+            .modifier(OptionalSessionActionDialogs(state: actions, model: sessions))
             .onAppear { model.startEvents() }
             // Issue #15: ask for notification permission after the first reply, not at first launch.
             .onChange(of: model.completedReplyId) { _, id in
@@ -48,15 +67,37 @@ struct ChatNavigationTitle: View {
     var link: LiveChatTransport?
     /// Issue #15: `open()` merges the server history into the cached messages.
     var updating = false
+    /// Issue #64: with an action, the title is a menu with "Rename", like a `.toolbarTitleMenu`.
+    var onRename: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
-            Text(title ?? "New Chat")
-                .font(.headline)
-                .lineLimit(1)
+            if let onRename {
+                Menu {
+                    Button("Rename", systemImage: "pencil", action: onRename)
+                } label: {
+                    HStack(spacing: 3) {
+                        titleText
+                        Image(systemName: "chevron.down")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                    }
+                    .foregroundStyle(.primary)
+                }
+                .accessibilityHint("Shows the chat actions.")
+            } else {
+                titleText
+            }
             status
         }
         .accessibilityElement(children: .contain)
+    }
+
+    private var titleText: some View {
+        Text(title ?? "New Chat")
+            .font(.headline)
+            .lineLimit(1)
     }
 
     @ViewBuilder private var status: some View {
@@ -93,6 +134,20 @@ struct ChatNavigationTitle: View {
             .accessibilityHint("Double-tap to retry.")
         case .connection:
             ConnectionStatusView()
+        }
+    }
+}
+
+/// Issue #64: the session action dialogs when the screen has a session list.
+private struct OptionalSessionActionDialogs: ViewModifier {
+    let state: SessionActionState
+    let model: SessionListModel?
+
+    func body(content: Content) -> some View {
+        if let model {
+            content.sessionActionDialogs(state, model: model)
+        } else {
+            content
         }
     }
 }
@@ -310,7 +365,7 @@ enum ChatLaunch {
     static func makeDemoSessions() -> SessionListModel {
         guard let scenario = DemoChatTransport.Scenario.current else { return makeOfflineSessions() }
         let transport = DemoChatTransport(scenario: scenario)
-        let rows = scenario == .list ? DemoChatTransport.sessionRows() : []
+        let rows = scenario.hasListRows ? DemoChatTransport.sessionRows() : []
         let active = scenario.showsList || scenario == .empty ? nil : DemoChatTransport.storedId
         let cache = InMemorySessionCacheStore(sessions: rows, activeSessionId: active)
         let sessions = SessionListModel(transport: transport, chatTransport: transport, cache: cache)
@@ -330,7 +385,9 @@ enum ChatLaunch {
 
     /// The route that a demo pushes at launch: the seeded chat, or a new chat for `empty`.
     static var demoLaunchRoute: ChatRoute? {
-        guard let scenario = DemoChatTransport.Scenario.current, !scenario.showsList else { return nil }
+        guard let scenario = DemoChatTransport.Scenario.current else { return nil }
+        if scenario == .archived { return .archived }
+        guard !scenario.showsList else { return nil }
         return scenario == .empty ? .new("demo") : .session(DemoChatTransport.storedId)
     }
     #endif

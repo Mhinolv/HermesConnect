@@ -7,6 +7,7 @@ import Observation
 ///   (most recent activity first), with the same ids, so the list does not jump.
 /// - A connect and the `sessions.changed` event refresh the list. `session.title` renames a row.
 /// - The model keeps one `ChatViewModel` per session, so a reply that streams behind the list still ends.
+/// - Issue #64: rename, archive, unarchive and delete. The row changes at once. A failure puts it back and throws.
 @MainActor @Observable
 public final class SessionListModel {
     public private(set) var sessions: [SessionListItem]
@@ -16,6 +17,14 @@ public final class SessionListModel {
     /// Issue #15: the stored id of the chat on the screen. A refresh never gives it the blue dot.
     /// It follows the chat, so a New Chat counts as soon as `session.create` gives it an id (QA #38 defect 2).
     public var openSessionId: String? { openChatModel?.storedSessionId }
+    /// Issue #64: the rows that the list does not show. #73 hides cron runs here.
+    public var filter = SessionListFilter()
+    /// Issue #64: the number of archived sessions. The "Archived" row shows when it is more than 0.
+    public private(set) var archivedCount = 0
+    /// Issue #64: the rows of the Archived list, newest first. `refreshArchived()` loads them.
+    public private(set) var archivedSessions: [SessionListItem] = []
+    /// Issue #64: `true` after the first answer of `refreshArchived()`.
+    public private(set) var hasLoadedArchived = false
 
     @ObservationIgnored private let transport: any SessionsTransport
     @ObservationIgnored private let chatTransport: any ChatTransport
@@ -26,6 +35,8 @@ public final class SessionListModel {
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private weak var openChatModel: ChatViewModel?
+    /// Issue #64: rows with an archive or delete call in progress. A refresh does not bring them back.
+    @ObservationIgnored private var pendingRemovals: Set<String> = []
 
     /// `transport` and `chatTransport` are the same `LiveChatTransport` in the app. Tests give fakes.
     public init(transport: any SessionsTransport, chatTransport: any ChatTransport, cache: any SessionCacheStore,
@@ -39,10 +50,10 @@ public final class SessionListModel {
         hasLoaded = !cached.isEmpty
     }
 
-    /// The rows that match the search text (title or preview). An empty query gives every row.
+    /// The rows that match the search text (title or preview) and the list filter. An empty query gives every row.
     /// Issue #73: no cron runs. The Jobs tab shows them. Catch-up and the app badge still count them.
     public func filtered(_ query: String) -> [SessionListItem] {
-        sessions.filter { !$0.isCronRun && $0.matches(query) }
+        sessions.filter { !$0.isCronRun && filter.includes($0) && $0.matches(query) }
     }
 
     public func session(id: String) -> SessionListItem? {
@@ -70,15 +81,19 @@ public final class SessionListModel {
     private func load() async {
         isRefreshing = true
         defer { isRefreshing = false }
-        guard let rows = try? await transport.fetchSessions() else { return }
+        guard var rows = try? await transport.fetchSessions() else { return }
+        rows.removeAll { pendingRemovals.contains($0.id) }
         let unread = Set(sessions.filter(\.isUnread).map(\.id))
         // Issue #15: a row with more messages than the shown row has new content (blue dot).
         let newContent = Set(CatchUp.changedSessions(cached: sessions, fresh: rows))
         let merged = CatchUp.markUnread(rows, unread: unread, newContent: newContent, openSessionId: openSessionId)
         hasLoaded = true
-        guard merged != sessions else { return }
-        sessions = merged
-        cache.saveSessions(merged)
+        if merged != sessions {
+            sessions = merged
+            cache.saveSessions(merged)
+        }
+        // Issue #64: after the list, so the list never waits for it.
+        await loadArchivedCount()
     }
 
     /// The chat screen of `chat` appeared. Its session loses the blue dot and gets no new one.
@@ -171,12 +186,157 @@ public final class SessionListModel {
         cache.saveSessions(sessions)
     }
 
+    // MARK: Rename, archive, delete (issue #64)
+
+    private var actions: (any SessionActionsTransport)? { transport as? any SessionActionsTransport }
+
+    /// Renames a session. The row and the open chat show the new title at once. A failure puts the old
+    /// title back and throws. The server writes `state.db`, so the desktop app shows the title too.
+    public func rename(_ id: String, to newTitle: String) async throws {
+        let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { throw SessionActionError.emptyTitle }
+        guard let actions else { throw SessionActionError.notSupported }
+        let oldRowTitle = session(id: id)?.title
+        let chat = existingChat(for: id)
+        let oldChatTitle = chat?.title
+        setRowTitle(id, title)
+        chat?.applyTitle(title)
+        do {
+            try await actions.renameSession(storedId: id, title: title)
+        } catch {
+            // Put the old title back, unless a newer title came in while the call ran.
+            if session(id: id)?.title == title { setRowTitle(id, oldRowTitle) }
+            if chat?.title == title { chat?.applyTitle(oldChatTitle) }
+            throw error
+        }
+    }
+
+    /// Archives a session (`session.archive`). The row leaves the list at once. A failure puts it back and throws.
+    public func archive(_ id: String) async throws {
+        guard let actions else { throw SessionActionError.notSupported }
+        let removed = removeRow(id)
+        pendingRemovals.insert(id)
+        defer { pendingRemovals.remove(id) }
+        do {
+            try await actions.setSessionArchived(storedId: id, archived: true)
+        } catch {
+            restore(removed)
+            throw error
+        }
+        // QA #76: launch and Ask Hermes open the active id. An archived chat must not open there.
+        if cache.loadActiveSessionId() == id { cache.saveActiveSessionId(nil) }
+        archivedCount += 1
+        if hasLoadedArchived, let row = removed.row, !archivedSessions.contains(where: { $0.id == id }) {
+            archivedSessions.insert(row, at: 0)
+        }
+    }
+
+    /// Unarchives a session from the Archived list. A failure puts the row back and throws.
+    /// On success the main list loads again, so the row shows in its place.
+    public func unarchive(_ id: String) async throws {
+        guard let actions else { throw SessionActionError.notSupported }
+        let removed = removeRow(id)
+        do {
+            try await actions.setSessionArchived(storedId: id, archived: false)
+        } catch {
+            restore(removed)
+            throw error
+        }
+        await refresh()
+    }
+
+    /// Deletes a session on the server, from the main list or the Archived list. The row leaves at once.
+    /// - An open or live chat closes first (`session.close`), so the server does not refuse with 4023.
+    /// - On success the chat model, the transcript, the draft and the active id leave the cache.
+    /// - A failure puts the row back and throws.
+    public func delete(_ id: String) async throws {
+        guard let actions else { throw SessionActionError.notSupported }
+        let removed = removeRow(id)
+        pendingRemovals.insert(id)
+        defer { pendingRemovals.remove(id) }
+        do {
+            if let chat = existingChat(for: id), let live = chat.liveSessionId {
+                // A close that fails (for example an old live id) does not stop the delete.
+                try? await actions.closeSession(liveId: live)
+                chat.liveSessionClosed()
+            }
+            try await actions.deleteSession(storedId: id)
+        } catch {
+            restore(removed)
+            throw error
+        }
+        forget(id)
+        cache.removeSession(sessionId: id)
+    }
+
+    /// Loads the Archived list (`archived=only`). A failure keeps the rows that show.
+    public func refreshArchived() async {
+        guard let actions, let page = try? await actions.fetchArchivedSessions(limit: Self.archivedPageSize)
+        else { return }
+        archivedSessions = page.sessions.filter { !pendingRemovals.contains($0.id) }
+        archivedCount = max(page.total - (page.sessions.count - archivedSessions.count), archivedSessions.count)
+        hasLoadedArchived = true
+    }
+
+    /// The server caps a page at 100 rows.
+    static let archivedPageSize = 100
+
+    private func loadArchivedCount() async {
+        guard let actions, let page = try? await actions.fetchArchivedSessions(limit: 1) else { return }
+        if archivedCount != page.total { archivedCount = page.total }
+    }
+
+    private func existingChat(for id: String) -> ChatViewModel? {
+        chats[id] ?? chats.values.first { $0.storedSessionId == id }
+    }
+
+    private func setRowTitle(_ id: String, _ title: String?) {
+        guard let index = sessions.firstIndex(where: { $0.id == id }), sessions[index].title != title else { return }
+        sessions[index].title = title
+        cache.saveSessions(sessions)
+    }
+
+    /// A row that an action took out of a list, with its place.
+    private struct RemovedRow {
+        var row: SessionListItem?
+        var index: Int?
+        var archivedRow: SessionListItem?
+        var archivedIndex: Int?
+    }
+
+    private func removeRow(_ id: String) -> RemovedRow {
+        var removed = RemovedRow()
+        if let index = sessions.firstIndex(where: { $0.id == id }) {
+            removed.row = sessions.remove(at: index)
+            removed.index = index
+            cache.saveSessions(sessions)
+        }
+        if let index = archivedSessions.firstIndex(where: { $0.id == id }) {
+            removed.archivedRow = archivedSessions.remove(at: index)
+            removed.archivedIndex = index
+            archivedCount = max(archivedCount - 1, 0)
+        }
+        return removed
+    }
+
+    private func restore(_ removed: RemovedRow) {
+        if let row = removed.row, let index = removed.index, !sessions.contains(where: { $0.id == row.id }) {
+            sessions.insert(row, at: min(index, sessions.count))
+            cache.saveSessions(sessions)
+        }
+        if let row = removed.archivedRow, let index = removed.archivedIndex,
+           !archivedSessions.contains(where: { $0.id == row.id }) {
+            archivedSessions.insert(row, at: min(index, archivedSessions.count))
+            archivedCount += 1
+        }
+    }
+
     // MARK: Chats
 
     /// The chat of a stored session. The same id gives the same model. A new chat that got this
     /// stored id from `session.create` is the same model too.
     public func chat(for id: String) -> ChatViewModel {
-        if let chat = chats[id] ?? chats.values.first(where: { $0.storedSessionId == id }) { return chat }
+        if let chat = existingChat(for: id) { return chat }
         let title = session(id: id).map(\.displayTitle)
         let chat = ChatViewModel(transport: chatTransport, storedSessionId: id, title: title, cache: cache,
                                  transcription: transcription)
@@ -213,5 +373,21 @@ public final class SessionListModel {
         chat.startEvents()
         chats[key] = chat
         return chat
+    }
+}
+
+/// Issue #64: which rows the session list shows. The server already leaves out archived rows.
+/// #73 (Jobs tab) adds `"cron"` to `hiddenSources`.
+public struct SessionListFilter: Sendable, Equatable {
+    /// Rows with one of these `source` values do not show.
+    public var hiddenSources: Set<String>
+
+    public init(hiddenSources: Set<String> = []) {
+        self.hiddenSources = hiddenSources
+    }
+
+    public func includes(_ item: SessionListItem) -> Bool {
+        guard let source = item.source else { return true }
+        return !hiddenSources.contains(source)
     }
 }

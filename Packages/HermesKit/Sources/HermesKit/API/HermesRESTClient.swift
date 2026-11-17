@@ -56,20 +56,25 @@ public struct SessionsPage: Decodable, Sendable, Equatable {
 /// Query of `GET /api/sessions`. The server caps `limit` at 100.
 public struct SessionsQuery: Sendable, Equatable {
     public enum Order: String, Sendable { case created, recent }
+    /// Issue #64: `archived` of `GET /api/sessions`. The server default is `exclude`.
+    public enum Archived: String, Sendable { case exclude, only, include }
 
     public var limit: Int
     public var offset: Int
     public var order: Order
     public var source: String?
     public var excludeSources: [String]
+    /// `nil` sends no `archived` item (the server excludes archived rows).
+    public var archived: Archived?
 
     public init(limit: Int = 40, offset: Int = 0, order: Order = .recent, source: String? = nil,
-                excludeSources: [String] = []) {
+                excludeSources: [String] = [], archived: Archived? = nil) {
         self.limit = limit
         self.offset = offset
         self.order = order
         self.source = source
         self.excludeSources = excludeSources
+        self.archived = archived
     }
 
     var queryItems: [URLQueryItem] {
@@ -80,6 +85,7 @@ public struct SessionsQuery: Sendable, Equatable {
         if !excludeSources.isEmpty {
             items.append(URLQueryItem(name: "exclude_sources", value: excludeSources.joined(separator: ",")))
         }
+        if let archived { items.append(URLQueryItem(name: "archived", value: archived.rawValue)) }
         return items
     }
 }
@@ -98,6 +104,24 @@ public struct SessionMessagesPage: Decodable, Sendable, Equatable {
     public var pagination: Pagination
 
     private enum CodingKeys: String, CodingKey { case sessionId = "session_id", messages, pagination }
+}
+
+/// `GET /api/sessions/{id}/mutation-snapshot` result (issue #64).
+public struct SessionMutationSnapshot: Decodable, Sendable, Equatable {
+    public var exists: Bool
+    public var runtimeRevision: Int
+    public var runtimeGeneration: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case exists, runtimeRevision = "runtime_revision", runtimeGeneration = "runtime_generation"
+    }
+}
+
+/// The fence of one session change (`apps/shared/src/session-http-mutations.ts`).
+struct SessionMutationIdentity: Sendable, Equatable {
+    var requestId: String
+    var expectedRevision: Int
+    var expectedGeneration: Int?
 }
 
 /// `GET /api/health` result (`web_routers/status.py:119-130`). It is public: no token.
@@ -143,18 +167,107 @@ public struct HermesRESTClient: Sendable {
     /// from the newest row (docs/hermes-protocol.md 3.5). The server caps `limit` at 500.
     public func messages(storedSessionId: String, limit: Int = 100, offset: Int = 0,
                          order: String = "latest", inlineImages: Bool = false) async throws -> SessionMessagesPage {
-        var allowed = CharacterSet.urlPathAllowed
-        allowed.remove(charactersIn: "/")
-        guard !storedSessionId.isEmpty,
-              let encodedId = storedSessionId.addingPercentEncoding(withAllowedCharacters: allowed) else {
-            throw HermesAPIError.notFound
-        }
+        let encodedId = try Self.pathComponent(storedSessionId)
         return try await get("/api/sessions/\(encodedId)/messages", query: [
             URLQueryItem(name: "limit", value: String(min(max(limit, 0), 500))),
             URLQueryItem(name: "offset", value: String(max(offset, 0))),
             URLQueryItem(name: "order", value: order),
             URLQueryItem(name: "inline_images", value: inlineImages ? "true" : "false"),
         ])
+    }
+
+    /// A stored id as one path component. An empty id is `notFound`.
+    static func pathComponent(_ storedSessionId: String) throws -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        guard !storedSessionId.isEmpty,
+              let encodedId = storedSessionId.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            throw HermesAPIError.notFound
+        }
+        return encodedId
+    }
+
+    // MARK: Session changes (issue #64)
+
+    /// `GET /api/sessions/{id}/mutation-snapshot` (`web_routers/sessions.py:585-598`). The revision fences a change.
+    public func mutationSnapshot(storedSessionId: String) async throws -> SessionMutationSnapshot {
+        try await get("/api/sessions/\(try Self.pathComponent(storedSessionId))/mutation-snapshot", query: [])
+    }
+
+    /// `PATCH /api/sessions/{id}` with `title` (`sessions.py:933-941`). It works with the stored id, so the
+    /// session does not have to be live. The server writes `state.db`, so the desktop app shows the new title.
+    /// The write is fenced like the desktop app: read the snapshot, then send `request_id` and `expected_revision`.
+    public func renameSession(storedSessionId: String, title: String) async throws {
+        let identity = try await mutationIdentity(storedSessionId: storedSessionId)
+        var request = request(path: "/api/sessions/\(try Self.pathComponent(storedSessionId))", query: [])
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(SessionRenameBody(title: title, identity: identity))
+        try await mutate(request)
+    }
+
+    /// `DELETE /api/sessions/{id}` (`sessions.py:853-883`), fenced like `renameSession`. Already absent is a success.
+    public func deleteSession(storedSessionId: String) async throws {
+        let identity: SessionMutationIdentity
+        do {
+            identity = try await mutationIdentity(storedSessionId: storedSessionId)
+        } catch HermesAPIError.notFound {
+            return // Already absent: a success, as the server answers for DELETE.
+        }
+        var items = [URLQueryItem(name: "request_id", value: identity.requestId),
+                     URLQueryItem(name: "expected_revision", value: String(identity.expectedRevision))]
+        if let generation = identity.expectedGeneration {
+            items.append(URLQueryItem(name: "expected_generation", value: String(generation)))
+        }
+        var request = request(path: "/api/sessions/\(try Self.pathComponent(storedSessionId))", query: items)
+        request.httpMethod = "DELETE"
+        try await mutate(request)
+    }
+
+    private func mutationIdentity(storedSessionId: String) async throws -> SessionMutationIdentity {
+        let snapshot = try await mutationSnapshot(storedSessionId: storedSessionId)
+        guard snapshot.exists else { throw HermesAPIError.notFound }
+        guard snapshot.runtimeRevision >= 0 else { throw HermesAPIError.invalidResponse }
+        return SessionMutationIdentity(requestId: UUID().uuidString.lowercased(),
+                                       expectedRevision: snapshot.runtimeRevision,
+                                       expectedGeneration: snapshot.runtimeGeneration)
+    }
+
+    /// A change call. A refusal with a `detail` text is `SessionActionError.refused`, so the alert can show it.
+    private func mutate(_ request: URLRequest) async throws {
+        let (data, response) = try await loader.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw HermesAPIError.invalidResponse }
+        switch http.statusCode {
+        case 200..<300: return
+        case 401: throw HermesAPIError.unauthorized
+        default:
+            let detail = (try? JSONDecoder().decode(ErrorDetail.self, from: data))?.detail
+            if let detail, !detail.isEmpty { throw SessionActionError.refused(status: http.statusCode, detail: detail) }
+            if http.statusCode == 404 { throw HermesAPIError.notFound }
+            throw HermesAPIError.http(status: http.statusCode)
+        }
+    }
+
+    private struct ErrorDetail: Decodable {
+        var detail: String?
+    }
+
+    private struct SessionRenameBody: Encodable {
+        var title: String
+        var identity: SessionMutationIdentity
+
+        private enum CodingKeys: String, CodingKey {
+            case title, requestId = "request_id", expectedRevision = "expected_revision"
+            case expectedGeneration = "expected_generation"
+        }
+
+        func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(title, forKey: .title)
+            try container.encode(identity.requestId, forKey: .requestId)
+            try container.encode(identity.expectedRevision, forKey: .expectedRevision)
+            try container.encodeIfPresent(identity.expectedGeneration, forKey: .expectedGeneration)
+        }
     }
 
     /// `GET /api/health`, with no token. A 2xx answer means that the server runs.
