@@ -23,14 +23,20 @@ extension CLLocationManager: LocationManaging {}
 
 /// Starts and ends an iOS background task around one upload, so that the upload can finish in the background.
 struct BackgroundTasks {
-    var begin: @MainActor () -> UIBackgroundTaskIdentifier
+    /// Start a task. iOS calls `onExpire` on the main thread if the time runs out first.
+    /// `onExpire` must end the task before it returns, or iOS ends the app.
+    var begin: @MainActor (_ onExpire: @escaping @MainActor () -> Void) -> UIBackgroundTaskIdentifier
     var end: @MainActor (UIBackgroundTaskIdentifier) -> Void
 
     static let live = BackgroundTasks(
-        begin: { UIApplication.shared.beginBackgroundTask(withName: "location-upload", expirationHandler: nil) },
+        begin: { onExpire in
+            UIApplication.shared.beginBackgroundTask(withName: "location-upload") {
+                MainActor.assumeIsolated { onExpire() }
+            }
+        },
         end: { if $0 != .invalid { UIApplication.shared.endBackgroundTask($0) } }
     )
-    static let none = BackgroundTasks(begin: { .invalid }, end: { _ in })
+    static let none = BackgroundTasks(begin: { _ in .invalid }, end: { _ in })
 }
 
 /// Automatic location sharing (issue #13, research.md D4).
@@ -96,6 +102,8 @@ final class LocationController: NSObject {
     @ObservationIgnored private var oneShotPending = false
     /// The uploads that run now. Tests wait for them.
     @ObservationIgnored private var uploads: [UUID: Task<Void, Never>] = [:]
+    /// The iOS background task of each upload. An entry is removed when the task ends, so it ends only once.
+    @ObservationIgnored private var backgroundTasks: [UUID: UIBackgroundTaskIdentifier] = [:]
 
     static let enabledKey = "locationSharingEnabled"
     static let precisionKey = "locationPrecision"
@@ -264,18 +272,32 @@ final class LocationController: NSObject {
     }
 
     /// Run one upload step inside an iOS background task, then update the status for Settings.
+    ///
+    /// If iOS ends the background time first, the expiration handler cancels the upload (the SSH connection
+    /// closes) and ends the task at once. `LocationSharing` keeps the fix as unsent, so the next connect sends it.
     private func run(_ work: @escaping @MainActor (LocationSharing, LocationPrecision) async -> Void) {
-        let task = background.begin()
         let sharing = sharing
         let precision = precision
         let id = UUID()
+        backgroundTasks[id] = background.begin { [weak self] in self?.expire(id) }
         // The task runs on the main actor, so it starts after `uploads[id]` is set.
         uploads[id] = Task { [weak self] in
             await work(sharing, precision)
             await self?.refreshStatus()
-            self?.background.end(task)
+            self?.endBackgroundTask(id)
             self?.uploads[id] = nil
         }
+    }
+
+    /// The iOS expiration handler: cancel the upload and end the background task now.
+    private func expire(_ id: UUID) {
+        uploads[id]?.cancel()
+        endBackgroundTask(id)
+    }
+
+    private func endBackgroundTask(_ id: UUID) {
+        guard let task = backgroundTasks.removeValue(forKey: id) else { return }
+        background.end(task)
     }
 
     private func refreshStatus() async {

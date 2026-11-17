@@ -2,6 +2,7 @@ import CoreLocation
 import Foundation
 import HermesKit
 import Testing
+import UIKit
 @testable import HermesConnect
 
 /// A fake Core Location manager. It records the calls and never asks iOS.
@@ -29,6 +30,30 @@ private final class FakeLocationManager: LocationManaging {
     func requestLocation() { locationRequests += 1 }
 }
 
+/// A fake iOS background-task runner. Tests fire the expiration handler by hand.
+@MainActor
+private final class FakeBackgroundTasks {
+    private var next = 1
+    private(set) var begun = 0
+    private(set) var ended: [UIBackgroundTaskIdentifier] = []
+    private var handlers: [UIBackgroundTaskIdentifier: @MainActor () -> Void] = [:]
+
+    var tasks: BackgroundTasks {
+        BackgroundTasks(begin: { [self] onExpire in
+            let id = UIBackgroundTaskIdentifier(rawValue: next)
+            next += 1
+            begun += 1
+            handlers[id] = onExpire
+            return id
+        }, end: { [self] id in ended.append(id) })
+    }
+
+    /// iOS ran out of background time: call each open expiration handler, as iOS does.
+    func expireAll() {
+        for (id, handler) in handlers where !ended.contains(id) { handler() }
+    }
+}
+
 private let t0 = Date(timeIntervalSince1970: 1_800_000_000)
 
 private func fix(_ lat: Double = 37.3349, at time: Date = t0) -> LocationFix {
@@ -47,13 +72,14 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0) -> LocationFix {
 
     private func make(_ status: CLAuthorizationStatus = .notDetermined, enabled: Bool = false,
                       failure: LocationUploadError? = nil, defaults: UserDefaults? = nil,
-                      store: InMemoryLocationStateStore = InMemoryLocationStateStore()) -> Rig {
+                      store: InMemoryLocationStateStore = InMemoryLocationStateStore(),
+                      background: BackgroundTasks = .none) -> Rig {
         let suite = defaults ?? UserDefaults(suiteName: "loc-\(UUID().uuidString)")!
         if enabled { suite.set(true, forKey: LocationController.enabledKey) }
         let manager = FakeLocationManager(status)
         let uploader = ScriptedLocationUploader(failure: failure)
         let sharing = LocationSharing(store: store, uploader: uploader)
-        let controller = LocationController(manager: manager, sharing: sharing, defaults: suite)
+        let controller = LocationController(manager: manager, sharing: sharing, defaults: suite, background: background)
         return Rig(controller: controller, manager: manager, uploader: uploader, store: store, defaults: suite)
     }
 
@@ -119,6 +145,65 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0) -> LocationFix {
         #expect(rig.uploader.payloads.count == 1)
         #expect(rig.store.load().lastSent == fix(37.31, at: t0.addingTimeInterval(5)))
         #expect(rig.controller.status.lastSentAt != nil)
+    }
+
+    @Test func eachUploadEndsItsBackgroundTaskOnce() async {
+        let tasks = FakeBackgroundTasks()
+        let rig = make(.authorizedAlways, enabled: true, background: tasks.tasks)
+        rig.controller.received([fix()])
+        await rig.controller.waitForUploads()
+        #expect(tasks.begun == 1)
+        #expect(tasks.ended.count == 1)
+        // A late expiry after the end does nothing.
+        tasks.expireAll()
+        #expect(tasks.ended.count == 1)
+    }
+
+    @Test func expiryCancelsTheUploadEndsTheTaskAndKeepsTheFix() async throws {
+        let tasks = FakeBackgroundTasks()
+        let rig = make(.authorizedAlways, enabled: true, background: tasks.tasks)
+        let started = AsyncStream<Void>.makeStream()
+        rig.uploader.duringUpload = {
+            started.continuation.yield()
+            // A slow server: the upload waits until iOS takes the time away.
+            try? await Task.sleep(for: .seconds(60))
+        }
+        rig.controller.received([fix()])
+        for await _ in started.stream { break }
+        #expect(tasks.ended.isEmpty)
+
+        tasks.expireAll()
+        // The handler ends the task before it returns, as iOS requires.
+        #expect(tasks.ended.count == 1)
+        await rig.controller.waitForUploads()
+        #expect(tasks.ended.count == 1)
+        #expect(rig.store.load().pending == fix())
+        #expect(rig.store.load().lastSentAt == nil)
+        #expect(rig.controller.status.waitingForConnection)
+
+        // The next connect sends the kept fix.
+        rig.uploader.duringUpload = nil
+        rig.controller.didConnect()
+        await rig.controller.waitForUploads()
+        #expect(rig.store.load().pending == nil)
+        #expect(rig.store.load().lastSent == fix())
+        #expect(tasks.ended.count == 2)
+    }
+
+    @Test func expiryOfAManualSendShowsNotDelivered() async {
+        let tasks = FakeBackgroundTasks()
+        let rig = make(.authorizedAlways, background: tasks.tasks)
+        let started = AsyncStream<Void>.makeStream()
+        rig.uploader.duringUpload = {
+            started.continuation.yield()
+            try? await Task.sleep(for: .seconds(60))
+        }
+        rig.controller.sendCurrentLocation()
+        rig.controller.received([fix()])
+        for await _ in started.stream { break }
+        tasks.expireAll()
+        await rig.controller.waitForUploads()
+        #expect(rig.controller.manualSend == .notDelivered)
     }
 
     @Test func aFixWithSharingOffIsIgnored() async {

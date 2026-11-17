@@ -66,6 +66,8 @@ public struct GateLocationUploader: LocationUploading {
                 let connection = try await connector.connect(profile: credentials.profile, key: credentials.key)
                 let reply: String
                 do {
+                    // The app cancels the upload when iOS ends the background time.
+                    try Task.checkCancellation()
                     reply = try await connection.session.execute(.location, stdin: payload)
                 } catch {
                     await connection.session.close()
@@ -79,6 +81,9 @@ public struct GateLocationUploader: LocationUploading {
         } catch let error as SSHConnectionError {
             throw .connection(error)
         } catch is DeadlineExceeded {
+            throw .timedOut
+        } catch is CancellationError {
+            // iOS ended the background time. The fix stays unsent.
             throw .timedOut
         } catch {
             throw .connection(.unreachable)
@@ -118,5 +123,7 @@ public final class ScriptedLocationUploader: LocationUploading, @unchecked Senda
         }
         await hook?()
         if let failure { throw failure }
+        // A cancelled real upload never reaches `OK`.
+        if Task.isCancelled { throw .timedOut }
     }
 }

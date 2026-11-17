@@ -457,8 +457,67 @@ private extension LocationFix {
         await #expect(throws: LocationUploadError.timedOut) { try await uploader.upload(Data("{}".utf8)) }
     }
 
+    @Test func cancelClosesTheSessionAndGivesTimedOut() async throws {
+        let transport = SlowLocationTransport()
+        let uploader = GateLocationUploader(connector: HostConnector(transport: transport)) {
+            LocationCredentials(profile: ServerProfile(host: "vps.example.com", hostKey: .sample), key: key)
+        }
+        let upload = Task { () -> LocationUploadError? in
+            do { try await uploader.upload(Data("{}".utf8)); return nil } catch { return error as? LocationUploadError }
+        }
+        while !transport.locationStarted { try await Task.sleep(for: .milliseconds(10)) }
+        upload.cancel()
+        #expect(await upload.value == .timedOut)
+        #expect(transport.closedSessions == 1)
+    }
+
+    @Test func cancelBeforeTheCommandSendsNothing() async {
+        let transport = ScriptedSSHTransport(hostKey: .sample)
+        let upload = Task { () -> LocationUploadError? in
+            withUnsafeCurrentTask { $0?.cancel() }
+            do { try await self.uploader(transport).upload(Data("{}".utf8)); return nil } catch { return error as? LocationUploadError }
+        }
+        #expect(await upload.value == .timedOut)
+        #expect(!transport.record.commands.contains(.location))
+    }
+
     @Test func defaultTimeoutFitsABackgroundTask() {
         #expect(GateLocationUploader.defaultTimeout == .seconds(25))
+    }
+}
+
+/// A transport that connects at once, answers `ping`, and holds `location` until the task is cancelled.
+private final class SlowLocationTransport: SSHTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _started = false
+    private var _closed = 0
+    var locationStarted: Bool { lock.withLock { _started } }
+    var closedSessions: Int { lock.withLock { _closed } }
+
+    func connect(to endpoint: SSHEndpoint, key: DeviceKey,
+                 checkHostKey: @escaping @Sendable (HostKey) throws -> Void) async throws -> any SSHSession {
+        try checkHostKey(.sample)
+        return Session(transport: self)
+    }
+
+    fileprivate func markStarted() { lock.withLock { _started = true } }
+    fileprivate func markClosed() { lock.withLock { _closed += 1 } }
+
+    private struct Session: SSHSession {
+        let transport: SlowLocationTransport
+
+        func execute(_ command: GateCommand, stdin: Data?) async throws -> String {
+            if command == .ping { return "PONG 1\n" }
+            transport.markStarted()
+            try await Task.sleep(for: .seconds(60))
+            return "OK\n"
+        }
+
+        func openLoopbackForward(remotePort: Int) async throws -> any LoopbackForward {
+            throw SSHConnectionError.forwardFailed
+        }
+
+        func close() async { transport.markClosed() }
     }
 }
 
