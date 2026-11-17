@@ -58,8 +58,9 @@ public enum ChatHistory {
                 let id = existing?.id ?? historyId(row, index: index)
                 used.insert(id)
                 let reply: ChatMessage.Reply = existing?.reply == .interrupted ? .interrupted : .complete
+                // Issue #10: a reply on the screen keeps its spoken audio.
                 result.append(ChatMessage(id: id, role: .assistant, text: text, date: date, reply: reply,
-                                          promptId: promptId))
+                                          promptId: promptId, spokenReply: existing?.spokenReply))
                 replyIndex = result.count - 1
             default:
                 continue

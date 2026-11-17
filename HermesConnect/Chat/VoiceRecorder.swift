@@ -358,35 +358,65 @@ final class VoiceMemoController {
 
 // MARK: - Playback
 
-/// Plays the owner's own memos, one at a time. Voice replies are issue #10.
+/// Plays one clip at a time: the owner's memos (#9) and the voice replies (#10). A new playback stops
+/// the old one. A tap on the clip that plays pauses it, and the next tap goes on from the same point.
+/// The session is `.playback` with `.spokenAudio`, and it ducks other audio, so it plays over car audio.
 @MainActor
 final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
+    /// The loaded clip, playing or paused.
     private(set) var playingURL: URL?
+    private(set) var isPlaying = false
     private var player: AVAudioPlayer?
+    private var timer: Timer?
+    private var observer: (any NSObjectProtocol)?
+    /// The play state changed. The screen draws the play and pause icons again.
     var onChange: (() -> Void)?
+    /// About 10 times per second while a clip plays: the clip, its time and its length.
+    var onProgress: ((URL, TimeInterval, TimeInterval) -> Void)?
+
+    var currentTime: TimeInterval { player?.currentTime ?? 0 }
+
+    func isPlaying(_ url: URL) -> Bool { isPlaying && playingURL == url }
 
     func toggle(_ url: URL) {
-        if playingURL == url {
-            stop()
+        if playingURL == url, let player {
+            if player.isPlaying {
+                player.pause()
+                setPlaying(false)
+            } else {
+                resume()
+            }
         } else {
             play(url)
         }
     }
 
-    func play(_ url: URL) {
+    func play(_ url: URL, from time: TimeInterval = 0) {
         stop()
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
-            try AVAudioSession.sharedInstance().setActive(true)
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+            try session.setActive(true)
             let player = try AVAudioPlayer(contentsOf: url)
             player.delegate = self
+            player.currentTime = min(max(0, time), player.duration)
             guard player.play() else { return }
             self.player = player
             playingURL = url
+            observeInterruptions()
+            setPlaying(true)
         } catch {
-            // A missing or broken file plays nothing. The memo stays.
+            // A missing or broken file plays nothing. The bubble stays.
+            onChange?()
         }
-        onChange?()
+    }
+
+    /// The owner dragged the progress bar. A clip that is not loaded starts at that point.
+    func seek(_ url: URL, to time: TimeInterval) {
+        guard playingURL == url, let player else { return play(url, from: time) }
+        player.currentTime = min(max(0, time), player.duration)
+        onProgress?(url, player.currentTime, player.duration)
+        if !player.isPlaying { resume() }
     }
 
     func stop() {
@@ -394,8 +424,60 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
         player?.stop()
         player = nil
         playingURL = nil
+        isPlaying = false
+        stopTimer()
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        observer = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         onChange?()
+    }
+
+    private func resume() {
+        guard let player else { return }
+        try? AVAudioSession.sharedInstance().setActive(true)
+        guard player.play() else { return }
+        setPlaying(true)
+    }
+
+    private func setPlaying(_ playing: Bool) {
+        isPlaying = playing
+        if playing { startTimer() } else { stopTimer() }
+        onChange?()
+    }
+
+    private func startTimer() {
+        stopTimer()
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func tick() {
+        guard let player, let url = playingURL else { return }
+        onProgress?(url, player.currentTime, player.duration)
+    }
+
+    /// A phone call or Siri pauses the clip. The owner taps play to go on.
+    private func observeInterruptions() {
+        guard observer == nil else { return }
+        observer = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil,
+                                                          queue: .main) { [weak self] note in
+            let began = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                .flatMap(AVAudioSession.InterruptionType.init(rawValue:)) == .began
+            guard began else { return }
+            MainActor.assumeIsolated {
+                guard let self, self.isPlaying else { return }
+                self.player?.pause()
+                self.setPlaying(false)
+            }
+        }
     }
 
     nonisolated func audioPlayerDidFinishPlaying(_: AVAudioPlayer, successfully _: Bool) {

@@ -11,6 +11,8 @@ public struct ChatRow: Sendable, Equatable, Identifiable {
         case stopped
         /// A voice memo with no speech in it. No turn was sent (issue #9).
         case noSpeech
+        /// The speak call of a voice reply failed (issue #10). A tap tries again.
+        case audioUnavailable
 
         public var text: String {
             switch self {
@@ -20,10 +22,13 @@ public struct ChatRow: Sendable, Equatable, Identifiable {
             case .replyFailed: "Reply failed. Tap to retry."
             case .stopped: "Stopped"
             case .noSpeech: "No speech found."
+            case .audioUnavailable: "Audio unavailable. Tap to retry."
             }
         }
 
-        public var isError: Bool { self == .notDelivered || self == .replyFailed || self == .noSpeech }
+        public var isError: Bool {
+            self == .notDelivered || self == .replyFailed || self == .noSpeech || self == .audioUnavailable
+        }
     }
 
     public var message: ChatMessage
@@ -74,7 +79,7 @@ public enum ChatTimeline {
             switch message.reply {
             case .failed: return .replyFailed
             case .interrupted: return .stopped
-            default: return nil
+            default: return message.spokenReply == .failed ? .audioUnavailable : nil
             }
         }
     }

@@ -22,9 +22,9 @@ struct ChatBubble: MessageType {
     var sender: SenderType { row.message.role == .user ? ChatSender.owner : ChatSender.hermes }
     var messageId: String { part.id }
     var sentDate: Date { row.message.date }
-    /// A voice memo draws in `ChatVoiceCell` (issue #9). Issue #8: a photo or location part draws as a photo.
+    /// A voice memo and the audio of a voice reply (issue #10) draw in `ChatVoiceCell` (issue #9). Issue #8: a photo or location part draws as a photo.
     var kind: MessageKind {
-        if row.message.voice != nil { return .custom(nil) }
+        if row.message.voice != nil || part.content == .spokenReply { return .custom(nil) }
         if let item = part.attachment, item.showsAsImage {
             return .photo(AttachmentPhotoItem(attachment: item, image: thumbnail))
         }

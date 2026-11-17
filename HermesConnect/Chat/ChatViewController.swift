@@ -25,6 +25,10 @@ final class ChatViewController: MessagesViewController {
     /// Styled text per message id. Built again when the text or the text size changes.
     private var textCache: [String: (source: String, size: UIContentSizeCategory, text: NSAttributedString)] = [:]
     private var announcedReplyId: String?
+    /// Issue #10: the last voice reply that the screen auto-played, or chose not to play.
+    private var handledAutoPlayId: String?
+    /// "Auto-Play Voice Replies" in Settings > Voice. Tests set it.
+    var autoPlayEnabled: () -> Bool = { VoiceReplySettings.autoPlay() }
     /// The thread follows new text. A drag away from the bottom unpins it, and the `arrow.down` button shows.
     private var pinnedToBottom = true
     private let scrollButton = UIButton(configuration: .glass())
@@ -68,6 +72,8 @@ final class ChatViewController: MessagesViewController {
             self.updateComposerBorder()
         }
         announcedReplyId = model.completedReplyId
+        // A reply that got its audio before this screen opened does not play now.
+        handledAutoPlayId = model.autoPlayReplyId
         render()
         observeModel()
     }
@@ -207,6 +213,7 @@ final class ChatViewController: MessagesViewController {
         voice.onAccessDenied = { [weak self] in self?.showMicrophoneOff() }
         voice.onRecordFailed = { [weak self] in self?.showRecordFailed() }
         player.onChange = { [weak self] in self?.reloadVoiceRows() }
+        player.onProgress = { [weak self] url, time, _ in self?.showProgress(url: url, time: time) }
         updateSendButton()
     }
 
@@ -292,9 +299,53 @@ final class ChatViewController: MessagesViewController {
     }
 
     private func togglePlay(id: String) {
-        guard !voice.isActive, let memo = model.messages.first(where: { $0.id == id })?.voice else { return }
-        player.toggle(memo.fileURL)
+        guard !voice.isActive, let message = model.messages.first(where: { $0.id == id }) else { return }
+        if let memo = message.voice {
+            player.toggle(memo.fileURL)
+            return
+        }
+        // Issue #10: a voice reply. The cached file plays with no network call. A failed one speaks again.
+        switch message.spokenReply {
+        case .ready(let audio): player.toggle(audio.fileURL)
+        case .failed: model.retrySpeech(id: id)
+        case .preparing, nil: break
+        }
     }
+
+    /// The file of the audio bubble of a row: a memo or a voice reply.
+    private func audioURL(of part: ChatBubblePart) -> URL? {
+        if let memo = part.row.message.voice { return memo.fileURL }
+        guard part.content == .spokenReply else { return nil }
+        return part.row.message.spokenReply?.audio?.fileURL
+    }
+
+    /// Moves the progress bar of the visible reply bubble, with no reload.
+    private func showProgress(url: URL, time: TimeInterval) {
+        for case let cell as ChatVoiceCell in messagesCollectionView.visibleCells {
+            guard let indexPath = messagesCollectionView.indexPath(for: cell), let part = bubble(at: indexPath)?.part,
+                  audioURL(of: part) == url else { continue }
+            cell.setProgress(time: time)
+        }
+    }
+
+    /// Issue #10: a reply to a voice memo got its audio. It plays once if Auto-Play is on and no recording runs.
+    /// A manual play or a new recording stops it (owner decision 2026-11-16).
+    private func autoPlayVoiceReply() {
+        guard let id = model.autoPlayReplyId, id != handledAutoPlayId else { return }
+        handledAutoPlayId = id
+        guard autoPlayEnabled(), !voice.isActive,
+              let audio = model.messages.first(where: { $0.id == id })?.spokenReply?.audio else { return }
+        player.play(audio.fileURL)
+    }
+
+    /// A tap on the audio bubble of a message (tests and the DEBUG demo).
+    func tapAudio(id: String) { togglePlay(id: id) }
+
+    /// `true` while the player plays (tests).
+    var playerIsPlaying: Bool { player.isPlaying }
+
+    /// The URL that the player has loaded (tests).
+    var playerURL: URL? { player.playingURL }
 
     private func toggleTranscript(id: String) {
         guard model.messages.first(where: { $0.id == id })?.voice?.transcript.text != nil else { return }
@@ -306,7 +357,7 @@ final class ChatViewController: MessagesViewController {
     }
 
     private func reloadVoiceRows() {
-        let rows = IndexSet(bubbles.indices.filter { bubbles[$0].row.message.voice != nil })
+        let rows = IndexSet(bubbles.indices.filter { audioURL(of: bubbles[$0].part) != nil })
         guard !rows.isEmpty else { return }
         UIView.performWithoutAnimation {
             messagesCollectionView.reloadSections(rows)
@@ -316,10 +367,17 @@ final class ChatViewController: MessagesViewController {
     /// The transcript under a memo, and its height at the bubble width.
     private func transcript(for row: ChatRow, message: MessageType, at indexPath: IndexPath)
         -> (text: NSAttributedString?, height: CGFloat, width: CGFloat)? {
-        guard let voice = row.message.voice, let calculator = voiceCalculator else { return nil }
+        guard let calculator = voiceCalculator else { return nil }
+        let text: NSAttributedString?
+        if let voice = row.message.voice {
+            text = ChatVoiceLayout.transcriptText(for: voice, traits: traitCollection)
+        } else if (message as? ChatBubble)?.part.content == .spokenReply, let spoken = row.message.spokenReply {
+            text = ChatVoiceLayout.replyCaption(for: spoken, traits: traitCollection)
+        } else {
+            return nil
+        }
         let maxWidth = calculator.messageContainerMaxWidth(for: message, at: indexPath)
         let width = ChatVoiceLayout.bubbleSize(traits: traitCollection, maxWidth: maxWidth).width
-        let text = ChatVoiceLayout.transcriptText(for: voice, traits: traitCollection)
         let height = ChatVoiceLayout.transcriptHeight(text, width: width, expanded: expandedTranscripts.contains(row.id))
         return (text, height, width)
     }
@@ -426,6 +484,7 @@ final class ChatViewController: MessagesViewController {
             _ = model.turn
             _ = model.statusLine
             _ = model.completedReplyId
+            _ = model.autoPlayReplyId
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
                 self?.render()
@@ -488,6 +547,7 @@ final class ChatViewController: MessagesViewController {
         updateScrollButton()
         updateSendButton()
         announceCompletedReply()
+        autoPlayVoiceReply()
     }
 
     /// VoiceOver reads a reply once, when it ends.
@@ -574,9 +634,20 @@ final class ChatViewController: MessagesViewController {
         default: nil
         }
         var actions: [UIAccessibilityCustomAction] = []
+        if part.content == .spokenReply {
+            let id = row.id
+            cell.accessibilityCustomActions = row.message.spokenReply?.audio.map { audio in
+                [UIAccessibilityCustomAction(name: player.isPlaying(audio.fileURL) ? "Pause" : "Play") { [weak self] _ in
+                    self?.togglePlay(id: id)
+                    return true
+                }]
+            } ?? []
+            cell.accessibilityHint = row.message.spokenReply == .failed ? "Double-tap to retry." : nil
+            return cell
+        }
         if let memo = row.message.voice {
             let id = row.id
-            let playing = player.playingURL == memo.fileURL
+            let playing = player.isPlaying(memo.fileURL)
             actions.append(UIAccessibilityCustomAction(name: playing ? "Pause" : "Play") { [weak self] _ in
                 self?.togglePlay(id: id)
                 return true
@@ -701,6 +772,7 @@ final class ChatViewController: MessagesViewController {
         switch row.footnote {
         case .notDelivered, .noSpeech: showSendFailureOptions(for: row, from: cell)
         case .replyFailed: model.retryReply(id: row.id)
+        case .audioUnavailable: model.retrySpeech(id: row.id)
         default: break
         }
     }
@@ -774,10 +846,25 @@ extension ChatViewController: MessagesDataSource {
                     in messagesCollectionView: MessagesCollectionView) -> UICollectionViewCell {
         let cell = messagesCollectionView.dequeueReusableCell(ChatVoiceCell.self, for: indexPath)
         cell.configure(with: message, at: indexPath, and: messagesCollectionView)
-        guard let row = row(for: message), let memo = row.message.voice,
-              let info = transcript(for: row, message: message, at: indexPath) else { return cell }
+        guard let row = row(for: message), let info = transcript(for: row, message: message, at: indexPath) else {
+            return cell
+        }
         let id = row.id
-        cell.configure(voice: memo, outgoing: row.message.role == .user, playing: player.playingURL == memo.fileURL,
+        if (message as? ChatBubble)?.part.content == .spokenReply, let spoken = row.message.spokenReply {
+            let url = spoken.audio?.fileURL
+            let loaded = url != nil && player.playingURL == url
+            cell.configure(reply: spoken, playing: url.map(player.isPlaying) ?? false,
+                           time: loaded ? player.currentTime : 0, caption: info.text, captionHeight: info.height,
+                           traits: traitCollection)
+            cell.onPlay = { [weak self] in self?.togglePlay(id: id) }
+            cell.onSeek = { [weak self] time in
+                guard let self, !self.voice.isActive, let url else { return }
+                self.player.seek(url, to: time)
+            }
+            return cell
+        }
+        guard let memo = row.message.voice else { return cell }
+        cell.configure(voice: memo, outgoing: row.message.role == .user, playing: player.isPlaying(memo.fileURL),
                        transcript: info.text, transcriptHeight: info.height,
                        expanded: expandedTranscripts.contains(id), traits: traitCollection)
         cell.onPlay = { [weak self] in self?.togglePlay(id: id) }

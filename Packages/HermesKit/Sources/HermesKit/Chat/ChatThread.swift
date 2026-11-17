@@ -78,6 +78,12 @@ public struct ChatThread: Sendable, Equatable {
         messages[index].text = transcript.text ?? ""
     }
 
+    /// Issue #10: the speak state of a reply. Only a reply can have spoken audio.
+    public mutating func setSpokenReply(_ spoken: SpokenReply?, id: String) {
+        guard let index = index(of: id), messages[index].role == .assistant else { return }
+        messages[index].spokenReply = spoken
+    }
+
     public mutating func setDelivery(_ delivery: ChatMessage.Delivery, id: String, userRowId: Int? = nil) {
         guard let index = index(of: id) else { return }
         messages[index].delivery = delivery
@@ -109,7 +115,7 @@ public struct ChatThread: Sendable, Equatable {
     public mutating func replaceHistory(_ history: [ChatMessage]) -> Bool {
         let historyIds = Set(history.map(\.id))
         let answered = Set(history.compactMap { $0.role == .assistant ? $0.promptId : nil })
-        let ended = Set(SessionCache.cacheable(messages, limit: .max).map(\.id))
+        let ended = Set(messages.filter(SessionCache.isEnded).map(\.id))
         let kept = messages.filter { message in
             guard !ended.contains(message.id), !historyIds.contains(message.id) else { return false }
             if case .failed = message.reply, let promptId = message.promptId, answered.contains(promptId) {

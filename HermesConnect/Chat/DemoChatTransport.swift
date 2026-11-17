@@ -34,6 +34,10 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case paused
         /// Issue #8: photo, file and location bubbles, a failed upload, rings, and 3 items in the strip.
         case attachments
+        /// Issue #10: voice replies. One plays, one shows "Preparing audio…", one failed.
+        case voiceReplies = "voice-replies"
+        /// Issue #10: the same thread with the first voice reply paused part way.
+        case voiceRepliesPaused = "voice-replies-paused"
 
         static var current: Scenario? {
             ProcessInfo.processInfo.environment["HERMES_DEMO"].flatMap(Scenario.init(rawValue:))
@@ -45,7 +49,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             case .streaming: "What's the weather in Austin this weekend?"
             case .failed: "Can you check the server logs?"
             case .live, .thread, .empty, .list, .listEmpty, .listLoading, .voice, .recording, .hold, .paused,
-                 .attachments: nil
+                 .attachments, .voiceReplies, .voiceRepliesPaused: nil
             }
         }
 
@@ -59,6 +63,9 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
 
         /// `true` for the scenarios that show the recording bar with a fake recorder.
         var recordsAtLaunch: Bool { self == .recording || self == .hold || self == .paused }
+
+        /// `true` for the voice reply scenarios (issue #10).
+        var showsVoiceReplies: Bool { self == .voiceReplies || self == .voiceRepliesPaused }
     }
 
     let scenario: Scenario
@@ -114,6 +121,37 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         try await Task.sleep(for: .milliseconds(1500))
         if scenario == .failed { throw DemoFailure() }
         return Self.memoTranscript
+    }
+
+    /// Issue #10: a soft generated tone as the spoken reply, after a short wait. No server.
+    func speak(text _: String) async throws -> SpokenAudio {
+        try await Task.sleep(for: .milliseconds(1200))
+        if scenario == .failed { throw DemoFailure() }
+        return SpokenAudio(data: Self.toneWAV(seconds: 6), mimeType: "audio/wav")
+    }
+
+    /// A quiet 8 kHz mono 16-bit WAV tone.
+    static func toneWAV(seconds: Double) -> Data {
+        let rate = 8000
+        let count = Int(Double(rate) * seconds)
+        var data = Data()
+        func append<T: FixedWidthInteger>(_ value: T) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        data.append(contentsOf: Array("RIFF".utf8)); append(UInt32(36 + count * 2))
+        data.append(contentsOf: Array("WAVEfmt ".utf8)); append(UInt32(16)); append(UInt16(1)); append(UInt16(1))
+        append(UInt32(rate)); append(UInt32(rate * 2)); append(UInt16(2)); append(UInt16(16))
+        data.append(contentsOf: Array("data".utf8)); append(UInt32(count * 2))
+        for index in 0..<count {
+            let sample = sin(Double(index) * 2 * .pi * 220 / Double(rate)) * 1200
+            append(Int16(sample))
+        }
+        return data
+    }
+
+    /// The saved demo reply file of the voice reply scenarios.
+    static func demoReplyAudio(seconds: Double) -> VoiceReplyAudio {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("demo-reply-\(Int(seconds)).wav")
+        if !FileManager.default.fileExists(atPath: url.path) { try? toneWAV(seconds: seconds).write(to: url) }
+        return VoiceReplyAudio(fileURL: url, duration: seconds)
     }
 
     static let memoTranscript = "Remind me to call Sam at three about the lease, and ask whether the movers can come "
@@ -238,6 +276,9 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                             + "to see only recent lines.",
                         date: recent.addingTimeInterval(15), reply: .complete, promptId: "d5"),
         ]
+        if scenario.showsVoiceReplies {
+            messages += Self.voiceReplyMessages(now: now)
+        }
         if scenario == .voice || scenario.recordsAtLaunch {
             let late = now.addingTimeInterval(-3 * 60)
             func memo(_ name: String, _ seconds: TimeInterval, _ transcript: VoiceTranscript) -> VoiceMemo {
@@ -271,6 +312,37 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         }
         if scenario == .attachments { messages += AttachmentDemo.messages(now: now) }
         return messages
+    }
+
+    /// Issue #10: three voice turns. The replies have audio that is ready, "Preparing audio…" and failed.
+    static func voiceReplyMessages(now: Date) -> [ChatMessage] {
+        let late = now.addingTimeInterval(-3 * 60)
+        func memo(_ name: String, _ seconds: TimeInterval, _ text: String) -> VoiceMemo {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).m4a")
+            let levels = (0..<VoiceMemoLimits.waveformBars).map { index in
+                Float(0.25 + 0.6 * abs(sin(Double(index) * 0.7 + seconds)))
+            }
+            return VoiceMemo(fileURL: url, duration: seconds, waveform: levels, transcript: .done(text))
+        }
+        let ask1 = "What's on my calendar tomorrow?"
+        let ask2 = "Move the call with Sam to three."
+        let ask3 = "Remind me to pack the charger."
+        return [
+            ChatMessage(id: "r1", role: .user, text: ask1, date: late, delivery: .delivered, userRowId: 111,
+                        voice: memo("r1", 3, ask1)),
+            ChatMessage(id: "r2", role: .assistant,
+                        text: "You have two meetings tomorrow: the design review at 10 and the call with Sam at 2:30.",
+                        date: late.addingTimeInterval(6), reply: .complete, promptId: "r1",
+                        spokenReply: .ready(demoReplyAudio(seconds: 24))),
+            ChatMessage(id: "r3", role: .user, text: ask2, date: late.addingTimeInterval(40), delivery: .delivered,
+                        userRowId: 113, voice: memo("r3", 2, ask2)),
+            ChatMessage(id: "r4", role: .assistant, text: "Done. The call with Sam is now at 3:00 PM.",
+                        date: late.addingTimeInterval(46), reply: .complete, promptId: "r3", spokenReply: .failed),
+            ChatMessage(id: "r5", role: .user, text: ask3, date: late.addingTimeInterval(80), delivery: .delivered,
+                        userRowId: 115, voice: memo("r5", 2, ask3)),
+            ChatMessage(id: "r6", role: .assistant, text: "I'll remind you at 8 PM tonight.",
+                        date: late.addingTimeInterval(86), reply: .complete, promptId: "r5", spokenReply: .preparing),
+        ]
     }
 }
 /// DEBUG only: a recorder with no microphone. Time starts at 0:12 and the levels are a fixed wave.

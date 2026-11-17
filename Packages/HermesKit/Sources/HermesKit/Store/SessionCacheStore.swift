@@ -22,17 +22,100 @@ public enum SessionCache {
     /// The most messages that the cache keeps per session.
     public static let transcriptLimit = 500
     /// The file format version. Readers accept every version: missing keys get defaults.
-    public static let formatVersion = 1
+    /// Version 2 (issue #10): voice memos, memos that were not delivered, and the audio of voice replies.
+    public static let formatVersion = 2
 
-    /// The messages to keep: the last `limit` ones that have ended.
+    /// The messages to keep: the last `limit` ones that have ended, plus every voice memo.
+    /// The owner never loses a recording: a memo that was not delivered stays with "Try Again".
     public static func cacheable(_ messages: [ChatMessage], limit: Int = transcriptLimit) -> [ChatMessage] {
-        let ended = messages.filter { message in
-            switch message.role {
-            case .user: message.delivery == .delivered
-            case .assistant: message.reply == .complete || message.reply == .interrupted
-            }
+        Array(messages.filter { isEnded($0) || $0.voice != nil }.suffix(limit))
+    }
+
+    /// A delivered prompt, or a reply that ended. The server transcript has these messages.
+    public static func isEnded(_ message: ChatMessage) -> Bool {
+        switch message.role {
+        case .user: message.delivery == .delivered
+        case .assistant: message.reply == .complete || message.reply == .interrupted
         }
-        return Array(ended.suffix(limit))
+    }
+}
+
+/// A local file path in the cache. A path in the app folder is stored relative to it, because iOS can
+/// move the app folder on an update.
+enum CachedPath {
+    static func encode(_ url: URL, home: String = NSHomeDirectory()) -> String {
+        let path = url.standardizedFileURL.path
+        let root = home.hasSuffix("/") ? home : home + "/"
+        return path.hasPrefix(root) ? "~/" + path.dropFirst(root.count) : path
+    }
+
+    static func decode(_ path: String, home: String = NSHomeDirectory()) -> URL {
+        guard path.hasPrefix("~/") else { return URL(fileURLWithPath: path) }
+        return URL(fileURLWithPath: home).appending(path: String(path.dropFirst(2)))
+    }
+}
+
+/// A cached voice memo (format version 2).
+struct CachedVoice: Codable, Equatable {
+    var path: String
+    var duration: TimeInterval
+    var waveform: [Float]
+    /// "done", "empty" or "failed". A memo that was still in "Transcribing…" reads as "failed".
+    var transcript: String
+
+    init(_ memo: VoiceMemo) {
+        path = CachedPath.encode(memo.fileURL)
+        duration = memo.duration
+        waveform = memo.waveform
+        transcript = switch memo.transcript {
+        case .done: "done"
+        case .empty: "empty"
+        case .pending, .failed: "failed"
+        }
+    }
+
+    func memo(text: String) -> VoiceMemo {
+        let state: VoiceTranscript = switch transcript {
+        case "done" where !text.isEmpty: .done(text)
+        case "empty": .empty
+        default: .failed
+        }
+        return VoiceMemo(fileURL: CachedPath.decode(path), duration: duration, waveform: waveform, transcript: state)
+    }
+
+    private enum CodingKeys: String, CodingKey { case path, duration, waveform, transcript }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        path = try container.decode(String.self, forKey: .path)
+        duration = try container.decodeIfPresent(TimeInterval.self, forKey: .duration) ?? 0
+        waveform = try container.decodeIfPresent([Float].self, forKey: .waveform) ?? []
+        transcript = try container.decodeIfPresent(String.self, forKey: .transcript) ?? "done"
+    }
+}
+
+/// The cached audio of a voice reply (format version 2). A reply that was still in "Preparing audio…"
+/// reads as failed, so the owner can tap to retry.
+struct CachedSpeech: Codable, Equatable {
+    var path: String?
+    var duration: TimeInterval
+
+    init(_ spoken: SpokenReply) {
+        path = spoken.audio.map { CachedPath.encode($0.fileURL) }
+        duration = spoken.audio?.duration ?? 0
+    }
+
+    var spoken: SpokenReply {
+        guard let path else { return .failed }
+        return .ready(VoiceReplyAudio(fileURL: CachedPath.decode(path), duration: duration))
+    }
+
+    private enum CodingKeys: String, CodingKey { case path, duration }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        path = try container.decodeIfPresent(String.self, forKey: .path)
+        duration = try container.decodeIfPresent(TimeInterval.self, forKey: .duration) ?? 0
     }
 }
 
@@ -45,6 +128,10 @@ struct CachedMessage: Codable, Equatable {
     var userRowId: Int?
     var promptId: String?
     var interrupted: Bool
+    /// `true` for a voice memo that was not delivered. Version 1 files have no key: delivered.
+    var notDelivered: Bool
+    var voice: CachedVoice?
+    var speech: CachedSpeech?
 
     init(_ message: ChatMessage) {
         id = message.id
@@ -54,17 +141,25 @@ struct CachedMessage: Codable, Equatable {
         userRowId = message.userRowId
         promptId = message.promptId
         interrupted = message.reply == .interrupted
+        notDelivered = message.role == .user && message.delivery != .delivered
+        voice = message.voice.map(CachedVoice.init)
+        speech = message.spokenReply.map(CachedSpeech.init)
     }
 
     var message: ChatMessage {
         if role == "user" {
-            return ChatMessage(id: id, role: .user, text: text, date: date, delivery: .delivered, userRowId: userRowId)
+            let memo = voice?.memo(text: text)
+            return ChatMessage(id: id, role: .user, text: memo.map { $0.transcript.text ?? "" } ?? text, date: date,
+                               delivery: notDelivered ? .failed : .delivered, userRowId: userRowId, voice: memo)
         }
         return ChatMessage(id: id, role: .assistant, text: text, date: date,
-                           reply: interrupted ? .interrupted : .complete, promptId: promptId)
+                           reply: interrupted ? .interrupted : .complete, promptId: promptId,
+                           spokenReply: speech?.spoken)
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, text, date, userRowId, promptId, interrupted }
+    private enum CodingKeys: String, CodingKey {
+        case id, role, text, date, userRowId, promptId, interrupted, notDelivered, voice, speech
+    }
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -75,6 +170,10 @@ struct CachedMessage: Codable, Equatable {
         userRowId = try container.decodeIfPresent(Int.self, forKey: .userRowId)
         promptId = try container.decodeIfPresent(String.self, forKey: .promptId)
         interrupted = try container.decodeIfPresent(Bool.self, forKey: .interrupted) ?? false
+        notDelivered = try container.decodeIfPresent(Bool.self, forKey: .notDelivered) ?? false
+        // A broken memo or speech entry drops only that part, never the message.
+        voice = (try? container.decodeIfPresent(CachedVoice.self, forKey: .voice)) ?? nil
+        speech = (try? container.decodeIfPresent(CachedSpeech.self, forKey: .speech)) ?? nil
     }
 }
 
