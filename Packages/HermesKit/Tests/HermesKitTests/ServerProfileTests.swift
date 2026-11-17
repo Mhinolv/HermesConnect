@@ -33,6 +33,30 @@ import Testing
         #expect(profile == ServerProfile(host: "h"))
     }
 
+    /// Issue #18: a version 2 file has no port pin and no algorithms. It still loads.
+    @Test func versionTwoFileLoadsWithoutPinAndAlgorithms() throws {
+        let json = #"{"version":2,"host":"h","port":22,"user":"hermes","displayName":"h"}"#
+        let profile = try JSONDecoder().decode(ServerProfile.self, from: Data(json.utf8))
+        #expect(profile.host == "h")
+        #expect(profile.servePort == nil)
+        #expect(profile.lastAlgorithms == nil)
+    }
+
+    @Test func portPinAndAlgorithmsRoundTrip() throws {
+        let pair = SSHNegotiatedAlgorithms(cipher: "aes256-gcm@openssh.com", keyExchange: "curve25519-sha256")
+        let profile = ServerProfile(host: "h", hostKey: .sample, servePort: 47_123, lastAlgorithms: pair)
+        let decoded = try JSONDecoder().decode(ServerProfile.self, from: JSONEncoder().encode(profile))
+        #expect(decoded == profile)
+        #expect(decoded.version == 3)
+    }
+
+    @Test func badPortPinAndAlgorithmsReadAsNone() throws {
+        let json = #"{"version":3,"host":"h","servePort":70000,"lastAlgorithms":{"cipher":1}}"#
+        let profile = try JSONDecoder().decode(ServerProfile.self, from: Data(json.utf8))
+        #expect(profile.servePort == nil)
+        #expect(profile.lastAlgorithms == nil)
+    }
+
     @Test func decodeKeepsUnknownFieldsHarmless() throws {
         let json = #"{"version":1,"host":"h","port":2222,"user":"hermes","displayName":"Box","future":true}"#
         let profile = try JSONDecoder().decode(ServerProfile.self, from: Data(json.utf8))

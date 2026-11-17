@@ -209,12 +209,15 @@ struct CacheState: Codable, Equatable {
 
 /// The cache as JSON files in Application Support (`HermesConnect/Cache/`).
 ///
-/// - Files use `completeUntilFirstUserAuthentication`, so background catch-up can read them after the first unlock.
-/// - The folder is excluded from backup: the server holds the real transcript.
+/// - `ProtectedStorage` rules (issue #18): files use `completeUntilFirstUserAuthentication`, so background
+///   catch-up can read them after the first unlock, and the folder is excluded from backup.
+/// - The first write of each store instance applies the rules again, also to files of older builds.
 /// - One lock orders the reads and writes. A transcript file is at most 500 messages.
 public final class FileSessionCacheStore: SessionCacheStore, @unchecked Sendable {
     public let directory: URL
     private let lock = NSLock()
+    /// True after `ProtectedStorage.prepare` ran for this instance.
+    private var prepared = false
 
     public init(directory: URL) {
         self.directory = directory
@@ -300,23 +303,20 @@ public final class FileSessionCacheStore: SessionCacheStore, @unchecked Sendable
             try prepareDirectory(url.deletingLastPathComponent())
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .secondsSince1970
-            var options: Data.WritingOptions = [.atomic]
-            #if os(iOS)
-            options.insert(.completeFileProtectionUntilFirstUserAuthentication)
-            #endif
-            try encoder.encode(CacheFile(body)).write(to: url, options: options)
+            try encoder.encode(CacheFile(body)).write(to: url, options: ProtectedStorage.writeOptions)
         } catch {
             // The cache is optional. The next save tries again.
         }
     }
 
+    /// Called with the lock held.
     private func prepareDirectory(_ url: URL) throws {
+        if !prepared {
+            try ProtectedStorage.prepare(directory: directory)
+            prepared = true
+        }
         guard !FileManager.default.fileExists(atPath: url.path) else { return }
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        var root = directory
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        try? root.setResourceValues(values)
     }
 }
 

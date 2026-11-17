@@ -28,6 +28,8 @@ import Testing
         let transport = ScriptedSSHTransport(hostKey: .sample, pingReply: .success("PONG 1\n"))
         let connection = try await connect(transport, pin: .sample).get()
         #expect(connection.gateVersion == "1")
+        #expect(connection.algorithms == SSHNegotiatedAlgorithms(cipher: "aes256-gcm@openssh.com",
+                                                                 keyExchange: "curve25519-sha256"))
         #expect(transport.record.authentications == 1)
         #expect(transport.record.commands == [.ping])
     }

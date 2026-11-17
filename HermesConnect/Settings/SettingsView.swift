@@ -29,6 +29,13 @@ struct SettingsView: View {
                     } else {
                         LabeledContent("Host Key", value: "Not trusted yet")
                     }
+                    // Issue #18: the last successful negotiation, also when offline.
+                    LabeledContent("SSH algorithms") {
+                        Text(model.profile?.lastAlgorithms?.displayText ?? "—")
+                            .font(.footnote.monospaced())
+                            .multilineTextAlignment(.trailing)
+                    }
+                    .accessibilityElement(children: .combine)
                     Button("Reset Device Key…", role: .destructive) { confirmReset = true }
                         .foregroundStyle(.red)
                     if model.profile?.hostKey != nil {

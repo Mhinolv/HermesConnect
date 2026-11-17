@@ -55,6 +55,8 @@ public final class ChatViewModel {
     @ObservationIgnored private let saveSpeech: @Sendable (SpokenAudio) throws -> VoiceReplyAudio
     /// Replies with a speak call that runs.
     @ObservationIgnored private var speaking: Set<String> = []
+    /// Metadata only: ids, counts and states. Never the text of a message (issue #18).
+    @ObservationIgnored private let log = HermesLog(category: "chat")
 
     /// `messages` is history that the screen shows at once (DEBUG demo). With no `messages`, a model with
     /// a `storedSessionId` and a `cache` shows the cached transcript.
@@ -210,6 +212,7 @@ public final class ChatViewModel {
                 return
             }
             guard let live = session?.liveId, event.sessionId == live else { return }
+            if case .messageComplete = event.kind { log.info("reply complete: session \(live)") }
             let makeId = self.makeId
             changed(thread.apply(event.kind, now: now(), makeId: makeId))
         case .state(.disconnected):
@@ -359,9 +362,12 @@ public final class ChatViewModel {
                                                  retryBeforeRowId: retryBeforeRowId)
             }
             thread.setDelivery(.delivered, id: id, userRowId: row)
+            log.info("prompt delivered: message \(id), \(text.count) characters, "
+                     + "\(message.attachments.count) attachments, voice \(isVoice)")
             saveActiveSessionId()
             saveTranscript()
         } catch {
+            log.notice("prompt not delivered: message \(id)")
             thread.setDelivery(.failed, id: id)
             thread.cancelWaiting()
             if isVoice { saveTranscript() }

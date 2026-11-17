@@ -32,12 +32,16 @@ public struct CitadelSSHTransport: SSHTransport {
                 authenticationMethod: .custom(authentication),
                 hostKeyValidator: .custom(checker),
                 reconnect: .never,
+                algorithms: SSHAlgorithmPolicy.citadelAlgorithms,
                 connectTimeout: .seconds(connectTimeoutSeconds)
             )
             return CitadelSession(client: client)
         } catch {
             // A host key rejection is the first failure. NIOSSH can wrap it, so use the recorded error.
             if let rejection = checker.rejection { throw rejection }
+            if let error = error as? NIOSSHError, error.type == .keyExchangeNegotiationFailure {
+                throw SSHConnectionError.noAllowedAlgorithms
+            }
             if authentication.didOffer { throw SSHConnectionError.authenticationFailed }
             if let error = error as? SSHConnectionError { throw error }
             throw SSHConnectionError.unreachable
@@ -202,6 +206,31 @@ private final class CitadelSession: SSHSession, @unchecked Sendable {
         } catch {
             throw SSHConnectionError.forwardFailed
         }
+    }
+
+    /// NIOSSH has no public call for the chosen cipher. Read it by reflection, on the event loop of the connection:
+    /// `SSHClient.session.sshHandler` -> `NIOSSHHandler.stateMachine.state` (`.active`) -> `serializer.state`
+    /// (`.encrypted(protection)`). If a library update moves it, this gives nil, and `CitadelTransportTests` fail.
+    func negotiatedAlgorithms() async -> SSHNegotiatedAlgorithms? {
+        guard let keyExchange = SSHAlgorithmPolicy.reportedKeyExchange else { return nil }
+        let cipher = try? await client.eventLoop.submit { [self] () -> String? in
+            Self.cipherName(of: client)
+        }.get()
+        guard let cipher = cipher ?? nil else { return nil }
+        return SSHNegotiatedAlgorithms(cipher: cipher, keyExchange: keyExchange)
+    }
+
+    private static func cipherName(of client: SSHClient) -> String? {
+        guard let box = Mirror(reflecting: client).descendant("session", "sshHandler"),
+              let handler = Mirror(reflecting: box).descendant("_value"),
+              let state = Mirror(reflecting: handler).descendant("stateMachine", "state"),
+              let active = Mirror(reflecting: state).descendant("active"),
+              let serializerState = Mirror(reflecting: active).descendant("serializer", "state"),
+              let protection = Mirror(reflecting: serializerState).descendant("encrypted") as? any NIOSSHTransportProtection
+        else { return nil }
+        let name = type(of: protection).cipherName
+        // Report only a name of the policy, never other text from inside the library.
+        return SSHAlgorithmPolicy.allowedCiphers.contains(name) ? name : nil
     }
 
     func close() async {

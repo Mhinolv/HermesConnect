@@ -69,7 +69,7 @@ enum ReferenceKeys {
         let decoded = try JSONDecoder().decode(ServerProfile.self, from: JSONEncoder().encode(profile))
         #expect(decoded == profile)
         #expect(decoded.hostKey == .sample)
-        #expect(decoded.version == 2)
+        #expect(decoded.version == ServerProfile.currentVersion)
     }
 
     @Test func corruptPinCountsAsNoPin() throws {
