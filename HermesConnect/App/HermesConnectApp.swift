@@ -38,6 +38,8 @@ struct HermesConnectApp: App {
         #endif
         let live = AppModel.live()
         let link = ChatLaunch.makeLink(renew: { await live.renewHermesSession() })
+        // Issue #68: the slash suggestions keep the catalog of the connected server.
+        SlashSuggestions.shared = SlashSuggestions.makeLive(link: link, profile: { live.profile })
         model = live
         location = LocationController.live()
         self.link = link
