@@ -202,7 +202,7 @@ def pid_alive(pid):
         return False
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, OverflowError):  # OverflowError: above the C pid_t range.
         return False
     except PermissionError:
         return True
@@ -442,8 +442,12 @@ def _reject_constant(name):
 
 
 def _number(value):
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value))
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # An integer above the float range (about 1e308).
+        return False
 
 
 def parse_timestamp(value):
@@ -466,9 +470,9 @@ def parse_timestamp(value):
         fraction = (fraction + "000000")[:7]
     try:
         parsed = datetime.datetime.fromisoformat(match.group(1) + fraction + match.group(3))
-    except ValueError:
+        return parsed.astimezone(datetime.timezone.utc)
+    except (ValueError, OverflowError):  # OverflowError: year 1 or 9999 moved to UTC.
         return None
-    return parsed.astimezone(datetime.timezone.utc)
 
 
 def iso_utc(moment):

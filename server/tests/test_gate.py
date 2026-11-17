@@ -152,6 +152,18 @@ class ServeTests(GateTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.records()), 2, "spawn fresh, do not trust the pid")
 
+    def test_huge_pid_in_state_file_is_not_trusted(self):
+        self.assertEqual(self.serve().returncode, 0)
+        state_path, state = self.state()
+        self.kill(state["pid"])
+        self.wait_dead(state["pid"])
+        with open(state_path, "w") as stream:
+            stream.write(json.dumps(state).replace('"pid": %d' % state["pid"], '"pid": ' + "9" * 30))
+        result = self.serve()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(len(self.records()), 2, "spawn fresh, do not trust the pid")
+
     def test_bad_tokens_are_refused(self):
         for token in ("", "A" * 64, "a" * 63, "a" * 65, "g" * 64, " " + "a" * 63, "a" * 64 + "\n\n",
                       "a" * 64 + " ", "a" * 200):
@@ -248,6 +260,12 @@ def fix(**overrides):
     return {k: v for k, v in value.items() if v is not ...}
 
 
+def huge_int_fix(field):
+    """A fix whose ``field`` is a 3000-digit integer (above the float range, inside 4096 bytes)."""
+    text = json.dumps(fix(**{field: 0}))
+    return text.replace('"%s": 0' % field, '"%s": %s' % (field, "9" * 3000)).encode("utf-8")
+
+
 class LocationTests(GateTestCase):
     def send(self, payload):
         data = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
@@ -341,6 +359,14 @@ class LocationTests(GateTestCase):
             "timestamp future": fix(timestamp=future),
             "timestamp bool": fix(timestamp=True),
             "timestamp huge": fix(timestamp=1e20),
+            "lat huge integer": huge_int_fix("lat"),
+            "lon huge integer": huge_int_fix("lon"),
+            "accuracy huge integer": huge_int_fix("accuracy_m"),
+            "speed huge integer": huge_int_fix("speed"),
+            "course huge integer": huge_int_fix("course"),
+            "timestamp huge integer": huge_int_fix("timestamp"),
+            "timestamp year 1 east of UTC": fix(timestamp="0001-01-01T00:00:00+05:00"),
+            "timestamp year 9999 west of UTC": fix(timestamp="9999-12-31T23:59:59-05:00"),
         }
         for name, payload in cases.items():
             with self.subTest(case=name):
