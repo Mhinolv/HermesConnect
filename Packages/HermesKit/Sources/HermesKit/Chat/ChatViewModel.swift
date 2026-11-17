@@ -55,13 +55,19 @@ public final class ChatViewModel {
     @ObservationIgnored private let saveSpeech: @Sendable (SpokenAudio) throws -> VoiceReplyAudio
     /// Replies with a speak call that runs.
     @ObservationIgnored private var speaking: Set<String> = []
+    /// Issue #36: this new chat keeps its memos under `SessionCache.newChatId` until its first prompt is
+    /// accepted. Before that the server has no row, so launch cannot find the chat by its stored id.
+    /// One new chat at a time holds it (`SessionListModel.newChat`).
+    @ObservationIgnored private(set) var keepsNewChat: Bool
     /// Metadata only: ids, counts and states. Never the text of a message (issue #18).
     @ObservationIgnored private let log = HermesLog(category: "chat")
 
     /// `messages` is history that the screen shows at once (DEBUG demo). With no `messages`, a model with
     /// a `storedSessionId` and a `cache` shows the cached transcript.
+    /// `keepsNewChat` (issue #36): a new chat shows the memos that the last new chat kept, and keeps its own.
     public init(transport: any ChatTransport, session: ChatSessionRef? = nil, storedSessionId: String? = nil,
                 title: String? = nil, messages: [ChatMessage] = [], cache: (any SessionCacheStore)? = nil,
+                keepsNewChat: Bool = false,
                 redrawInterval: Duration = .milliseconds(100),
                 now: @escaping @Sendable () -> Date = { Date() },
                 makeId: @escaping @Sendable () -> String = { UUID().uuidString },
@@ -80,9 +86,13 @@ public final class ChatViewModel {
         self.now = now
         self.makeId = makeId
         self.sessionKey = makeId()
+        let keeps = keepsNewChat && storedSessionId == nil && session?.storedId == nil && cache != nil
+        self.keepsNewChat = keeps
         var initial = messages
         if initial.isEmpty, let stored = self.storedSessionId, let cache {
             initial = cache.loadTranscript(sessionId: stored)
+        } else if initial.isEmpty, keeps, let cache {
+            initial = cache.loadTranscript(sessionId: SessionCache.newChatId)
         }
         self.thread = ChatThread(messages: initial)
         self.messages = initial
@@ -197,8 +207,22 @@ public final class ChatViewModel {
     }
 
     private func saveTranscript() {
-        guard let storedSessionId, let cache else { return }
-        cache.saveTranscript(thread.messages, sessionId: storedSessionId)
+        guard let cache else { return }
+        if keepsNewChat { cache.saveTranscript(thread.messages, sessionId: SessionCache.newChatId) }
+        if let storedSessionId { cache.saveTranscript(thread.messages, sessionId: storedSessionId) }
+    }
+
+    /// Issue #36: another new chat takes the slot. Only an empty chat gives it up, so no kept memo is lost.
+    func yieldNewChat() {
+        guard keepsNewChat, thread.messages.isEmpty else { return }
+        keepsNewChat = false
+    }
+
+    /// Issue #36: the first accepted prompt made the server row. The chat now lives under its stored id.
+    private func leaveNewChatSlot() {
+        guard keepsNewChat else { return }
+        keepsNewChat = false
+        cache?.saveTranscript([], sessionId: SessionCache.newChatId)
     }
 
     /// Applies one item of the event stream. Events of other sessions are ignored.
@@ -364,6 +388,7 @@ public final class ChatViewModel {
             thread.setDelivery(.delivered, id: id, userRowId: row)
             log.info("prompt delivered: message \(id), \(text.count) characters, "
                      + "\(message.attachments.count) attachments, voice \(isVoice)")
+            leaveNewChatSlot()
             saveActiveSessionId()
             saveTranscript()
         } catch {

@@ -56,12 +56,49 @@ public struct SpokenAudio: Sendable, Equatable {
 public enum VoiceReplyText {
     /// The plain reply text with no code blocks, no `MEDIA:` tags and no Markdown marks.
     /// Link runs keep their label. An empty result means: do not call speak.
+    /// Issue #36: headings, bullets, quotes, rules and left-over emphasis marks go too. The bubble keeps them.
     public static func spokenText(_ text: String) -> String {
         let plain = ChatMarkdown.runs(text).filter { !$0.isCodeBlock }.map(\.text).joined()
-        let lines = plain.components(separatedBy: .newlines).filter { line in
-            !line.trimmingCharacters(in: .whitespaces).hasPrefix("MEDIA:")
+        let lines = plain.components(separatedBy: .newlines).compactMap { line -> String? in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("MEDIA:") || isRule(trimmed) { return nil }
+            return withoutEmphasisMarks(withoutBlockMarks(trimmed))
         }
-        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return lines.filter { !$0.isEmpty }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// `---`, `***` or `___` (spaces allowed): a thematic break.
+    private static func isRule(_ line: String) -> Bool {
+        let marks = line.filter { $0 != " " }
+        guard marks.count >= 3, let first = marks.first, "-*_".contains(first) else { return false }
+        return marks.allSatisfy { $0 == first }
+    }
+
+    /// Drops the marks at the start of a line: quotes (`>`), headings (`#` to `######`, also closing `#`s)
+    /// and bullets (`-`, `*`, `+`). A numbered item keeps its number.
+    private static func withoutBlockMarks(_ line: String) -> String {
+        var rest = Substring(line)
+        while rest.hasPrefix(">") { rest = rest.dropFirst().drop { $0 == " " } }
+        let hashes = rest.prefix { $0 == "#" }.count
+        if (1...6).contains(hashes), rest.count == hashes || rest.dropFirst(hashes).first == " " {
+            rest = rest.dropFirst(hashes).drop { $0 == " " }
+            let body = rest.trimmingCharacters(in: .whitespaces)
+            let closing = body.reversed().prefix { $0 == "#" }.count
+            if closing > 0, closing == body.count || body.dropLast(closing).last == " " {
+                rest = Substring(body.dropLast(closing))
+            }
+        } else if let mark = rest.first, "-*+".contains(mark), rest.count == 1 || rest.dropFirst().first == " " {
+            rest = rest.dropFirst().drop { $0 == " " }
+        }
+        return rest.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Marks that the inline parser left, for example an open `**` in a reply that ended early.
+    /// A single `_` or `~` stays, because names and paths use it (`file_name`, `~home`).
+    private static func withoutEmphasisMarks(_ line: String) -> String {
+        line.replacingOccurrences(of: "*", with: "")
+            .replacingOccurrences(of: "__", with: "")
+            .replacingOccurrences(of: "~~", with: "")
     }
 }
 
@@ -74,6 +111,12 @@ public enum VoiceReplySettings {
     public static func autoPlay(_ defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: autoPlayKey) as? Bool ?? true
     }
+}
+
+/// Issue #36: why a voice reply has no audio.
+public enum VoiceReplyError: Error, Equatable {
+    /// iOS has no decoder for the audio (for example `.ogg` Opus) or the bytes are not audio.
+    case cannotDecode
 }
 
 /// The files of the voice replies: Application Support/HermesConnect/VoiceReplies.
@@ -98,6 +141,8 @@ public enum VoiceReplyFiles {
     }
 
     /// Writes the audio to a new file in `folder` and reads its length.
+    /// Issue #36: audio that does not decode, or has no length, throws `VoiceReplyError.cannotDecode`
+    /// and leaves no file. The bubble then shows the error state with retry, not a ready 0 s bubble.
     public static func save(_ audio: SpokenAudio, in folder: URL = directory()) throws -> VoiceReplyAudio {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let url = folder.appending(path: "\(UUID().uuidString).\(fileExtension(mimeType: audio.mimeType))")
@@ -107,6 +152,10 @@ public enum VoiceReplyFiles {
         #endif
         try audio.data.write(to: url, options: options)
         let duration = (try? AVAudioPlayer(contentsOf: url).duration) ?? 0
-        return VoiceReplyAudio(fileURL: url, duration: duration.isFinite ? duration : 0)
+        guard duration.isFinite, duration > 0 else {
+            try? FileManager.default.removeItem(at: url)
+            throw VoiceReplyError.cannotDecode
+        }
+        return VoiceReplyAudio(fileURL: url, duration: duration)
     }
 }

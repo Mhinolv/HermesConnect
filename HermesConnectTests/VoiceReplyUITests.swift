@@ -40,6 +40,13 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
 @Suite(.serialized) struct VoiceReplyUITests {
     private let folder = FileManager.default.temporaryDirectory.appendingPathComponent("VoiceReplyUITests")
 
+    /// Issue #36: a reply keeps playing on a locked phone. Background location still uses no mode.
+    @Test func infoPlistHasTheAudioBackgroundMode() {
+        let modes = Bundle(for: ChatViewController.self).infoDictionary?["UIBackgroundModes"] as? [String] ?? []
+        #expect(modes.contains("audio"))
+        #expect(!modes.contains("location"))
+    }
+
     private func makeController(_ model: ChatViewModel, autoPlay: Bool = true)
         -> (ChatViewController, FakeVoiceRecorder) {
         let recorder = FakeVoiceRecorder()

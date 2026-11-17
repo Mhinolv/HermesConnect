@@ -39,6 +39,10 @@
 	<string>Hermes records voice memos that you send to your agent.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Hermes attaches photos that you choose to your messages.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

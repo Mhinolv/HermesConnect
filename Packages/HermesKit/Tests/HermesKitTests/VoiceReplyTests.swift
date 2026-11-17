@@ -6,6 +6,19 @@ import Testing
 private let speakToken = String(repeating: "ef", count: 32)
 private let audioBytes = Data("mp3-bytes".utf8)
 
+/// A real 16-bit mono WAV of `seconds` of silence. AVFoundation decodes it on macOS and iOS.
+private func silentWAV(seconds: Double = 1, rate: Int = 8000) -> Data {
+    let samples = Int(Double(rate) * seconds)
+    var data = Data()
+    func append<T: FixedWidthInteger>(_ value: T) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+    data.append(contentsOf: Array("RIFF".utf8)); append(UInt32(36 + samples * 2))
+    data.append(contentsOf: Array("WAVEfmt ".utf8)); append(UInt32(16)); append(UInt16(1)); append(UInt16(1))
+    append(UInt32(rate)); append(UInt32(rate * 2)); append(UInt16(2)); append(UInt16(16))
+    data.append(contentsOf: Array("data".utf8)); append(UInt32(samples * 2))
+    data.append(Data(count: samples * 2))
+    return data
+}
+
 private func event(_ json: String) throws -> GatewayClientEvent {
     .event(try JSONDecoder().decode(GatewayEvent.self, from: Data(json.utf8)))
 }
@@ -40,6 +53,30 @@ private func complete(_ text: String, status: String = "complete") throws -> Gat
         #expect(spoken.hasSuffix("Done."))
     }
 
+    /// Issue #36: headings, bullets, quotes, rules and emphasis marks never go to speak.
+    @Test func spokenTextDropsBlockAndEmphasisMarks() {
+        let text = """
+        # Plan
+        ## Steps ##
+        - Pack the **car**
+        * Buy _snacks_
+        + Call __Sam__
+          - Nested *item*
+        > Note: leave ***early***
+        1. First
+        ---
+        Then **rest
+        """
+        #expect(VoiceReplyText.spokenText(text)
+            == "Plan\nSteps\nPack the car\nBuy snacks\nCall Sam\nNested item\nNote: leave early\n1. First\nThen rest")
+    }
+
+    @Test func spokenTextKeepsPlainSymbols() {
+        #expect(VoiceReplyText.spokenText("Cost: 5 - 2 = 3 #1 file_name ~home") == "Cost: 5 - 2 = 3 #1 file_name ~home")
+        #expect(!VoiceReplyText.spokenText("It was ~~Sam~~ Alex.").contains("~"))
+        #expect(VoiceReplyText.spokenText("#\n- \n***").isEmpty)
+    }
+
     @Test func codeOnlyReplyHasNothingToSpeak() {
         #expect(VoiceReplyText.spokenText("```\nls -la\n```").isEmpty)
         #expect(VoiceReplyText.spokenText("  \n").isEmpty)
@@ -54,12 +91,24 @@ private func complete(_ text: String, status: String = "complete") throws -> Gat
     @Test func saveWritesTheFileInTheFolder() throws {
         let folder = FileManager.default.temporaryDirectory.appending(path: "VoiceReplyTests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: folder) }
-        let saved = try VoiceReplyFiles.save(SpokenAudio(data: audioBytes, mimeType: "audio/ogg"), in: folder)
+        let wav = silentWAV(seconds: 2)
+        let saved = try VoiceReplyFiles.save(SpokenAudio(data: wav, mimeType: "audio/wav"), in: folder)
         #expect(saved.fileURL.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL)
-        #expect(saved.fileURL.pathExtension == "ogg")
-        #expect(try Data(contentsOf: saved.fileURL) == audioBytes)
-        // Bytes that are not audio have no length. The bubble then shows 0:00.
-        #expect(saved.duration == 0)
+        #expect(saved.fileURL.pathExtension == "wav")
+        #expect(try Data(contentsOf: saved.fileURL) == wav)
+        #expect(abs(saved.duration - 2) < 0.1)
+    }
+
+    /// Issue #36: audio that iOS cannot decode (for example `.ogg` Opus) is an error, not a 0 s bubble.
+    @Test(arguments: [("audio/ogg", audioBytes), ("audio/opus", audioBytes), ("audio/mpeg", Data([0xFF, 0x00]))])
+    func saveRefusesAudioThatDoesNotDecode(mime: String, bytes: Data) throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "VoiceReplyTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        #expect(throws: VoiceReplyError.cannotDecode) {
+            try VoiceReplyFiles.save(SpokenAudio(data: bytes, mimeType: mime), in: folder)
+        }
+        // No broken file stays on disk.
+        #expect(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).isEmpty)
     }
 
     @Test func autoPlayIsOnByDefault() throws {
@@ -154,8 +203,12 @@ private final class FakeSpeakTransport: ChatTransport, @unchecked Sendable {
     var spoken: [String] { lock.withLock { _spoken } }
     var transcribes: Int { lock.withLock { _transcribes } }
 
+    /// Offline: `session.create` fails, so a new chat has no stored id.
+    var startFails = false
+
     func startSession(source _: String, idempotencyKey _: String) async throws -> ChatSessionRef {
-        ChatSessionRef(liveId: "s1", storedId: "st1")
+        if lock.withLock({ startFails }) { throw Failure() }
+        return ChatSessionRef(liveId: "s1", storedId: "st1")
     }
 
     func resumeSession(storedId: String, source _: String) async throws -> ChatSessionRef {
@@ -283,6 +336,26 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         #expect(vm.retrySpeech(id: id) == nil)
     }
 
+    /// Issue #36: a reply that cannot decode shows "Audio unavailable. Tap to retry.", not a ready 0 s bubble.
+    @Test func undecodableReplyShowsTheErrorState() async throws {
+        let transport = FakeSpeakTransport()
+        transport.speakResult = .success(SpokenAudio(data: audioBytes, mimeType: "audio/ogg"))
+        let folder = FileManager.default.temporaryDirectory.appending(path: "VoiceReplyTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let vm = ChatViewModel(transport: transport, redrawInterval: .seconds(60), loadAudio: { _ in Data("m4a".utf8) },
+                               removeAudio: { _ in }, saveSpeech: { try VoiceReplyFiles.save($0, in: folder) })
+        let id = try await voiceTurn(vm)
+        try await waitUntil { vm.messages.last?.spokenReply != .preparing }
+        #expect(vm.messages.last?.spokenReply == .failed)
+        #expect(ChatTimeline.rows(for: vm.messages).last?.footnote == .audioUnavailable)
+        #expect(vm.autoPlayReplyId == nil)
+
+        // Retry speaks again. Audio that decodes is ready.
+        transport.speakResult = .success(SpokenAudio(data: silentWAV(), mimeType: "audio/wav"))
+        await vm.retrySpeech(id: id)?.value
+        #expect((vm.messages.last?.spokenReply?.audio?.duration ?? 0) > 0)
+    }
+
     @Test func historyMergeKeepsTheAudio() async throws {
         let transport = FakeSpeakTransport()
         let vm = model(transport)
@@ -354,6 +427,64 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         #expect(cache.loadTranscript(sessionId: "st1").isEmpty)
     }
 
+    /// Issue #36: a new chat that never got a stored id (offline) keeps a failed memo after a relaunch.
+    @Test func failedMemoInANewChatSurvivesARelaunch() async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "VoiceReplyTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let memoURL = folder.appending(path: "memo.m4a")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("m4a".utf8).write(to: memoURL)
+        let cacheFolder = folder.appending(path: "Cache", directoryHint: .isDirectory)
+        let transport = FakeSpeakTransport()
+        transport.startFails = true
+        transport.transcript = .failure(FakeSpeakTransport.Failure())
+        let list = SessionListModel(transport: FakeSessionsTransport(), chatTransport: transport,
+                                    cache: FileSessionCacheStore(directory: cacheFolder))
+        let chat = list.newChat(key: "n1")
+        await chat.open()
+        #expect(chat.storedSessionId == nil)
+        await chat.sendVoiceMemo(VoiceMemo(fileURL: memoURL, duration: 5, waveform: [0.4])).value
+        #expect(chat.messages.last?.delivery == .failed)
+
+        // A relaunch: new models read the same files.
+        let cache = FileSessionCacheStore(directory: cacheFolder)
+        let relaunched = SessionListModel(transport: FakeSessionsTransport(), chatTransport: transport, cache: cache)
+        #expect(relaunched.hasCachedNewChat)
+        let again = relaunched.newChat(key: "n2")
+        let kept = try #require(again.messages.last)
+        #expect(kept.voice?.fileURL == memoURL)
+        #expect(kept.voice?.transcript == .failed)
+        #expect(kept.delivery == .failed)
+
+        // Back online, "Try Again" sends it. The accepted prompt makes the server row, so the slot empties.
+        transport.startFails = false
+        transport.transcript = .success("Remind me to call Sam")
+        await again.retrySend(id: kept.id)?.value
+        #expect(again.messages.last?.delivery == .delivered)
+        #expect(!relaunched.hasCachedNewChat)
+        #expect(cache.loadActiveSessionId() == "st1")
+        #expect(cache.loadTranscript(sessionId: "st1").last?.voice?.fileURL == memoURL)
+    }
+
+    /// Issue #36: one new chat at a time keeps its memos. A second new chat does not take or replace them.
+    @Test func secondNewChatLeavesTheKeptMemo() async throws {
+        let transport = FakeSpeakTransport()
+        transport.startFails = true
+        transport.transcript = .failure(FakeSpeakTransport.Failure())
+        let cache = InMemorySessionCacheStore()
+        let list = SessionListModel(transport: FakeSessionsTransport(), chatTransport: transport, cache: cache)
+        let first = list.newChat(key: "n1")
+        await first.sendVoiceMemo(memo()).value
+        let second = list.newChat(key: "n2")
+        #expect(second !== first)
+        #expect(second.messages.isEmpty)
+        await second.sendVoiceMemo(memo()).value
+        #expect(cache.loadTranscript(sessionId: SessionCache.newChatId).map(\.id) == first.messages.map(\.id))
+        // "Delete" on the kept memo empties the slot.
+        first.delete(id: try #require(first.messages.last?.id))
+        #expect(!list.hasCachedNewChat)
+    }
+
     @Test func historyMergeKeepsAFailedMemo() {
         var thread = ChatThread(messages: [
             ChatMessage(id: "f", role: .user, text: "", date: Date(), delivery: .failed,
@@ -407,6 +538,16 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         let raw = try String(contentsOf: cache.transcriptURL(sessionId: "k"), encoding: .utf8)
         #expect(raw.contains(#""version":2"#))
         #expect(!raw.contains(NSHomeDirectory()))
+    }
+
+    /// Issue #36: a cached reply of an older build with no length (it did not decode) reads as failed.
+    @Test func readyReplyWithNoLengthLoadsAsFailed() {
+        let cache = store()
+        defer { try? FileManager.default.removeItem(at: cache.directory) }
+        let reply = ChatMessage(id: "a1", role: .assistant, text: "Done.", date: Date(timeIntervalSince1970: 1),
+                                reply: .complete, spokenReply: .ready(VoiceReplyAudio(fileURL: replyURL, duration: 0)))
+        cache.saveTranscript([reply], sessionId: "k")
+        #expect(FileSessionCacheStore(directory: cache.directory).loadTranscript(sessionId: "k").first?.spokenReply == .failed)
     }
 
     @Test func pathsFollowAMovedAppFolder() {

@@ -202,10 +202,12 @@ enum ChatLaunch {
     }
 
     /// The route to push at once on launch: the demo chat, or the cached active session.
+    /// Issue #36: a new chat that kept a memo comes first, so the owner sees the memo and "Try Again".
     static func cachedLaunchRoute(_ sessions: SessionListModel) -> ChatRoute? {
         #if DEBUG
         if isDemo { return demoLaunchRoute }
         #endif
+        if sessions.hasCachedNewChat { return .new(SessionCache.newChatId) }
         return sessions.cachedActiveSessionId.map(ChatRoute.session)
     }
 

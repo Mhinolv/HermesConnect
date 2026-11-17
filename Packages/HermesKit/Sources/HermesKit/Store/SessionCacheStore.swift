@@ -24,6 +24,9 @@ public enum SessionCache {
     /// The file format version. Readers accept every version: missing keys get defaults.
     /// Version 2 (issue #10): voice memos, memos that were not delivered, and the audio of voice replies.
     public static let formatVersion = 2
+    /// Issue #36: the transcript key of the new chat that has no server row yet. Its memos stay here,
+    /// so a failed memo survives a quit. No stored id starts with `#`.
+    public static let newChatId = "#new-chat"
 
     /// The messages to keep: the last `limit` ones that have ended, plus every voice memo.
     /// The owner never loses a recording: a memo that was not delivered stays with "Try Again".
@@ -105,8 +108,9 @@ struct CachedSpeech: Codable, Equatable {
         duration = spoken.audio?.duration ?? 0
     }
 
+    /// A file with no length did not decode (builds before issue #36). It reads as failed, with retry.
     var spoken: SpokenReply {
-        guard let path else { return .failed }
+        guard let path, duration > 0 else { return .failed }
         return .ready(VoiceReplyAudio(fileURL: CachedPath.decode(path), duration: duration))
     }
 
