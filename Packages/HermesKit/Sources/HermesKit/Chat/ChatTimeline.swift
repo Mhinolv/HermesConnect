@@ -13,6 +13,8 @@ public struct ChatRow: Sendable, Equatable, Identifiable {
         case noSpeech
         /// The speak call of a voice reply failed (issue #10). A tap tries again.
         case audioUnavailable
+        /// Issue #49 (QA #54): the speak call of a voice reply runs. The caption row has a spinner.
+        case preparingAudio
 
         public var text: String {
             switch self {
@@ -23,6 +25,7 @@ public struct ChatRow: Sendable, Equatable, Identifiable {
             case .stopped: "Stopped"
             case .noSpeech: "No speech found."
             case .audioUnavailable: "Audio unavailable. Tap to retry."
+            case .preparingAudio: "Preparing audio…"
             }
         }
 
@@ -81,7 +84,12 @@ public enum ChatTimeline {
             switch message.reply {
             case .failed: return .replyFailed
             case .interrupted: return .stopped
-            default: return message.spokenReply == .failed ? .audioUnavailable : nil
+            default:
+                switch message.spokenReply {
+                case .failed: return .audioUnavailable
+                case .preparing: return .preparingAudio
+                case .ready, nil: return nil
+                }
             }
         }
     }

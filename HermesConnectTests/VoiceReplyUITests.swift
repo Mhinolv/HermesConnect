@@ -89,16 +89,19 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         ]
     }
 
-    @Test func replyShowsTheTextThenTheAudioBubble() throws {
+    /// Issue #49 (owner decision): a reply with ready audio is one voice bubble with its text under it.
+    @Test func readyReplyIsOneVoiceBubbleWithItsText() throws {
         let (controller, _) = makeController(ChatViewModel(transport: OfflineChatTransport(), messages: readyReply()))
         let collection = controller.messagesCollectionView
         collection.layoutIfNeeded()
-        #expect(collection.numberOfSections == 3)
-        #expect(collection.cellForItem(at: IndexPath(item: 0, section: 1)) is ChatTextCell)
-        let cell = try #require(collection.cellForItem(at: IndexPath(item: 0, section: 2)) as? ChatVoiceCell)
-        #expect(!cell.progress.isHidden)
-        #expect(cell.accessibilityLabel == "Hermes voice reply, 0:02")
-        #expect(cell.accessibilityCustomActions?.map(\.name) == ["Play"])
+        #expect(collection.numberOfSections == 2)
+        let cell = try #require(collection.cellForItem(at: IndexPath(item: 0, section: 1)) as? ChatVoiceCell)
+        #expect(!cell.waveform.isHidden)
+        #expect(cell.seeks)
+        #expect(cell.transcriptLabel.text == "Lunch at noon.")
+        #expect(cell.transcriptLabel.numberOfLines == 2)
+        #expect(cell.accessibilityLabel == "Hermes voice reply, 0:02, Lunch at noon.")
+        #expect(cell.accessibilityCustomActions?.map(\.name).prefix(3) == ["Play", "Show Full Text", "Copy"])
     }
 
     @Test func tapPlaysPausesAndReplaysTheCachedFile() throws {

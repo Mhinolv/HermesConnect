@@ -117,6 +117,10 @@ struct ChatThreadView: UIViewControllerRepresentable {
         if let scenario = DemoChatTransport.Scenario.current, scenario.showsVoiceReplies {
             let controller = ChatViewController(model: model)
             controller.onFirstAppear = { controller in
+                if scenario == .voiceReplyText {
+                    controller.showReplyText(id: "r2")
+                    return
+                }
                 controller.tapAudio(id: "r2")
                 guard scenario == .voiceRepliesPaused else { return }
                 Task { @MainActor in
