@@ -72,6 +72,8 @@ public final class ChatViewModel {
     @ObservationIgnored private(set) var keepsNewChat: Bool
     /// Issue #67: the prompt text of a `send` or `skill` result, by message id. The bubble shows `display`.
     @ObservationIgnored private var commandPrompts: [String: String] = [:]
+    /// Issue #39: the run that sends the queued messages in order. One run at a time.
+    @ObservationIgnored private var outboxTask: Task<Void, Never>?
     /// Issue #12: the downloads of the `MEDIA:` files of this chat.
     @ObservationIgnored public let receivedFiles: ReceivedFileLoader
     /// Metadata only: ids, counts and states. Never the text of a message (issue #18).
@@ -168,7 +170,7 @@ public final class ChatViewModel {
     /// Calls at the same time share one run.
     public func open() async {
         guard let storedSessionId else {
-            _ = try? await currentSession()
+            if (try? await currentSession()) != nil { sendQueued() }
             return
         }
         if let openTask { return await openTask.value }
@@ -203,6 +205,8 @@ public final class ChatViewModel {
                 redrawNow()
             }
             saveTranscript()
+            // Issue #39: the link is up. The outbox sends after the history, so the order stays.
+            sendQueued()
         } catch where Self.isSessionNotFound(error) && !thread.messages.isEmpty {
             // QA #38 defect 1: the server lost a row that has messages on the screen. Keep them and
             // start a new session in its place. The chat stays open.
@@ -233,6 +237,7 @@ public final class ChatViewModel {
             log.notice("session not found: started a new session")
             saveTranscript()
             if !draft.isEmpty { updateDraft(draft) }
+            sendQueued()
         } catch {
             if storedSessionId == nil { storedSessionId = lost }
             needsOpen = true
@@ -284,6 +289,16 @@ public final class ChatViewModel {
         guard let cache else { return }
         if keepsNewChat { cache.saveTranscript(thread.messages, sessionId: SessionCache.newChatId) }
         if let storedSessionId { cache.saveTranscript(thread.messages, sessionId: storedSessionId) }
+        saveOutboxIndex()
+    }
+
+    /// Issue #39: the outbox index has one key per chat. A chat in the new-chat slot uses the slot key, because
+    /// launch opens that slot. Its stored id must not send the same messages a second time.
+    private func saveOutboxIndex() {
+        guard let cache else { return }
+        let queued = thread.messages.contains { $0.delivery == .queued }
+        if keepsNewChat { cache.saveOutbox(queued, sessionId: SessionCache.newChatId) }
+        if let storedSessionId { cache.saveOutbox(queued && !keepsNewChat, sessionId: storedSessionId) }
     }
 
     /// Issue #36: another new chat takes the slot. Only an empty chat gives it up, so no kept memo is lost.
@@ -297,6 +312,7 @@ public final class ChatViewModel {
         guard keepsNewChat else { return }
         keepsNewChat = false
         cache?.saveTranscript([], sessionId: SessionCache.newChatId)
+        cache?.saveOutbox(false, sessionId: SessionCache.newChatId)
     }
 
     /// Applies one item of the event stream. Events of other sessions are ignored.
@@ -325,6 +341,9 @@ public final class ChatViewModel {
             // can replace the client with no `.disconnected` event.
             if needsOpen || session != nil, storedSessionId != nil {
                 Task { await open() }
+            } else if hasQueued {
+                // Issue #39: a new chat with no stored id, or a chat that did not open yet.
+                sendQueued()
             }
         case .state, .serverRequest:
             break
@@ -346,6 +365,7 @@ public final class ChatViewModel {
         if hasText, let command = SlashCommand(text) { return runCommand(command) }
         let id = makeId()
         thread.addOutgoing(id: id, text: hasText ? text : "", date: now(), attachments: attachments)
+        if let queued = queueBehindOutbox(id) { return queued }
         redrawNow()
         return Task { await deliver(id: id, retryBeforeRowId: nil) }
     }
@@ -359,6 +379,7 @@ public final class ChatViewModel {
     public func sendVoiceMemo(_ memo: VoiceMemo) -> Task<Void, Never> {
         let id = makeId()
         thread.addOutgoingVoice(id: id, memo: memo, date: now())
+        if let queued = queueBehindOutbox(id) { return queued }
         redrawNow()
         // The owner never loses a recording: the memo is in the cache before the upload starts.
         saveTranscript()
@@ -370,6 +391,8 @@ public final class ChatViewModel {
     @discardableResult
     public func retrySend(id: String) -> Task<Void, Never>? {
         guard let message = thread.message(id: id), message.delivery == .failed else { return nil }
+        // Issue #39: with messages in the outbox, the retry waits its turn in thread order.
+        if let queued = queueBehindOutbox(id) { return queued }
         thread.setDelivery(.sending, id: id)
         if let voice = message.voice, voice.transcript.text == nil {
             thread.setTranscript(.pending, id: id)
@@ -435,10 +458,91 @@ public final class ChatViewModel {
         }
     }
 
+    // MARK: Outbox (issue #39)
+
+    /// `true` when a message waits in the outbox, or the outbox run sends one.
+    public var hasQueued: Bool {
+        outboxTask != nil || thread.messages.contains { $0.delivery == .queued }
+    }
+
+    /// "Send Now" on a queued bubble, and each connect: the queued messages go one at a time, in thread order.
+    /// A message that fails because the app is offline goes back to the outbox, and the run stops.
+    /// A message that the server refuses shows "Not Delivered", and the run goes on. Returns the run (tests).
+    @discardableResult
+    public func sendQueued() -> Task<Void, Never>? {
+        if let outboxTask { return outboxTask }
+        guard thread.messages.contains(where: { $0.delivery == .queued }) else { return nil }
+        let task = Task { [weak self] in
+            await self?.sendOutbox()
+            self?.outboxTask = nil
+        }
+        outboxTask = task
+        return task
+    }
+
+    private func sendOutbox() async {
+        while let next = thread.messages.first(where: { $0.delivery == .queued }) {
+            let id = next.id
+            thread.setDelivery(.sending, id: id)
+            let transcribe = next.voice.map { $0.transcript.text == nil } ?? false
+            if transcribe { thread.setTranscript(.pending, id: id) }
+            redrawNow()
+            // A quit from now on must not send it again: the cache no longer has it as queued.
+            saveTranscript()
+            log.info("outbox: sending message \(id)")
+            let outcome = transcribe ? await deliverVoice(id: id) : await deliver(id: id, retryBeforeRowId: nil)
+            if outcome == .queued { return }
+        }
+    }
+
+    /// A new message, or a retry, while other messages wait: it goes into the outbox after them, so the
+    /// order stays. Returns the outbox run, or `nil` when the outbox is empty and the message can go now.
+    private func queueBehindOutbox(_ id: String) -> Task<Void, Never>? {
+        guard hasQueued else { return nil }
+        thread.setDelivery(.queued, id: id)
+        redrawNow()
+        saveTranscript()
+        return sendQueued()
+    }
+
+    /// The send failed because the app is offline: the message waits in the outbox.
+    private func queue(_ id: String) {
+        log.notice("prompt queued offline: message \(id)")
+        thread.setDelivery(.queued, id: id)
+        // An upload that the drop stopped goes again with the send.
+        for item in thread.message(id: id)?.attachments ?? [] where item.upload == .failed {
+            thread.setUpload(.pending, attachment: item.id, message: id)
+        }
+        saveTranscript()
+    }
+
+    /// A reply retry (`truncate_before_row_id`) and the prompt of a slash command result keep "Not Delivered":
+    /// the outbox sends plain prompts only, and the cache cannot keep the command prompt text.
+    private func canQueue(_ id: String, retryBeforeRowId: Int?) -> Bool {
+        retryBeforeRowId == nil && commandPrompts[id] == nil && thread.message(id: id) != nil
+    }
+
+    /// Siri (issue #71) never queues: it says "not reachable", and a new try sends the text once.
+    func failQueued(id: String) {
+        guard thread.message(id: id)?.delivery == .queued else { return }
+        thread.setDelivery(.failed, id: id)
+        redrawNow()
+        saveTranscript()
+    }
+
     // MARK: Send
 
-    private func deliverVoice(id: String) async {
-        guard let url = thread.message(id: id)?.voice?.fileURL else { return }
+    /// How one delivery ended.
+    private enum DeliveryOutcome {
+        case delivered
+        case failed
+        /// Offline: the message went back to the outbox (issue #39).
+        case queued
+    }
+
+    @discardableResult
+    private func deliverVoice(id: String) async -> DeliveryOutcome {
+        guard let url = thread.message(id: id)?.voice?.fileURL else { return .failed }
         let transport = self.transport
         let loadAudio = self.loadAudio
         let transcription = self.transcription
@@ -452,34 +556,46 @@ public final class ChatViewModel {
                 }
             }.value
         } catch {
+            guard thread.message(id: id) != nil else { return .failed }
+            if Outbox.isOffline(error, submitted: false) {
+                // Issue #39: the memo waits with no transcript. The outbox transcribes it on connect.
+                queue(id)
+                redrawNow()
+                return .queued
+            }
             thread.setTranscript(.failed, id: id)
             thread.setDelivery(.failed, id: id)
             redrawNow()
             saveTranscript()
-            return
+            return .failed
         }
-        guard thread.message(id: id) != nil else { return }
+        guard thread.message(id: id) != nil else { return .failed }
         if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             thread.setTranscript(.empty, id: id)
             thread.setDelivery(.failed, id: id)
             redrawNow()
             saveTranscript()
-            return
+            return .failed
         }
         thread.setTranscript(.done(transcript), id: id)
         redrawNow()
-        await deliver(id: id, retryBeforeRowId: nil)
+        return await deliver(id: id, retryBeforeRowId: nil)
     }
 
-    private func deliver(id: String, retryBeforeRowId: Int?) async {
-        guard let isVoice = thread.message(id: id).map({ $0.voice != nil }) else { return }
+    @discardableResult
+    private func deliver(id: String, retryBeforeRowId: Int?) async -> DeliveryOutcome {
+        guard let isVoice = thread.message(id: id).map({ $0.voice != nil }) else { return .failed }
+        // Issue #39: `true` from the `prompt.submit` call on. After that a drop is not "offline".
+        var submitted = false
+        let outcome: DeliveryOutcome
         do {
             let session = try await currentSession()
             try await uploadAttachments(of: id, to: session.liveId)
-            guard let message = thread.message(id: id) else { return }
+            guard let message = thread.message(id: id) else { return .failed }
             let text = commandPrompts[id] ?? AttachmentPayload.promptText(message.text, attachments: message.attachments)
             thread.beginTurn(promptId: id)
             redrawNow()
+            submitted = true
             let row = if isVoice {
                 try await transport.submitVoicePrompt(sessionId: session.liveId, text: text,
                                                       retryBeforeRowId: retryBeforeRowId)
@@ -493,13 +609,21 @@ public final class ChatViewModel {
             leaveNewChatSlot()
             saveActiveSessionId()
             saveTranscript()
+            outcome = .delivered
+        } catch where canQueue(id, retryBeforeRowId: retryBeforeRowId)
+                        && Outbox.isOffline(error, submitted: submitted) {
+            thread.cancelWaiting()
+            queue(id)
+            outcome = .queued
         } catch {
             log.notice("prompt not delivered: message \(id)")
             thread.setDelivery(.failed, id: id)
             thread.cancelWaiting()
             if isVoice { saveTranscript() }
+            outcome = .failed
         }
         redrawNow()
+        return outcome
     }
 
     /// Issue #8: each attachment that the live session does not hold yet goes up, one at a time.

@@ -101,7 +101,7 @@ public struct ChatThread: Sendable, Equatable {
         switch delivery {
         case .delivered: if ackPromptIds.contains(id) { setAck(.seen, on: id) }
         case .sending: messages[index].agentAck = nil
-        case .failed:
+        case .failed, .queued:
             messages[index].agentAck = nil
             ackPromptIds.removeAll { $0 == id }
         }

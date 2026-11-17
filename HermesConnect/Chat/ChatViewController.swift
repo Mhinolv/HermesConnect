@@ -496,7 +496,9 @@ final class ChatViewController: MessagesViewController {
         guard let calculator = voiceCalculator else { return nil }
         let text: NSAttributedString?
         if let voice = row.message.voice {
-            text = ChatVoiceLayout.transcriptText(for: voice, traits: traitCollection)
+            // Issue #39: a queued memo is transcribed on connect. No "Transcribing…" while it waits.
+            let waits = row.message.delivery == .queued && voice.transcript == .pending
+            text = waits ? nil : ChatVoiceLayout.transcriptText(for: voice, traits: traitCollection)
         } else if (message as? ChatBubble)?.part.content == .spokenReply, let spoken = row.message.spokenReply {
             text = ChatVoiceLayout.replyCaption(for: spoken, text: row.message.text, traits: traitCollection)
         } else {
@@ -920,7 +922,7 @@ final class ChatViewController: MessagesViewController {
         cell.isAccessibilityElement = true
         cell.accessibilityLabel = ChatBubbleParts.accessibilityLabel(for: part)
         cell.accessibilityHint = switch row.footnote {
-        case .notDelivered, .noSpeech: "Double-tap for options."
+        case .notDelivered, .noSpeech, .queued: "Double-tap for options."
         case .replyFailed, .audioUnavailable: "Double-tap to retry."
         default: nil
         }
@@ -1047,6 +1049,8 @@ final class ChatViewController: MessagesViewController {
             }
             if row.message.delivery == .failed, let self {
                 actions += self.sendFailureActions(for: row)
+            } else if row.message.delivery == .queued, let self {
+                actions += self.queuedActions(for: row)
             }
             return actions.isEmpty ? nil : UIMenu(children: actions)
         }
@@ -1194,6 +1198,33 @@ final class ChatViewController: MessagesViewController {
         ]
     }
 
+    /// Issue #39: "Send Now" sends the outbox in order now. "Delete" takes the message out of the outbox.
+    private func queuedActions(for row: ChatRow) -> [UIAction] {
+        let id = row.id
+        return [
+            UIAction(title: "Send Now", image: UIImage(systemName: "arrow.up.circle")) { [weak self] _ in
+                self?.model.sendQueued()
+            },
+            UIAction(title: "Delete", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
+                self?.deleteMessage(id: id)
+            },
+        ]
+    }
+
+    private func showQueuedOptions(for row: ChatRow, from cell: UIView) {
+        let sheet = UIAlertController(title: nil, message: "This message will send when Hermes is connected.",
+                                      preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Send Now", style: .default) { [weak self] _ in
+            self?.model.sendQueued()
+        })
+        sheet.addAction(UIAlertAction(title: "Delete", style: .destructive) { [weak self] _ in
+            self?.deleteMessage(id: row.id)
+        })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = cell
+        present(sheet, animated: true)
+    }
+
     private func showSendFailureOptions(for row: ChatRow, from cell: UIView) {
         let text = switch row.message.voice?.transcript {
         case .empty: "No speech was found in your voice memo."
@@ -1235,8 +1266,14 @@ final class ChatViewController: MessagesViewController {
             showSendFailureOptions(for: row, from: cell)
             return
         }
+        // Issue #39: each part of a queued message opens "Send Now" and "Delete".
+        if row.message.delivery == .queued {
+            showQueuedOptions(for: row, from: cell)
+            return
+        }
         switch row.footnote {
         case .notDelivered, .noSpeech: showSendFailureOptions(for: row, from: cell)
+        case .queued: showQueuedOptions(for: row, from: cell)
         case .replyFailed: model.retryReply(id: row.id)
         case .audioUnavailable: model.retrySpeech(id: row.id)
         default: break
@@ -1324,7 +1361,7 @@ extension ChatViewController: MessagesDataSource {
 
     func messageBottomLabelAttributedText(for message: MessageType, at _: IndexPath) -> NSAttributedString? {
         guard let footnote = row(for: message)?.footnote else { return nil }
-        if ChatCaptionRow.uses(footnote) {
+        if ChatCaptionRow.uses(footnote) || footnote == .queued {
             return ChatCaptionRow.text(footnote, font: ChatLabelStyle.font(.caption2, traitCollection))
         }
         return NSAttributedString(string: footnote.text, attributes: [
