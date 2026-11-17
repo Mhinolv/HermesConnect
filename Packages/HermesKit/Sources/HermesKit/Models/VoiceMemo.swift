@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 /// A voice memo that the owner recorded on the phone (issue #9, docs/hermes-protocol.md 3.9).
@@ -100,5 +101,49 @@ public enum VoiceWaveform {
             let slice = levels[min(start, levels.count - 1)..<min(end, levels.count)]
             return min(1, max(0, slice.max() ?? 0))
         }
+    }
+
+    /// Issue #49: the length of one level window, in seconds. The recorder meter reads at about this rate.
+    public static let windowSeconds: Double = 0.05
+
+    /// Issue #49: the bubble bars of decoded PCM samples (interleaved, -1 to 1). Each 50 ms window gives
+    /// one level from its RMS in dBFS, with the same scale as the recorder meter. Then `bars(from:count:)`.
+    public static func bars(samples: [Float], channels: Int, sampleRate: Double,
+                            count: Int = VoiceMemoLimits.waveformBars) -> [Float] {
+        let channels = max(1, channels)
+        let frames = samples.count / channels
+        let window = max(1, Int(sampleRate * windowSeconds))
+        var levels: [Float] = []
+        levels.reserveCapacity(frames / window + 1)
+        var start = 0
+        while start < frames {
+            let end = min(frames, start + window)
+            var sum: Float = 0
+            for index in start * channels..<end * channels { sum += samples[index] * samples[index] }
+            let rms = (sum / Float((end - start) * channels)).squareRoot()
+            levels.append(level(decibels: rms > 0 ? 20 * log10(rms) : -.infinity))
+            start = end
+        }
+        return bars(from: levels, count: count)
+    }
+
+    /// Issue #49: the bubble bars of an audio file that AVFoundation decodes (the saved WAV of a voice reply).
+    /// `nil` when the file does not decode.
+    public static func bars(contentsOf url: URL, count: Int = VoiceMemoLimits.waveformBars) -> [Float]? {
+        guard let file = try? AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: true),
+              file.length > 0 else { return nil }
+        let format = file.processingFormat
+        let channels = Int(format.channelCount)
+        var samples: [Float] = []
+        samples.reserveCapacity(Int(file.length) * channels)
+        let chunk: AVAudioFrameCount = 16_384
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunk) else { return nil }
+        while file.framePosition < file.length {
+            guard (try? file.read(into: buffer, frameCount: chunk)) != nil, buffer.frameLength > 0,
+                  let data = buffer.floatChannelData else { break }
+            samples += UnsafeBufferPointer(start: data[0], count: Int(buffer.frameLength) * channels)
+        }
+        guard !samples.isEmpty else { return nil }
+        return bars(samples: samples, channels: channels, sampleRate: format.sampleRate, count: count)
     }
 }

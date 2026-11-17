@@ -8,6 +8,10 @@ final class VoiceWaveformView: UIView {
     /// Bars drawn. The recording bar keeps the newest, so the wave moves from right to left.
     var barCount = VoiceMemoLimits.waveformBars
     var alignsNewestRight = false
+    /// Issue #49: the played part of a voice reply, from 0 to 1. Bars before it use `playedColor`.
+    /// `nil` draws every bar in `barColor` (memos and the recording bar).
+    var progress: CGFloat? { didSet { if progress != oldValue { setNeedsDisplay() } } }
+    var playedColor: UIColor = .label { didSet { setNeedsDisplay() } }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -26,11 +30,12 @@ final class VoiceWaveformView: UIView {
         let shown: [Float] = alignsNewestRight
             ? Array(repeating: 0, count: max(0, barCount - levels.count)) + levels.suffix(barCount)
             : levels
-        barColor.setFill()
         for (index, level) in shown.prefix(barCount).enumerated() {
             let height = max(3, CGFloat(level) * bounds.height)
             let x = CGFloat(index) * slot + (slot - width) / 2
             let bar = CGRect(x: x, y: (bounds.height - height) / 2, width: width, height: height)
+            let played = progress.map { (CGFloat(index) + 0.5) / CGFloat(barCount) <= $0 } ?? false
+            (played ? playedColor : barColor).setFill()
             UIBezierPath(roundedRect: bar, cornerRadius: width / 2).fill()
         }
     }

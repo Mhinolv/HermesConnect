@@ -22,10 +22,14 @@ public struct VoiceReplyAudio: Sendable, Equatable {
     public var fileURL: URL
     /// The length in seconds.
     public var duration: TimeInterval
+    /// Issue #49: the bubble waveform, `VoiceMemoLimits.waveformBars` levels from 0 to 1. Empty for a reply
+    /// that an older build cached: the bubble then shows flat bars.
+    public var waveform: [Float]
 
-    public init(fileURL: URL, duration: TimeInterval) {
+    public init(fileURL: URL, duration: TimeInterval, waveform: [Float] = []) {
         self.fileURL = fileURL
         self.duration = duration
+        self.waveform = waveform
     }
 }
 
@@ -54,6 +58,14 @@ public struct SpokenAudio: Sendable, Equatable {
 
 /// The text that goes to the speak call (docs/hermes-protocol.md 3.9 step 5).
 public enum VoiceReplyText {
+    /// Issue #49: the reply text under a voice bubble, as plain text on one run of lines.
+    /// Code blocks stay, with no fences. Line breaks become spaces, so 2 lines show the most text.
+    public static func previewText(_ text: String) -> String {
+        let plain = ChatMarkdown.runs(text).map(\.text).joined()
+        return plain.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
     /// The plain reply text with no code blocks, no `MEDIA:` tags and no Markdown marks.
     /// Link runs keep their label. An empty result means: do not call speak.
     /// Issue #36: headings, bullets, quotes, rules and left-over emphasis marks go too. The bubble keeps them.
@@ -160,7 +172,8 @@ public enum VoiceReplyFiles {
             try? FileManager.default.removeItem(at: url)
             throw VoiceReplyError.cannotDecode
         }
-        return VoiceReplyAudio(fileURL: url, duration: duration)
+        // Issue #49: the levels come from the decoded file once. The cache keeps them.
+        return VoiceReplyAudio(fileURL: url, duration: duration, waveform: VoiceWaveform.bars(contentsOf: url) ?? [])
     }
 
     /// The length of a file that the player opens and that decodes to audio frames, else `nil`.
