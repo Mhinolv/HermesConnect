@@ -60,6 +60,9 @@ final class ChatViewController: MessagesViewController {
         gesture.numberOfTapsRequired = 2
         return gesture
     }()
+    /// Issue #65: a single tap on the thread hides the keyboard. It waits for the double-tap.
+    private lazy var hideKeyboardTap = UITapGestureRecognizer(target: self, action: #selector(threadTapped))
+    private let hideKeyboardTapDelegate = HideKeyboardTapDelegate()
 
     init(model: ChatViewModel, recorder: any VoiceRecording = AVVoiceRecorder(),
          voiceFolder: URL = VoiceMemoFiles.directory()) {
@@ -93,6 +96,7 @@ final class ChatViewController: MessagesViewController {
         restoreDraft()
         configureScrollButton()
         configureTapbacks()
+        configureKeyboardDismiss()
         configureNewMessagesButton()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, _) in
             self.textSizeChanged()
@@ -1393,6 +1397,61 @@ extension ChatViewController: InputBarAccessoryViewDelegate {
         composerText = text
         model.updateDraft(text)
         updateSendButton()
+    }
+}
+
+// MARK: - Hide the keyboard (issue #65)
+
+/// Issue #65: a single tap on the thread, or a drag down, hides the keyboard (iMessage).
+enum ChatKeyboardDismiss {
+    static let tapName = "hideKeyboardTap"
+    /// The finger moves down this far, and more down than sideways, before the keyboard hides.
+    static let dragDistance: CGFloat = 20
+
+    static func hides(after translation: CGPoint) -> Bool {
+        translation.y >= dragDistance && translation.y > abs(translation.x)
+    }
+}
+
+extension ChatViewController {
+    private func configureKeyboardDismiss() {
+        hideKeyboardTap.name = ChatKeyboardDismiss.tapName
+        // MessageKit's bubble tap still runs: links, the voice play control and the send options keep working.
+        hideKeyboardTap.cancelsTouchesInView = false
+        hideKeyboardTapDelegate.doubleTap = doubleTap
+        hideKeyboardTap.delegate = hideKeyboardTapDelegate
+        messagesCollectionView.addGestureRecognizer(hideKeyboardTap)
+        // `.interactive` moves the keyboard only when the finger gets to it. A drag down hides it before that.
+        messagesCollectionView.panGestureRecognizer.addTarget(self, action: #selector(threadPanned(_:)))
+    }
+
+    /// The text stays in the composer. With the keyboard down, nothing changes.
+    @objc func threadTapped() {
+        messageInputBar.inputTextView.resignFirstResponder()
+    }
+
+    @objc private func threadPanned(_ pan: UIPanGestureRecognizer) {
+        guard pan.state == .changed else { return }
+        threadDragged(by: pan.translation(in: messagesCollectionView))
+    }
+
+    func threadDragged(by translation: CGPoint) {
+        let field = messageInputBar.inputTextView
+        guard field.isFirstResponder, ChatKeyboardDismiss.hides(after: translation) else { return }
+        field.resignFirstResponder()
+    }
+}
+
+/// The keyboard tap waits for the tapback double-tap, and runs with MessageKit's bubble tap.
+private final class HideKeyboardTapDelegate: NSObject, UIGestureRecognizerDelegate {
+    weak var doubleTap: UIGestureRecognizer?
+
+    func gestureRecognizer(_: UIGestureRecognizer, shouldRequireFailureOf other: UIGestureRecognizer) -> Bool {
+        other === doubleTap
+    }
+
+    func gestureRecognizer(_: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith _: UIGestureRecognizer) -> Bool {
+        true
     }
 }
 

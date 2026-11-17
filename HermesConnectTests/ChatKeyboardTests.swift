@@ -156,6 +156,76 @@ import UIKit
         if keyboardUp { closeKeyboard(controller, window) }
     }
 
+    // MARK: Hide the keyboard (issue #65)
+
+    /// Opens the composer with a draft. Returns the text view, which is the first responder.
+    private func focusComposer(_ controller: ChatViewController, draft: String) throws -> UITextView {
+        let field = controller.messageInputBar.inputTextView
+        field.text = draft
+        #expect(field.becomeFirstResponder())
+        try #require(field.isFirstResponder, "the composer did not take the focus")
+        return field
+    }
+
+    private func taps(_ controller: ChatViewController, count: Int) -> [UITapGestureRecognizer] {
+        (controller.messagesCollectionView.gestureRecognizers ?? [])
+            .compactMap { $0 as? UITapGestureRecognizer }.filter { $0.numberOfTapsRequired == count }
+    }
+
+    @Test func singleTapOnTheThreadWaitsForTheDoubleTapAndHidesTheKeyboard() async throws {
+        let (controller, window) = try show(messages())
+        defer { window.isHidden = true }
+        try await settle(window)
+        let field = try focusComposer(controller, draft: "Draft text")
+        let tap = try #require(taps(controller, count: 1).first { $0.name == ChatKeyboardDismiss.tapName },
+                               "the thread has no tap that hides the keyboard")
+        let doubleTap = try #require(taps(controller, count: 2).first)
+        let bubbleTap = try #require(taps(controller, count: 1).first { $0 !== tap }, "MessageKit's bubble tap")
+        // A double-tap opens the tapbacks and does not hide the keyboard.
+        #expect(tap.delegate?.gestureRecognizer?(tap, shouldRequireFailureOf: doubleTap) == true)
+        // Links, the voice play control and the bubble options still get the tap.
+        #expect(tap.delegate?.gestureRecognizer?(tap, shouldRecognizeSimultaneouslyWith: bubbleTap) == true)
+        #expect(!tap.cancelsTouchesInView)
+
+        controller.threadTapped()
+        #expect(!field.isFirstResponder)
+        #expect(field.text == "Draft text")
+        // With the keyboard down, a tap changes nothing.
+        controller.threadTapped()
+        #expect(!field.isFirstResponder)
+    }
+
+    @Test func doubleTapOpensTheTapbackPickerAndKeepsTheKeyboard() async throws {
+        let (controller, window) = try show(messages(4))
+        defer { window.isHidden = true }
+        try await settle(window)
+        let field = try focusComposer(controller, draft: "Draft text")
+        controller.showTapbackPicker(messageId: "m3")
+        #expect(controller.tapbackPicker != nil)
+        #expect(field.isFirstResponder)
+        field.resignFirstResponder()
+    }
+
+    /// 30 messages: the thread is at the bottom. 2 messages: the thread is shorter than the screen.
+    @Test(arguments: [30, 2])
+    func dragDownOnTheThreadHidesTheKeyboard(count: Int) async throws {
+        let (controller, window) = try show(messages(count))
+        defer { window.isHidden = true }
+        try await settle(window)
+        #expect(controller.isPinnedToBottom)
+        // A short thread still scrolls, so a drag reaches it.
+        #expect(controller.messagesCollectionView.alwaysBounceVertical)
+        let field = try focusComposer(controller, draft: "Draft text")
+        // Small, upward and sideways drags keep the keyboard.
+        for keep in [CGPoint(x: 0, y: 8), CGPoint(x: 0, y: -80), CGPoint(x: 80, y: 30)] {
+            controller.threadDragged(by: keep)
+            #expect(field.isFirstResponder, "drag \(keep) hid the keyboard")
+        }
+        controller.threadDragged(by: CGPoint(x: 4, y: 40))
+        #expect(!field.isFirstResponder)
+        #expect(field.text == "Draft text")
+    }
+
     // MARK: Space math
 
     @Test func bottomSpaceIsThePaddingPlusTheComposerPartOverTheHomeIndicator() {
