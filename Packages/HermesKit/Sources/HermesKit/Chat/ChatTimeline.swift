@@ -139,7 +139,9 @@ public enum ChatTimeline {
             case .done, .empty: break
             }
         }
-        if !row.message.text.isEmpty { parts.append(row.message.text) }
+        // Issue #56: no Markdown marks, and a table row reads as "<header>, <cell>" pairs.
+        let text = ChatMarkdown.accessibilityText(row.message.text)
+        if !text.isEmpty { parts.append(text) }
         parts += reactionLabels(for: row)
         parts.append(time)
         if let footnote = row.footnote, footnote != .sending, footnote != .delivered { parts.append(footnote.text) }

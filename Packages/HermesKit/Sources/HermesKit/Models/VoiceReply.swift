@@ -87,7 +87,7 @@ public enum VoiceReplyText {
     }
 
     /// Drops the marks at the start of a line: quotes (`>`), headings (`#` to `######`, also closing `#`s)
-    /// and bullets (`-`, `*`, `+`). A numbered item keeps its number.
+    /// and bullets (`-`, `*`, `+`, and the `•` of `ChatMarkdown.runs`). A numbered item keeps its number.
     private static func withoutBlockMarks(_ line: String) -> String {
         var rest = Substring(line)
         while rest.hasPrefix(">") { rest = rest.dropFirst().drop { $0 == " " } }
@@ -99,7 +99,7 @@ public enum VoiceReplyText {
             if closing > 0, closing == body.count || body.dropLast(closing).last == " " {
                 rest = Substring(body.dropLast(closing))
             }
-        } else if let mark = rest.first, "-*+".contains(mark), rest.count == 1 || rest.dropFirst().first == " " {
+        } else if let mark = rest.first, "-*+•".contains(mark), rest.count == 1 || rest.dropFirst().first == " " {
             rest = rest.dropFirst().drop { $0 == " " }
         }
         return rest.trimmingCharacters(in: .whitespaces)

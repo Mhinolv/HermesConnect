@@ -3,7 +3,9 @@ import UIKit
 /// Issue #49 (owner decision): the full text of a voice reply, with Markdown, in a sheet.
 /// The text selects and copies. A link opens on a tap.
 final class ReplyTextViewController: UIViewController {
-    let textView = UITextView()
+    /// TextKit 1, so `ChatMarkdownBackdrop` can draw the table lines, cards and quote bars of issue #56.
+    let textView = UITextView(usingTextLayoutManager: false)
+    private let backdrop = ChatMarkdownBackdrop()
     private let text: NSAttributedString
 
     init(text: NSAttributedString) {
@@ -32,6 +34,16 @@ final class ReplyTextViewController: UIViewController {
         textView.frame = view.bounds
         textView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(textView)
+        backdrop.textView = textView
+        textView.insertSubview(backdrop, at: 0)
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        textView.layoutManager.ensureLayout(for: textView.textContainer)
+        backdrop.frame = CGRect(origin: .zero, size: CGSize(width: textView.bounds.width,
+                                                            height: max(textView.contentSize.height, textView.bounds.height)))
+        backdrop.setNeedsDisplay()
     }
 
     /// The bubble text keeps its link targets under `ChatBubbleText.linkKey`. The text view needs `.link`.

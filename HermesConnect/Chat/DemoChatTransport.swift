@@ -57,6 +57,17 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         /// Issue #11: the same thread with the tapback capsule open on a reply.
         case tapbacksPicker = "tapbacks-picker"
 
+        /// Issue #56: the owner's grocery table reply.
+        case markdownTable = "markdown-table"
+        /// Issue #56: the same reply, scrolled to its top (large text sizes).
+        case markdownTableTop = "markdown-table-top"
+        /// Issue #56: the same reply in the full reply sheet.
+        case markdownSheet = "markdown-sheet"
+        /// Issue #56: a reply with headings, lists, a quote and a rule.
+        case markdownBlocks = "markdown-blocks"
+        /// Issue #56: the same reply, scrolled to its top (large text sizes).
+        case markdownBlocksTop = "markdown-blocks-top"
+
         /// Issue #15: the seeded thread shows "Updating…" for 4 s, then 2 missed messages arrive.
         case catchUp = "catch-up"
         /// Issue #15: the same catch-up while the owner reads older messages: the "New Messages" pill shows.
@@ -82,7 +93,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             case .streaming: "What's the weather in Austin this weekend?"
             case .failed: "Can you check the server logs?"
             case .live, .thread, .keyboard, .empty, .list, .listEmpty, .listLoading, .voice, .recording, .hold, .paused,
-                 .attachments, .voiceReplies, .voiceRepliesPaused, .voiceReplyText, .tapbacks, .tapbacksPicker, .catchUp, .catchUpPill,
+                 .attachments, .voiceReplies, .voiceRepliesPaused, .voiceReplyText, .tapbacks, .tapbacksPicker, .markdownTable, .markdownTableTop, .markdownSheet, .markdownBlocks,
+                 .markdownBlocksTop, .catchUp, .catchUpPill,
                  .notificationSettings, .notificationsOff, .voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading,
                  .voiceSettingsReady, .voiceSettingsDamaged: nil
             }
@@ -104,6 +116,11 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
 
         /// `true` for the tapback scenarios (issue #11).
         var showsTapbacks: Bool { self == .tapbacks || self == .tapbacksPicker }
+
+        /// `true` for the Markdown scenarios (issue #56).
+        var showsMarkdown: Bool {
+            [.markdownTable, .markdownTableTop, .markdownSheet, .markdownBlocks, .markdownBlocksTop].contains(self)
+        }
 
         /// `true` for the catch-up scenarios (issue #15).
         var catchesUp: Bool { self == .catchUp || self == .catchUpPill }
@@ -388,8 +405,49 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         }
         if scenario == .attachments { messages += AttachmentDemo.messages(now: now) }
         if scenario.showsTapbacks { messages += Self.tapbackMessages(now: now) }
+        if scenario.showsMarkdown {
+            let late = now.addingTimeInterval(-60)
+            let table = scenario != .markdownBlocks && scenario != .markdownBlocksTop
+            messages.append(ChatMessage(id: "m1", role: .user,
+                                        text: table ? "What grocery stores are near me?" : "Plan my Saturday move",
+                                        date: late, delivery: .delivered, userRowId: 401))
+            messages.append(ChatMessage(id: "m2", role: .assistant, text: table ? Self.groceryTable : Self.markdownBlocks,
+                                        date: late.addingTimeInterval(9), reply: .complete, promptId: "m1"))
+        }
         return messages
     }
+
+    /// Issue #56: the reply in the owner's screenshot (`.team/qa/owner-56/01-table-raw.png`).
+    static let groceryTable = """
+    Two nearby grocery options in **Anaconda**, using the location your phone just reported:
+
+    | Store | Estimated drive | Address |
+    |---|---:|---|
+    | **Albertsons** | **10 minutes · 7.1 miles** | 1300 E Park Ave. Listed hours: **7 a.m.–10 p.m. daily**. ([local.albertsons.com](https://local.albertsons.com/mt/anaconda/1300-e-park-ave.html)) |
+    | **Stokes Market** | **14 minutes · 9.2 miles** | 1525 W Park Ave. ([stokesmarket.com](https://stokesmarket.com)) |
+
+    I'd pick **Albertsons** for the shorter trip. Drive estimates don't include live traffic or road conditions.
+    """
+
+    /// Issue #56: headings, lists, a quote and a rule.
+    static let markdownBlocks = """
+    # Saturday move
+    ## Morning
+    1. Pick up the van at **8:00 AM**
+    2. Load the boxes
+       - Kitchen first
+       - Then the books
+    3. Drive to the new place
+
+    ### Bring
+    - Tape and markers
+    - Water and snacks
+
+    > The movers said: park on Elm St. The alley is closed.
+
+    ---
+    Text me if the van is late.
+    """
 
     /// Issue #11: the reply that the picker scenario opens the capsule on.
     static let tapbackPickerId = "t6"
