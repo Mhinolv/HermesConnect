@@ -1,5 +1,6 @@
 import HermesKit
 import SwiftUI
+import UIKit
 
 /// Settings: one grouped `Form` in a sheet. Later issues add rows here.
 struct SettingsView: View {
@@ -54,6 +55,7 @@ struct SettingsView: View {
                     if let reason = connectionReason { Text(reason) }
                 }
                 VoiceSettingsSection()
+                NotificationSettingsSection()
                 LocationSettingsSection()
                 PhotoSettingsSection()
                 Section {
@@ -153,6 +155,38 @@ struct VoiceSettingsSection: View {
             Text("Voice")
         } footer: {
             Text(Self.footer)
+        }
+    }
+}
+
+/// Issue #15: Settings > Notifications. "Show Message Preview" is off by default (owner decision 2026-11-16).
+struct NotificationSettingsSection: View {
+    @Environment(NotificationController.self) private var notifications: NotificationController?
+    @Environment(\.openURL) private var openURL
+
+    static let previewTitle = "Show Message Preview"
+    static let offTitle = "Notifications Off"
+    static let footer = "A notification says \"New message from Hermes\". Turn on the preview to show "
+        + "the first part of the reply."
+
+    var body: some View {
+        if let notifications {
+            @Bindable var notifications = notifications
+            Section {
+                if notifications.status == .denied {
+                    LabeledContent(Self.offTitle) {
+                        Button("Open Settings") {
+                            if let url = URL(string: UIApplication.openNotificationSettingsURLString) { openURL(url) }
+                        }
+                    }
+                }
+                Toggle(Self.previewTitle, isOn: $notifications.showsPreview)
+            } header: {
+                Text("Notifications")
+            } footer: {
+                Text(Self.footer)
+            }
+            .task { await notifications.refreshStatus() }
         }
     }
 }

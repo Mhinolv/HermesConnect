@@ -32,6 +32,10 @@ final class ChatViewController: MessagesViewController {
     /// The thread follows new text. A drag away from the bottom unpins it, and the `arrow.down` button shows.
     private var pinnedToBottom = true
     private let scrollButton = UIButton(configuration: .glass())
+    /// Issue #15: the glass pill "3 New Messages" after a catch-up, when the owner was not at the bottom.
+    private let newMessagesButton = UIButton(configuration: .glass())
+    /// The first new message of the catch-up that the screen handled (scrolled to, or showed the pill for).
+    private var handledNewMessageId: String?
     private var composerText = ""
     /// Issue #8: the `plus` menu and the pending photos and files.
     private let attachments = AttachmentComposer()
@@ -65,6 +69,7 @@ final class ChatViewController: MessagesViewController {
         configureVoice()
         restoreDraft()
         configureScrollButton()
+        configureNewMessagesButton()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, _) in
             self.textSizeChanged()
         }
@@ -391,6 +396,56 @@ final class ChatViewController: MessagesViewController {
         updateSendButton()
     }
 
+    private func configureNewMessagesButton() {
+        newMessagesButton.translatesAutoresizingMaskIntoConstraints = false
+        newMessagesButton.isHidden = true
+        newMessagesButton.addAction(UIAction { [weak self] _ in self?.showFirstNewMessage(animated: true) },
+                                    for: .touchUpInside)
+        view.addSubview(newMessagesButton)
+        NSLayoutConstraint.activate([
+            newMessagesButton.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
+            newMessagesButton.bottomAnchor.constraint(equalTo: inputContainerView.topAnchor, constant: -12),
+            newMessagesButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+        ])
+    }
+
+    /// Issue #15: after a catch-up, scroll to the first new message if the owner was at the bottom.
+    /// Else show the pill. VoiceOver reads the count once.
+    private func handleNewMessages() {
+        guard let first = model.newMessageIds.first, first != handledNewMessageId else {
+            if model.newMessageIds.isEmpty { newMessagesButton.isHidden = true }
+            return
+        }
+        handledNewMessageId = first
+        let count = model.newMessageIds.count
+        UIAccessibility.post(notification: .announcement, argument: ChatNewMessages.spoken(count))
+        if pinnedToBottom {
+            showFirstNewMessage(animated: false)
+            return
+        }
+        var config = UIButton.Configuration.glass()
+        config.title = ChatNewMessages.title(count)
+        config.image = UIImage(systemName: "arrow.down")
+        config.imagePadding = 6
+        config.cornerStyle = .capsule
+        newMessagesButton.configuration = config
+        newMessagesButton.accessibilityLabel = ChatNewMessages.title(count)
+        newMessagesButton.accessibilityHint = "Double-tap to show the first new message."
+        newMessagesButton.isHidden = false
+        updateScrollButton()
+    }
+
+    private func showFirstNewMessage(animated: Bool) {
+        newMessagesButton.isHidden = true
+        defer { model.clearNewMessages() }
+        guard let first = model.newMessageIds.first,
+              let section = bubbles.firstIndex(where: { $0.messageId == first }) else { return }
+        messagesCollectionView.layoutIfNeeded()
+        pinnedToBottom = section == bubbles.count - 1
+        messagesCollectionView.scrollToItem(at: IndexPath(item: 0, section: section), at: .top, animated: animated)
+        updateScrollButton()
+    }
+
     private func configureScrollButton() {
         var config = UIButton.Configuration.glass()
         config.image = UIImage(systemName: "arrow.down")
@@ -485,6 +540,7 @@ final class ChatViewController: MessagesViewController {
             _ = model.statusLine
             _ = model.completedReplyId
             _ = model.autoPlayReplyId
+            _ = model.newMessageIds
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
                 self?.render()
@@ -544,6 +600,7 @@ final class ChatViewController: MessagesViewController {
             pinnedToBottom = true
             scrollToBottom()
         }
+        handleNewMessages()
         updateScrollButton()
         updateSendButton()
         announceCompletedReply()
@@ -560,7 +617,8 @@ final class ChatViewController: MessagesViewController {
     }
 
     private func updateScrollButton() {
-        scrollButton.isHidden = pinnedToBottom || bubbles.isEmpty
+        // The "New Messages" pill does the same job, so only one of them shows.
+        scrollButton.isHidden = pinnedToBottom || bubbles.isEmpty || !newMessagesButton.isHidden
     }
 
     /// Puts the end of the last bubble just above the composer. MessageKit sets the composer inset after
@@ -603,7 +661,25 @@ final class ChatViewController: MessagesViewController {
             pinnedToBottom = pinned
             updateScrollButton()
         }
+        // The owner scrolled down to the new messages: the pill goes away.
+        if pinned, !newMessagesButton.isHidden {
+            newMessagesButton.isHidden = true
+            model.clearNewMessages()
+        }
     }
+
+    #if DEBUG
+    /// The DEBUG demo `catch-up-pill`: scroll to the top, as if the owner reads older messages.
+    func unpinForDemo() {
+        pinnedToBottom = false
+        messagesCollectionView.setContentOffset(CGPoint(x: 0, y: -messagesCollectionView.adjustedContentInset.top),
+                                                animated: false)
+        updateScrollButton()
+    }
+    #endif
+
+    /// The "New Messages" pill shows (tests).
+    var showsNewMessagesPill: Bool { !newMessagesButton.isHidden }
 
     /// The pin state (tests).
     var isPinnedToBottom: Bool { pinnedToBottom }

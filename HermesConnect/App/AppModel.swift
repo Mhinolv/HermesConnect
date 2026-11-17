@@ -276,6 +276,48 @@ final class AppModel {
         try? profileStore.save(updated)
     }
 
+    // MARK: Foreground reconcile (issue #15)
+
+    enum ForegroundAction: Equatable {
+        case none
+        /// No connection: connect with the pin and the gate.
+        case connect
+        /// The connection can be dead after a suspend: close it, then connect again. The token stays,
+        /// so the gate reuses the running Hermes.
+        case reconnect
+    }
+
+    /// The server reaps an idle live session 20 s after its socket drops. After a longer time away, the
+    /// SSH session can look open but be dead, so the app connects again.
+    static let staleAfter: TimeInterval = 20
+
+    /// What to do when the app comes back to the foreground. A state that waits for the owner
+    /// (trust sheet, changed host key, "Hermes Did Not Start") does nothing.
+    static func foregroundAction(connection: ConnectionState, link: ChatLinkStatus?,
+                                 away: TimeInterval) -> ForegroundAction {
+        switch connection {
+        // The owner tapped "Cancel" on the trust sheet (`.offline(nil)`): wait for a tap on "Offline".
+        case .offline(nil): return .none
+        case .idle, .offline: return .connect
+        case .connecting, .startingHermes, .notStarted, .hostKeyChanged: return .none
+        case .connected:
+            if link == .notConnected || away >= staleAfter { return .reconnect }
+            return .none
+        }
+    }
+
+    /// The root calls this when the scene is active again after the background.
+    func reconnectOnForeground(link: ChatLinkStatus?, away: TimeInterval) async {
+        guard isSetUp, pendingTrust == nil else { return }
+        switch Self.foregroundAction(connection: connection, link: link, away: away) {
+        case .none: return
+        case .connect: await connect()
+        case .reconnect:
+            await disconnect()
+            await connect()
+        }
+    }
+
     func disconnect() async {
         attempt += 1
         connection = .idle

@@ -1,5 +1,6 @@
-import SwiftUI
 import HermesKit
+import SwiftUI
+import UserNotifications
 
 @main
 struct HermesConnectApp: App {
@@ -7,6 +8,8 @@ struct HermesConnectApp: App {
     @State private var sessions: SessionListModel
     /// Made at launch, also for a relaunch in the background by a location event (issue #13).
     @State private var location: LocationController
+    /// Issue #15: permission, badge and the tap route of local notifications.
+    @State private var notifications: NotificationController
     /// The Release chat link to Hermes. Nil in the DEBUG demo.
     private let link: LiveChatTransport?
     private let usesAppLock: Bool
@@ -21,6 +24,9 @@ struct HermesConnectApp: App {
             demo.previewConnection(.connected(gateVersion: "demo"))
             model = demo
             location = LocationController.preview(enabled: false)
+            let off = ChatLaunch.demoScenario == .notificationsOff
+            notifications = NotificationController(center: DemoNotificationCenter(status: off ? .denied : .authorized),
+                                                   defaults: UserDefaults(suiteName: "demo") ?? .standard)
             usesAppLock = false
             return
         }
@@ -30,21 +36,51 @@ struct HermesConnectApp: App {
         model = live
         location = LocationController.live()
         self.link = link
-        sessions = ChatLaunch.makeSessions(link: link)
+        let sessions = ChatLaunch.makeSessions(link: link)
+        self.sessions = sessions
+        let notifications = NotificationController()
+        self.notifications = notifications
+        UNUserNotificationCenter.current().delegate = notifications
+        // Issue #15: register before the app finishes launching (BGTaskScheduler rule).
+        BackgroundRefresh.register {
+            await BackgroundRefresh.run(model: live, link: link, sessions: sessions, notifications: notifications)
+        }
         usesAppLock = true
     }
 
     var body: some Scene {
         WindowGroup {
+            #if DEBUG
+            if ChatLaunch.demoScenario?.showsNotificationSettings == true {
+                // Issue #15: the DEBUG screenshot of Settings > Notifications.
+                NavigationStack {
+                    Form { NotificationSettingsSection() }
+                        .navigationTitle("Settings")
+                        .navigationBarTitleDisplayMode(.inline)
+                }
+                .environment(notifications)
+            } else {
+                scene
+            }
+            #else
+            scene
+            #endif
+        }
+    }
+
+    @ViewBuilder private var scene: some View {
+        Group {
             if usesAppLock {
                 RootView(sessions: sessions, link: link)
                     .environment(model)
                     .environment(location)
+                    .environment(notifications)
                     .appLock(model)
             } else {
                 RootView(sessions: sessions, link: link)
                     .environment(model)
                     .environment(location)
+                    .environment(notifications)
             }
         }
     }
@@ -52,6 +88,10 @@ struct HermesConnectApp: App {
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(NotificationController.self) private var notifications: NotificationController?
+    @Environment(\.scenePhase) private var scenePhase
+    /// Issue #15: when the app went to the background. Nil while it is active.
+    @State private var backgroundedAt: Date?
     /// The session list and the chats of this window (issue #7). The app owns it, so it lives across view updates.
     var sessions = ChatLaunch.makeOfflineSessions()
     /// The chat link. It follows the #4 endpoint ("Hermes ready").
@@ -92,6 +132,15 @@ struct RootView: View {
                     if let id = chat.storedSessionId { sessions.forget(id) }
                     path.removeAll()
                 }
+                // Issue #15: the open session loses its blue dot and gets no new one.
+                .onAppear {
+                    guard let id = chat.storedSessionId else { return }
+                    sessions.openSessionId = id
+                    sessions.markRead(id)
+                }
+                .onDisappear {
+                    if sessions.openSessionId == chat.storedSessionId { sessions.openSessionId = nil }
+                }
             }
             .hermesStartAlert()
         }
@@ -124,9 +173,44 @@ struct RootView: View {
         .task(id: model.isSetUp) {
             if model.isSetUp, !ChatLaunch.isDemo { await model.connect() }
         }
+        .onChange(of: scenePhase) { _, phase in foregroundChange(phase) }
+        // Issue #15: a tap on a notification opens that session. App Lock stays on top until unlock.
+        .onChange(of: notifications?.pendingSessionId) { _, id in
+            guard let id, model.isSetUp else { return }
+            notifications?.pendingSessionId = nil
+            launchDone = true
+            path = [.session(id)]
+        }
+        .onChange(of: sessions.unreadCount, initial: true) { _, count in
+            if !ChatLaunch.isDemo { notifications?.setBadge(count) }
+        }
         .onChange(of: showSettings) { _, shown in
             // A new server or a forgotten host key leaves the status idle. Connect when Settings closes.
             if !shown, model.isSetUp, model.connection == .idle { Task { await model.connect() } }
+        }
+    }
+}
+
+extension RootView {
+    /// Issue #15: schedule the background refresh on the way out. Back in the foreground, reconnect when
+    /// the connection can be dead, and refresh the list. The chats catch up on the `connected` event.
+    private func foregroundChange(_ phase: ScenePhase) {
+        guard model.isSetUp, !ChatLaunch.isDemo else { return }
+        switch phase {
+        case .background:
+            if backgroundedAt == nil { backgroundedAt = .now }
+            BackgroundRefresh.schedule()
+        case .active:
+            guard let since = backgroundedAt else { return }
+            backgroundedAt = nil
+            let away = Date.now.timeIntervalSince(since)
+            Task {
+                await notifications?.refreshStatus()
+                await model.reconnectOnForeground(link: link?.status, away: away)
+                await sessions.refresh()
+            }
+        default:
+            break
         }
     }
 }
