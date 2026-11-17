@@ -3,7 +3,7 @@ import LocalAuthentication
 /// Face ID with passcode fallback for App Lock (LocalAuthentication `.deviceOwnerAuthentication`).
 @MainActor
 enum Authenticator {
-    enum Biometry {
+    enum Biometry: Sendable, CaseIterable {
         case faceID, touchID, opticID, none
     }
 
@@ -33,14 +33,29 @@ enum Authenticator {
         }
     }
 
-    static var unlockButtonTitle: String {
-        switch biometry() {
-        case .faceID: "Unlock with Face ID"
-        case .touchID: "Unlock with Touch ID"
-        case .opticID: "Unlock with Optic ID"
-        case .none: "Unlock with Passcode"
+    /// One name for the unlock method, from `LABiometryType`. "Passcode" only when there is no biometry.
+    nonisolated static func methodName(for biometry: Biometry) -> String {
+        switch biometry {
+        case .faceID: "Face ID"
+        case .touchID: "Touch ID"
+        case .opticID: "Optic ID"
+        case .none: "Passcode"
         }
     }
+
+    nonisolated static func unlockButtonTitle(for biometry: Biometry) -> String {
+        "Unlock with \(methodName(for: biometry))"
+    }
+
+    nonisolated static func appLockToggleTitle(for biometry: Biometry) -> String {
+        "App Lock (\(methodName(for: biometry)))"
+    }
+
+    nonisolated static func appLockFooter(for biometry: Biometry) -> String {
+        "Require \(methodName(for: biometry)) when Hermes opens."
+    }
+
+    static var unlockButtonTitle: String { unlockButtonTitle(for: biometry()) }
 
     static var unlockButtonSymbol: String {
         switch biometry() {
@@ -51,7 +66,6 @@ enum Authenticator {
         }
     }
 
-    static var appLockToggleTitle: String {
-        biometry() == .none ? "App Lock (Passcode)" : "App Lock"
-    }
+    static var appLockToggleTitle: String { appLockToggleTitle(for: biometry()) }
+    static var appLockFooter: String { appLockFooter(for: biometry()) }
 }

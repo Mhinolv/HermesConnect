@@ -24,8 +24,9 @@ struct SetupFlowView: View {
                         Button("Cancel") { dismiss() }
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("Next") { path.append(.deviceKey) }
-                            .disabled(!isValid)
+                        ConfirmButton(title: "Next", enabled: isValid, disabledHint: "Enter the host first.") {
+                            path.append(.deviceKey)
+                        }
                     }
                 }
                 .navigationDestination(for: Step.self) { step in

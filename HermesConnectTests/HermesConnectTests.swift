@@ -1,6 +1,7 @@
 import Foundation
 import HermesKit
 import Testing
+import UIKit
 @testable import HermesConnect
 
 @MainActor
@@ -96,5 +97,54 @@ private struct FailingKeyStore: DeviceKeyStore {
         model.didEnterBackground(at: start)
         model.willEnterForeground(at: start.addingTimeInterval(301))
         #expect(model.lock.isLocked)
+    }
+}
+
+@Suite struct AppLockTextTests {
+    @Test(arguments: Authenticator.Biometry.allCases)
+    func toggleFooterAndButtonUseOneName(biometry: Authenticator.Biometry) {
+        let name = Authenticator.methodName(for: biometry)
+        #expect(Authenticator.appLockToggleTitle(for: biometry) == "App Lock (\(name))")
+        #expect(Authenticator.appLockFooter(for: biometry) == "Require \(name) when Hermes opens.")
+        #expect(Authenticator.unlockButtonTitle(for: biometry) == "Unlock with \(name)")
+    }
+
+    @Test func passcodeOnlyWithoutBiometry() {
+        #expect(Authenticator.methodName(for: .faceID) == "Face ID")
+        #expect(Authenticator.methodName(for: .touchID) == "Touch ID")
+        #expect(Authenticator.methodName(for: .opticID) == "Optic ID")
+        #expect(Authenticator.methodName(for: .none) == "Passcode")
+    }
+}
+
+@MainActor
+@Suite struct ExactTextTests {
+    private let key = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBGD+1LolWp0xyWHrdMY1bWjASbiSO2H6bOZpYi5g8p+2eQP+EAi4vJmkGunpVii8ZPLxsgwtfp9Rd6PClNRGIpk= hermesconnect@iPhone"
+
+    @Test func keepsExactCharactersAndTurnsOffHyphenation() throws {
+        let text = ExactText.attributed(key, font: .monospacedSystemFont(ofSize: 13, weight: .regular), color: .label)
+        #expect(text.string == key)
+        let style = try #require(text.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)
+        #expect(style.hyphenationFactor == 0)
+        #expect(!style.usesDefaultHyphenation)
+        #expect(style.lineBreakMode == .byCharWrapping)
+    }
+
+    @Test func wrappedLinesJoinToTheExactKey() {
+        let storage = NSTextStorage(attributedString: ExactText.attributed(
+            key, font: .monospacedSystemFont(ofSize: 13, weight: .regular), color: .label))
+        let layout = NSLayoutManager()
+        let container = NSTextContainer(size: CGSize(width: 160, height: CGFloat.greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        container.lineBreakMode = NSLineBreakMode.byCharWrapping
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
+        var lines: [String] = []
+        layout.enumerateLineFragments(forGlyphRange: layout.glyphRange(for: container)) { _, _, _, range, _ in
+            let chars = layout.characterRange(forGlyphRange: range, actualGlyphRange: nil)
+            lines.append((storage.string as NSString).substring(with: chars))
+        }
+        #expect(lines.count > 3)
+        #expect(lines.joined() == key)
     }
 }

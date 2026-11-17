@@ -28,14 +28,14 @@ struct SettingsView: View {
                 } header: {
                     Text("Security")
                 } footer: {
-                    Text("Require Face ID when Hermes opens.")
+                    Text(Authenticator.appLockFooter)
                 }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { save() }.disabled(!isValid)
+                    ConfirmButton(title: "Done", enabled: isValid, disabledHint: "Enter a valid host and port.") { save() }
                 }
             }
             .confirmationDialog("Reset Device Key?", isPresented: $confirmReset, titleVisibility: .visible) {

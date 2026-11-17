@@ -18,7 +18,7 @@ struct InstallStepsView: View {
         .toolbar {
             if let onDone {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done", action: onDone)
+                    ConfirmButton(title: "Done", enabled: true, action: onDone)
                 }
             }
         }

@@ -28,7 +28,7 @@ struct DeviceKeyView: View {
         .toolbar {
             if let onNext {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Next", action: onNext).disabled(model.keyState != .ready)
+                    ConfirmButton(title: "Next", enabled: model.keyState == .ready, disabledHint: "Wait for the key.", action: onNext)
                 }
             }
         }
@@ -39,12 +39,13 @@ struct DeviceKeyView: View {
         Form {
             Section {
                 LabeledContent("Type", value: key.kind.displayName)
-                LabeledContent("Fingerprint") {
-                    Text(ssh.fingerprint)
-                        .font(.footnote.monospaced())
-                        .textSelection(.enabled)
-                        .multilineTextAlignment(.trailing)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Fingerprint")
+                    ExactText(text: ssh.fingerprint, color: .secondaryLabel)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Fingerprint \(ssh.fingerprint)")
             }
             Section {
                 CodeBlock(text: ssh.line, accessibilityLabel: "Public key, fingerprint \(ssh.fingerprint)")
