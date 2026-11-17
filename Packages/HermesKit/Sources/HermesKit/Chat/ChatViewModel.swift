@@ -23,6 +23,9 @@ public final class ChatViewModel {
     public private(set) var storedSessionId: String?
     /// `true` while `open()` waits for the history and no cached message shows. The screen shows a `ProgressView`.
     public private(set) var isLoadingHistory = false
+    /// `session.resume` answered "not found" (4007): the server has no row for the stored id. The app
+    /// drops the session and shows the list (QA #27 defect 1).
+    public private(set) var isSessionGone = false
 
     @ObservationIgnored private var thread = ChatThread()
     @ObservationIgnored private let transport: any ChatTransport
@@ -119,7 +122,6 @@ public final class ChatViewModel {
             _ = try? await currentSession()
             return
         }
-        cache?.saveActiveSessionId(storedSessionId)
         if let openTask { return await openTask.value }
         let task = Task { await loadHistory() }
         openTask = task
@@ -135,14 +137,38 @@ public final class ChatViewModel {
             let live = try await resumedSession()
             let transcript = try await transport.history(sessionId: live.liveId)
             needsOpen = false
+            // A session with a transcript has a server row, so the next launch can resume it.
+            if !transcript.isEmpty { saveActiveSessionId() }
             // A running turn owns the end of the thread. Its `message.complete` brings the text.
             guard thread.turn == .idle else { return }
             let history = ChatHistory.messages(from: transcript, reusing: thread.messages, fallbackDate: now())
             if thread.replaceHistory(history) { redrawNow() }
             saveTranscript()
+        } catch where Self.isSessionNotFound(error) {
+            // A dead id (for example a New Chat that never got a prompt): never resume it again.
+            needsOpen = false
+            if let storedSessionId, cache?.loadActiveSessionId() == storedSessionId {
+                cache?.saveActiveSessionId(nil)
+            }
+            isSessionGone = true
         } catch {
             needsOpen = true
         }
+    }
+
+    /// `session.resume` error 4007: no stored session with this id (`methods_session.py`, protocol 3.4).
+    public nonisolated static let sessionNotFoundCode = 4007
+
+    public nonisolated static func isSessionNotFound(_ error: any Error) -> Bool {
+        if case GatewayError.rpc(let code, _) = error { return code == sessionNotFoundCode }
+        return false
+    }
+
+    /// The active id is the session that launch opens. It is saved only for a session with a server row:
+    /// after an accepted prompt, or after a resume that has a transcript. `session.create` makes no row.
+    private func saveActiveSessionId() {
+        guard let storedSessionId else { return }
+        cache?.saveActiveSessionId(storedSessionId)
     }
 
     /// `session.resume` with the stored id. A send at the same time shares the call.
@@ -246,6 +272,7 @@ public final class ChatViewModel {
             let row = try await transport.submitPrompt(sessionId: session.liveId, text: text,
                                                        retryBeforeRowId: retryBeforeRowId)
             thread.setDelivery(.delivered, id: id, userRowId: row)
+            saveActiveSessionId()
             saveTranscript()
         } catch {
             thread.setDelivery(.failed, id: id)
@@ -276,8 +303,8 @@ public final class ChatViewModel {
             sessionIsStale = false
             sessionTask = nil
             if storedSessionId == nil, let stored = created.storedId {
+                // No active id yet: the server writes no row until the first prompt (QA #27 defect 1).
                 storedSessionId = stored
-                cache?.saveActiveSessionId(stored)
             }
             return created
         } catch {

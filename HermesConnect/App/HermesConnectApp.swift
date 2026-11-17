@@ -83,9 +83,14 @@ struct RootView: View {
             }
             .navigationTitle("Hermes")
             .navigationDestination(for: ChatRoute.self) { route in
-                switch route {
-                case .session(let id): ChatScreen(model: sessions.chat(for: id), link: link)
-                case .new(let key): ChatScreen(model: sessions.newChat(key: key), link: link)
+                let chat = switch route {
+                case .session(let id): sessions.chat(for: id)
+                case .new(let key): sessions.newChat(key: key)
+                }
+                ChatScreen(model: chat, link: link) {
+                    // A dead id (QA #27 defect 1): drop it and show the list, never an empty chat.
+                    if let id = chat.storedSessionId { sessions.forget(id) }
+                    path.removeAll()
                 }
             }
             .hermesStartAlert()

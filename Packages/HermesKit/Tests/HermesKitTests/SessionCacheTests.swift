@@ -330,6 +330,21 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         #expect(model.newChat(key: "n1") !== model.newChat(key: "n2"))
     }
 
+    @Test func forgetDropsTheRowTheChatAndTheActiveId() {
+        let cache = InMemorySessionCacheStore(sessions: rows, activeSessionId: "k2")
+        let model = SessionListModel(transport: FakeSessionsTransport(), chatTransport: FakeChatTransport(), cache: cache)
+        let chat = model.chat(for: "k2")
+        model.forget("k2")
+        #expect(model.sessions.map(\.id) == ["k3", "k1"])
+        #expect(cache.loadSessions().map(\.id) == ["k3", "k1"])
+        #expect(cache.loadActiveSessionId() == nil)
+        #expect(model.chat(for: "k2") !== chat)
+        // An id that is not the active id leaves the active id alone.
+        cache.saveActiveSessionId("k1")
+        model.forget("k3")
+        #expect(cache.loadActiveSessionId() == "k1")
+    }
+
     @Test func mostRecentComesFromTheServer() async {
         let transport = FakeSessionsTransport(mostRecent: "k3")
         let model = SessionListModel(transport: transport, chatTransport: FakeChatTransport(),
@@ -416,11 +431,73 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         #expect(transport.histories.isEmpty)
         #expect(model.messages.isEmpty)
         #expect(model.storedSessionId == "20261116_101500_ab12cd")
-        #expect(cache.loadActiveSessionId() == "20261116_101500_ab12cd")
         // The first send uses the session that open() created.
         await model.send("Hello")?.value
         #expect(transport.starts.count == 1)
         #expect(transport.submits.first?.sessionId == "s1")
+    }
+
+    /// QA #27 defect 1: a New Chat with no prompt has no server row. Launch must not resume its id.
+    @Test func unusedNewChatKeepsTheLastRealSessionActive() async throws {
+        let transport = FakeChatTransport()
+        let cache = InMemorySessionCacheStore(activeSessionId: "k1")
+        let model = ChatViewModel(transport: transport, cache: cache)
+        await model.open()
+        #expect(model.storedSessionId == "20261116_101500_ab12cd")
+        #expect(cache.loadActiveSessionId() == "k1")
+        // The first accepted prompt makes the row. Now launch can open this chat.
+        await model.send("Hello")?.value
+        #expect(cache.loadActiveSessionId() == "20261116_101500_ab12cd")
+    }
+
+    /// QA #27 defect 1: launch resumes a dead id. 4007 clears it, and the app shows the list.
+    @Test func resumeNotFoundClearsTheActiveIdAndStopsRetrying() async throws {
+        let transport = FakeChatTransport()
+        transport.resumeError = GatewayError.rpc(code: 4007, message: "session not found")
+        let cache = InMemorySessionCacheStore(activeSessionId: "dead1")
+        let model = ChatViewModel(transport: transport, storedSessionId: "dead1", cache: cache)
+        #expect(!model.isSessionGone)
+        await model.open()
+        #expect(model.isSessionGone)
+        #expect(cache.loadActiveSessionId() == nil)
+        #expect(transport.histories.isEmpty)
+        // A reconnect does not resume the dead id again.
+        model.receive(.state(.connected(GatewayReady(replayEpoch: "0123456789abcdef0123456789abcdef"))))
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(transport.resumes == ["dead1"])
+    }
+
+    @Test func notFoundForAnotherSessionKeepsTheActiveId() async {
+        let transport = FakeChatTransport()
+        transport.resumeError = GatewayError.rpc(code: 4007, message: "session not found")
+        let cache = InMemorySessionCacheStore(activeSessionId: "k1")
+        let model = ChatViewModel(transport: transport, storedSessionId: "old9", cache: cache)
+        await model.open()
+        #expect(model.isSessionGone)
+        #expect(cache.loadActiveSessionId() == "k1")
+    }
+
+    @Test func otherResumeErrorsKeepTheSession() async {
+        let transport = FakeChatTransport()
+        transport.resumeError = GatewayError.rpc(code: 5000, message: "busy")
+        let cache = InMemorySessionCacheStore(activeSessionId: "k1")
+        let model = ChatViewModel(transport: transport, storedSessionId: "k1", cache: cache)
+        await model.open()
+        #expect(!model.isSessionGone)
+        #expect(cache.loadActiveSessionId() == "k1")
+        #expect(!ChatViewModel.isSessionNotFound(GatewayError.notConnected))
+        #expect(ChatViewModel.isSessionNotFound(GatewayError.rpc(code: 4007, message: "")))
+    }
+
+    @Test func resumeWithNoTranscriptSavesNoActiveId() async {
+        let transport = FakeChatTransport()
+        let cache = InMemorySessionCacheStore(activeSessionId: "k1")
+        let model = ChatViewModel(transport: transport, storedSessionId: "k2", cache: cache)
+        await model.open()
+        #expect(cache.loadActiveSessionId() == "k1")
+        transport.transcript = [TranscriptMessage(role: "user", text: "Hi", rowId: 1)]
+        await model.open()
+        #expect(cache.loadActiveSessionId() == "k2")
     }
 
     @Test func draftIsKeptPerSession() {

@@ -128,6 +128,16 @@ public final class SessionListModel {
         return chat
     }
 
+    /// Drops a session that the server does not have (`session.resume` error 4007): the row, the chat
+    /// model and the active id. A later `refresh()` brings the row back if the server still lists it.
+    public func forget(_ id: String) {
+        chats = chats.filter { key, chat in key != id && chat.storedSessionId != id }
+        if cache.loadActiveSessionId() == id { cache.saveActiveSessionId(nil) }
+        guard sessions.contains(where: { $0.id == id }) else { return }
+        sessions.removeAll { $0.id == id }
+        cache.saveSessions(sessions)
+    }
+
     /// Uses `chat` for the session `id` (the DEBUG demo seeds its thread this way).
     public func register(_ chat: ChatViewModel, for id: String) {
         chat.startEvents()

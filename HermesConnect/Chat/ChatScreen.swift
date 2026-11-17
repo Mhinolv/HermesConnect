@@ -7,6 +7,8 @@ import SwiftUI
 struct ChatScreen: View {
     let model: ChatViewModel
     var link: LiveChatTransport?
+    /// The server has no row for this session (`session.resume` 4007). The root drops it and shows the list.
+    var onSessionGone: () -> Void = {}
 
     var body: some View {
         ChatThreadView(model: model)
@@ -24,6 +26,9 @@ struct ChatScreen: View {
             }
             .onAppear { model.startEvents() }
             .task { await model.open() }
+            .onChange(of: model.isSessionGone, initial: true) { _, gone in
+                if gone { onSessionGone() }
+            }
     }
 }
 

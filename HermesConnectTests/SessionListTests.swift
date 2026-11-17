@@ -53,6 +53,15 @@ import UIKit
         #expect(ChatLaunch.cachedLaunchRoute(sessions()) == nil)
     }
 
+    /// QA #27 defect 1: after a dead id is dropped, the next launch shows the list, not a dead chat.
+    @Test func droppedSessionIsNotTheLaunchRoute() {
+        let list = sessions([SessionListItem(id: "dead1", title: "Gone")], active: "dead1")
+        #expect(ChatLaunch.cachedLaunchRoute(list) == .session("dead1"))
+        list.forget("dead1")
+        #expect(ChatLaunch.cachedLaunchRoute(list) == nil)
+        #expect(list.sessions.isEmpty)
+    }
+
     @Test func listScreenRendersEveryState() throws {
         let rows = [
             SessionListItem(id: "k1", title: "Trip", preview: "Book it", startedAt: now, source: "ios"),
