@@ -89,6 +89,29 @@ public struct ChatThread: Sendable, Equatable {
         if turn == .waiting { endTurn() }
     }
 
+    // MARK: History
+
+    /// Puts the server transcript in place of the ended messages (issue #7). Sends in progress, failed
+    /// sends and the bubble of a running turn stay at the end. A failed reply goes when the history has
+    /// a reply to the same prompt. Returns `false` when nothing changed.
+    @discardableResult
+    public mutating func replaceHistory(_ history: [ChatMessage]) -> Bool {
+        let historyIds = Set(history.map(\.id))
+        let answered = Set(history.compactMap { $0.role == .assistant ? $0.promptId : nil })
+        let ended = Set(SessionCache.cacheable(messages, limit: .max).map(\.id))
+        let kept = messages.filter { message in
+            guard !ended.contains(message.id), !historyIds.contains(message.id) else { return false }
+            if case .failed = message.reply, let promptId = message.promptId, answered.contains(promptId) {
+                return false
+            }
+            return true
+        }
+        let merged = history + kept
+        guard merged != messages else { return false }
+        messages = merged
+        return true
+    }
+
     // MARK: Events
 
     /// Applies one gateway event of this session. `now` dates a new bubble, `makeId` names it.

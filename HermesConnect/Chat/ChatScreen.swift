@@ -2,23 +2,33 @@ import HermesKit
 import SwiftUI
 
 /// The chat screen: the MessageKit thread with the session title and the connection status (issue #6).
+/// Issue #7: the session list pushes it. Settings is on the list, not here. Cached messages show at once,
+/// and `open()` merges the server history. With no cache, a `ProgressView` shows until the history comes.
 struct ChatScreen: View {
     let model: ChatViewModel
     var link: LiveChatTransport?
-    var onSettings: () -> Void = {}
+    /// The server has no row for this session (`session.resume` 4007). The root drops it and shows the list.
+    var onSessionGone: () -> Void = {}
 
     var body: some View {
         ChatThreadView(model: model)
             .ignoresSafeArea(.container, edges: .bottom)
             .ignoresSafeArea(.keyboard)
+            .overlay {
+                if model.isLoadingHistory {
+                    ProgressView()
+                        .accessibilityLabel("Loading messages")
+                }
+            }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) { ChatNavigationTitle(title: model.title, link: link) }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Settings", systemImage: "gearshape", action: onSettings)
-                }
             }
-            .task { await model.run() }
+            .onAppear { model.startEvents() }
+            .task { await model.open() }
+            .onChange(of: model.isSessionGone, initial: true) { _, gone in
+                if gone { onSessionGone() }
+            }
     }
 }
 
@@ -89,7 +99,7 @@ struct ChatThreadView: UIViewControllerRepresentable {
 
 /// A transport with no server: every send fails with "Not Delivered". Previews, tests and the DEBUG
 /// fallback use it. Release builds use `LiveChatTransport`, which also fails sends while not connected.
-struct OfflineChatTransport: ChatTransport {
+struct OfflineChatTransport: ChatTransport, SessionsTransport {
     struct NotConnected: Error {}
 
     let events: AsyncStream<GatewayClientEvent> = AsyncStream { _ in }
@@ -107,6 +117,16 @@ struct OfflineChatTransport: ChatTransport {
     }
 
     func stopReply(sessionId _: String) async throws -> Bool { false }
+
+    func history(sessionId _: String) async throws -> [TranscriptMessage] {
+        throw NotConnected()
+    }
+
+    func fetchSessions() async throws -> [SessionListItem] {
+        throw NotConnected()
+    }
+
+    func fetchMostRecentSessionId() async throws -> String? { nil }
 }
 
 struct ChatScreen_Previews: PreviewProvider {
@@ -156,21 +176,63 @@ enum ChatLaunch {
         #endif
     }
 
+    /// The Release session list and its cache in Application Support (issue #7).
+    static func makeSessions(link: LiveChatTransport) -> SessionListModel {
+        let cache: any SessionCacheStore = (try? FileSessionCacheStore.applicationSupport())
+            ?? InMemorySessionCacheStore()
+        return SessionListModel(transport: link, chatTransport: link, cache: cache)
+    }
+
+    /// The session list of a window with no app model (previews, tests). Nothing connects.
+    static func makeOfflineSessions() -> SessionListModel {
+        SessionListModel(transport: OfflineChatTransport(), chatTransport: OfflineChatTransport(),
+                         cache: InMemorySessionCacheStore())
+    }
+
+    /// The route to push at once on launch: the demo chat, or the cached active session.
+    static func cachedLaunchRoute(_ sessions: SessionListModel) -> ChatRoute? {
+        #if DEBUG
+        if isDemo { return demoLaunchRoute }
+        #endif
+        return sessions.cachedActiveSessionId.map(ChatRoute.session)
+    }
+
+    /// The search text of the DEBUG list demo (`HERMES_DEMO_SEARCH`). Empty in Release.
+    static var demoSearch: String {
+        #if DEBUG
+        DemoChatTransport.Scenario.search ?? ""
+        #else
+        ""
+        #endif
+    }
+
     #if DEBUG
-    static func makeDemoModel() -> ChatViewModel {
-        if let scenario = DemoChatTransport.Scenario.current {
-            let transport = DemoChatTransport(scenario: scenario)
-            let model = ChatViewModel(transport: transport, title: scenario == .empty ? nil : "Calendar and logs",
-                                      messages: transport.seedMessages())
-            if let prompt = scenario.autoPrompt {
-                Task {
-                    try? await Task.sleep(for: .seconds(1))
-                    model.send(prompt)
-                }
+    /// The DEBUG demo: a session list with fixture rows. Chat scenarios also seed the demo chat and
+    /// push it at launch (`launchRoute`).
+    static func makeDemoSessions() -> SessionListModel {
+        guard let scenario = DemoChatTransport.Scenario.current else { return makeOfflineSessions() }
+        let transport = DemoChatTransport(scenario: scenario)
+        let rows = scenario == .list ? DemoChatTransport.sessionRows() : []
+        let active = scenario.showsList || scenario == .empty ? nil : DemoChatTransport.storedId
+        let cache = InMemorySessionCacheStore(sessions: rows, activeSessionId: active)
+        let sessions = SessionListModel(transport: transport, chatTransport: transport, cache: cache)
+        guard !scenario.showsList, scenario != .empty else { return sessions }
+        let model = ChatViewModel(transport: transport, storedSessionId: DemoChatTransport.storedId,
+                                  title: "Calendar and logs", messages: transport.seedMessages(), cache: cache)
+        sessions.register(model, for: DemoChatTransport.storedId)
+        if let prompt = scenario.autoPrompt {
+            Task {
+                try? await Task.sleep(for: .seconds(1))
+                model.send(prompt)
             }
-            return model
         }
-        return ChatViewModel(transport: OfflineChatTransport())
+        return sessions
+    }
+
+    /// The route that a demo pushes at launch: the seeded chat, or a new chat for `empty`.
+    static var demoLaunchRoute: ChatRoute? {
+        guard let scenario = DemoChatTransport.Scenario.current, !scenario.showsList else { return nil }
+        return scenario == .empty ? .new("demo") : .session(DemoChatTransport.storedId)
     }
     #endif
 }

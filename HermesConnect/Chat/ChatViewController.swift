@@ -56,6 +56,7 @@ final class ChatViewController: MessagesViewController {
         configureLayout()
         configureComposer()
         configureVoice()
+        restoreDraft()
         configureScrollButton()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, _) in
             self.textSizeChanged()
@@ -70,8 +71,11 @@ final class ChatViewController: MessagesViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Empty session: no placeholder, the composer has focus.
-        if bubbles.isEmpty, !voice.isActive { messageInputBar.inputTextView.becomeFirstResponder() }
+        // Empty session: no placeholder, the composer has focus. Not while the history loads (issue #7)
+        // or while a memo records (issue #9).
+        if bubbles.isEmpty, !model.isLoadingHistory, !voice.isActive {
+            messageInputBar.inputTextView.becomeFirstResponder()
+        }
         if let first = onFirstAppear {
             onFirstAppear = nil
             first(self)
@@ -300,6 +304,15 @@ final class ChatViewController: MessagesViewController {
         let text = ChatVoiceLayout.transcriptText(for: voice, traits: traitCollection)
         let height = ChatVoiceLayout.transcriptHeight(text, width: width, expanded: expandedTranscripts.contains(row.id))
         return (text, height, width)
+    }
+
+    /// The draft of this session (issue #7) goes back into the composer.
+    private func restoreDraft() {
+        let draft = model.draft
+        guard !draft.isEmpty else { return }
+        messageInputBar.inputTextView.text = draft
+        composerText = draft
+        updateSendButton()
     }
 
     private func configureScrollButton() {
@@ -811,11 +824,13 @@ extension ChatViewController: InputBarAccessoryViewDelegate {
         guard model.send(text) != nil else { return }
         inputBar.inputTextView.text = ""
         composerText = ""
+        model.updateDraft("")
         updateSendButton()
     }
 
     func inputBar(_: InputBarAccessoryView, textViewTextDidChangeTo text: String) {
         composerText = text
+        model.updateDraft(text)
         updateSendButton()
     }
 }

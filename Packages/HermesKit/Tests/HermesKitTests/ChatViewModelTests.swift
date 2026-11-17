@@ -40,9 +40,13 @@ final class FakeChatTransport: ChatTransport, @unchecked Sendable {
     private var _resumes: [String] = []
     var resumes: [String] { lock.withLock { _resumes } }
 
+    /// Thrown by `resumeSession` when set (for example `GatewayError.rpc(code: 4007, ...)`).
+    var resumeError: (any Error)?
+
     func resumeSession(storedId: String, source: String) async throws -> ChatSessionRef {
         lock.withLock { _resumes.append(storedId) }
         if lock.withLock({ failStart }) { throw Failure() }
+        if let error = lock.withLock({ resumeError }) { throw error }
         return ChatSessionRef(liveId: "s2", storedId: storedId)
     }
 
@@ -55,6 +59,17 @@ final class FakeChatTransport: ChatTransport, @unchecked Sendable {
     func stopReply(sessionId: String) async throws -> Bool {
         lock.withLock { _stops.append(sessionId) }
         return true
+    }
+
+    private var _histories: [String] = []
+    var histories: [String] { lock.withLock { _histories } }
+    var transcript: [TranscriptMessage] = []
+    var failHistory = false
+
+    func history(sessionId: String) async throws -> [TranscriptMessage] {
+        lock.withLock { _histories.append(sessionId) }
+        if lock.withLock({ failHistory }) { throw Failure() }
+        return lock.withLock { transcript }
     }
 }
 

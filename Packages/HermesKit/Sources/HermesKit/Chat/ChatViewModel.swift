@@ -7,6 +7,8 @@ import Observation
 /// - Text-only changes reach `messages` at most once per `redrawInterval` (100 ms).
 ///   Other changes reach it at once.
 /// - Message text never goes to a log.
+/// - Issue #7: a model with a stored id shows the cached transcript at once. `open()` resumes the session
+///   and merges `session.history`. Ended messages go to the cache after each change.
 @MainActor @Observable
 public final class ChatViewModel {
     /// The bubbles that the screen shows.
@@ -17,6 +19,13 @@ public final class ChatViewModel {
     public private(set) var title: String?
     /// The last reply that ended. VoiceOver reads it once.
     public private(set) var completedReplyId: String?
+    /// The stored id (docs/hermes-protocol.md 3.3). A new chat gets it from `session.create`.
+    public private(set) var storedSessionId: String?
+    /// `true` while `open()` waits for the history and no cached message shows. The screen shows a `ProgressView`.
+    public private(set) var isLoadingHistory = false
+    /// `session.resume` answered "not found" (4007): the server has no row for the stored id. The app
+    /// drops the session and shows the list (QA #27 defect 1).
+    public private(set) var isSessionGone = false
 
     @ObservationIgnored private var thread = ChatThread()
     @ObservationIgnored private let transport: any ChatTransport
@@ -30,14 +39,21 @@ public final class ChatViewModel {
     @ObservationIgnored private var sessionIsStale = false
     @ObservationIgnored private var redrawTask: Task<Void, Never>?
     @ObservationIgnored private var lastRedraw: ContinuousClock.Instant?
+    @ObservationIgnored private let cache: (any SessionCacheStore)?
+    @ObservationIgnored private var openTask: Task<Void, Never>?
+    /// The last `open()` did not finish (offline). The next connect runs it again.
+    @ObservationIgnored private var needsOpen = false
+    @ObservationIgnored private var eventTask: Task<Void, Never>?
     /// Reads a memo file for the upload. Tests use a fake.
     @ObservationIgnored private let loadAudio: @Sendable (URL) throws -> Data
     /// Deletes a memo file when the owner deletes the memo.
     @ObservationIgnored private let removeAudio: @Sendable (URL) -> Void
 
-    /// `messages` is history that the screen shows at once (DEBUG demo, later the session history).
-    public init(transport: any ChatTransport, session: ChatSessionRef? = nil, title: String? = nil,
-                messages: [ChatMessage] = [], redrawInterval: Duration = .milliseconds(100),
+    /// `messages` is history that the screen shows at once (DEBUG demo). With no `messages`, a model with
+    /// a `storedSessionId` and a `cache` shows the cached transcript.
+    public init(transport: any ChatTransport, session: ChatSessionRef? = nil, storedSessionId: String? = nil,
+                title: String? = nil, messages: [ChatMessage] = [], cache: (any SessionCacheStore)? = nil,
+                redrawInterval: Duration = .milliseconds(100),
                 now: @escaping @Sendable () -> Date = { Date() },
                 makeId: @escaping @Sendable () -> String = { UUID().uuidString },
                 loadAudio: @escaping @Sendable (URL) throws -> Data = { try Data(contentsOf: $0) },
@@ -46,19 +62,37 @@ public final class ChatViewModel {
         self.loadAudio = loadAudio
         self.removeAudio = removeAudio
         self.session = session
+        self.storedSessionId = storedSessionId ?? session?.storedId
         self.title = title
+        self.cache = cache
         self.redrawInterval = redrawInterval
         self.now = now
         self.makeId = makeId
         self.sessionKey = makeId()
-        self.thread = ChatThread(messages: messages)
-        self.messages = messages
+        var initial = messages
+        if initial.isEmpty, let stored = self.storedSessionId, let cache {
+            initial = cache.loadTranscript(sessionId: stored)
+        }
+        self.thread = ChatThread(messages: initial)
+        self.messages = initial
+    }
+
+    /// The composer text that the owner did not send. One draft per session.
+    public var draft: String {
+        guard let storedSessionId else { return "" }
+        return cache?.loadDraft(sessionId: storedSessionId) ?? ""
+    }
+
+    /// The composer calls this on each change. A new chat with no stored id keeps no draft.
+    public func updateDraft(_ text: String) {
+        guard let storedSessionId else { return }
+        cache?.saveDraft(text, sessionId: storedSessionId)
     }
 
     /// `true` from the send until `message.complete`. The Stop button shows.
     public var isReplyActive: Bool { turn != .idle }
 
-    /// Reads gateway events until the task is cancelled. The screen runs it in `.task`.
+    /// Reads gateway events until the task is cancelled.
     public func run() async {
         for await event in transport.events {
             if Task.isCancelled { return }
@@ -66,12 +100,102 @@ public final class ChatViewModel {
         }
     }
 
+    /// Reads gateway events for the life of the model, also while its screen is not on top (issue #7).
+    /// So a reply that streams while the owner looks at the list still ends. A second call does nothing.
+    public func startEvents() {
+        guard eventTask == nil else { return }
+        let stream = transport.events
+        eventTask = Task { [weak self] in
+            for await item in stream {
+                guard let self else { return }
+                self.receive(item)
+            }
+        }
+    }
+
+    /// Stops `startEvents()` (tests).
+    public func stopEvents() {
+        eventTask?.cancel()
+        eventTask = nil
+    }
+
+    // MARK: Open
+
+    /// Opens a stored session: `session.resume`, then `session.history` merged into the thread (issue #7).
+    /// Cached messages show at once. The merge keeps the ids on screen, so the thread does not jump.
+    /// A new chat (no stored id) calls `session.create` now. If that fails, the first send creates it.
+    /// Calls at the same time share one run.
+    public func open() async {
+        guard let storedSessionId else {
+            _ = try? await currentSession()
+            return
+        }
+        if let openTask { return await openTask.value }
+        let task = Task { await loadHistory() }
+        openTask = task
+        await task.value
+        openTask = nil
+    }
+
+    private func loadHistory() async {
+        isLoadingHistory = messages.isEmpty
+        defer { isLoadingHistory = false }
+        do {
+            // Always resume: the server reaps an idle live session 20 s after its socket drops.
+            let live = try await resumedSession()
+            let transcript = try await transport.history(sessionId: live.liveId)
+            needsOpen = false
+            // A session with a transcript has a server row, so the next launch can resume it.
+            if !transcript.isEmpty { saveActiveSessionId() }
+            // A running turn owns the end of the thread. Its `message.complete` brings the text.
+            guard thread.turn == .idle else { return }
+            let history = ChatHistory.messages(from: transcript, reusing: thread.messages, fallbackDate: now())
+            if thread.replaceHistory(history) { redrawNow() }
+            saveTranscript()
+        } catch where Self.isSessionNotFound(error) {
+            // A dead id (for example a New Chat that never got a prompt): never resume it again.
+            needsOpen = false
+            if let storedSessionId, cache?.loadActiveSessionId() == storedSessionId {
+                cache?.saveActiveSessionId(nil)
+            }
+            isSessionGone = true
+        } catch {
+            needsOpen = true
+        }
+    }
+
+    /// `session.resume` error 4007: no stored session with this id (`methods_session.py`, protocol 3.4).
+    public nonisolated static let sessionNotFoundCode = 4007
+
+    public nonisolated static func isSessionNotFound(_ error: any Error) -> Bool {
+        if case GatewayError.rpc(let code, _) = error { return code == sessionNotFoundCode }
+        return false
+    }
+
+    /// The active id is the session that launch opens. It is saved only for a session with a server row:
+    /// after an accepted prompt, or after a resume that has a transcript. `session.create` makes no row.
+    private func saveActiveSessionId() {
+        guard let storedSessionId else { return }
+        cache?.saveActiveSessionId(storedSessionId)
+    }
+
+    /// `session.resume` with the stored id. A send at the same time shares the call.
+    private func resumedSession() async throws -> ChatSessionRef {
+        if sessionTask == nil, session != nil { sessionIsStale = true }
+        return try await currentSession()
+    }
+
+    private func saveTranscript() {
+        guard let storedSessionId, let cache else { return }
+        cache.saveTranscript(thread.messages, sessionId: storedSessionId)
+    }
+
     /// Applies one item of the event stream. Events of other sessions are ignored.
     public func receive(_ item: GatewayClientEvent) {
         switch item {
         case .event(let event):
             if case .sessionTitle(let payload) = event.kind {
-                if let stored = session?.storedId, payload.sessionId == stored, !payload.title.isEmpty {
+                if let stored = storedSessionId, payload.sessionId == stored, !payload.title.isEmpty {
                     title = payload.title
                 }
                 return
@@ -82,8 +206,14 @@ public final class ChatViewModel {
         case .state(.disconnected):
             // The live id can die with the socket. The next send resumes the stored id.
             sessionIsStale = session != nil
+            if session != nil { needsOpen = true }
             let makeId = self.makeId
             changed(thread.connectionLost(now: now(), makeId: makeId))
+        case .state(.connected):
+            // Back after a drop or an offline open: resume and catch up with the history.
+            if needsOpen, storedSessionId != nil {
+                Task { await open() }
+            }
         case .state, .serverRequest:
             break
         }
@@ -204,6 +334,8 @@ public final class ChatViewModel {
                                                  retryBeforeRowId: retryBeforeRowId)
             }
             thread.setDelivery(.delivered, id: id, userRowId: row)
+            saveActiveSessionId()
+            saveTranscript()
         } catch {
             thread.setDelivery(.failed, id: id)
             thread.cancelWaiting()
@@ -218,7 +350,8 @@ public final class ChatViewModel {
         if let sessionTask { return try await sessionTask.value }
         let transport = self.transport
         let key = sessionKey
-        let storedId = sessionIsStale ? session?.storedId : nil
+        // A session that is stale, or not resumed yet, resumes its stored id. A new chat creates one.
+        let storedId = (sessionIsStale || session == nil) ? (session?.storedId ?? storedSessionId) : nil
         let task = Task {
             if let storedId {
                 return try await transport.resumeSession(storedId: storedId, source: ChatSource.iOS)
@@ -231,6 +364,10 @@ public final class ChatViewModel {
             session = created
             sessionIsStale = false
             sessionTask = nil
+            if storedSessionId == nil, let stored = created.storedId {
+                // No active id yet: the server writes no row until the first prompt (QA #27 defect 1).
+                storedSessionId = stored
+            }
             return created
         } catch {
             sessionTask = nil
@@ -248,6 +385,7 @@ public final class ChatViewModel {
         case .completed(let id):
             redrawNow()
             completedReplyId = id
+            saveTranscript()
         }
     }
 
