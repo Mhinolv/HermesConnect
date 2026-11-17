@@ -53,6 +53,7 @@ struct SettingsView: View {
                 } footer: {
                     if let reason = connectionReason { Text(reason) }
                 }
+                VoiceSettingsSection()
                 LocationSettingsSection()
                 PhotoSettingsSection()
                 Section {
@@ -134,6 +135,24 @@ struct SettingsView: View {
             dismiss()
         } catch {
             saveFailed = true
+        }
+    }
+}
+
+/// Settings > Voice (issue #10). Auto-play is on by default (owner decision 2026-11-16).
+struct VoiceSettingsSection: View {
+    @AppStorage(VoiceReplySettings.autoPlayKey) private var autoPlay = true
+
+    static let toggleTitle = "Auto-Play Voice Replies"
+    static let footer = "Hermes speaks replies to your voice memos."
+
+    var body: some View {
+        Section {
+            Toggle(Self.toggleTitle, isOn: $autoPlay)
+        } header: {
+            Text("Voice")
+        } footer: {
+            Text(Self.footer)
         }
     }
 }

@@ -186,7 +186,33 @@ public struct HermesRESTClient: Sendable {
         return (result.transcript ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// A 10-minute clip can take the provider a long time. The other calls use 15 s.
+    /// `POST /api/audio/speak` with the reply text (docs/hermes-protocol.md 3.9, issue #10).
+    /// Returns the decoded `data_url`. The text and the audio never go to a log.
+    public func speak(text: String) async throws -> SpokenAudio {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw VoiceMemoError.badClip }
+        var request = request(path: "/api/audio/speak", query: [], timeout: Self.transcribeTimeout)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(SpeakRequest(text: trimmed))
+        let result: SpeakResponse = try await load(request)
+        guard result.ok != false, let dataURL = result.dataURL, let audio = SpokenAudio.decode(dataURL: dataURL) else {
+            throw HermesAPIError.invalidResponse
+        }
+        return audio
+    }
+
+    private struct SpeakRequest: Encodable {
+        var text: String
+    }
+
+    private struct SpeakResponse: Decodable {
+        var ok: Bool?
+        var dataURL: String?
+        enum CodingKeys: String, CodingKey { case ok, dataURL = "data_url" }
+    }
+
+    /// A 10-minute clip (or a long reply for speak) can take the provider a long time. The other calls use 15 s.
     static let transcribeTimeout: TimeInterval = 120
 
     private struct TranscribeRequest: Encodable {

@@ -90,6 +90,18 @@ struct ChatThreadView: UIViewControllerRepresentable {
             controller.onFirstAppear = { DemoVoiceRecorder.start(scenario, on: $0.voice) }
             return controller
         }
+        if let scenario = DemoChatTransport.Scenario.current, scenario.showsVoiceReplies {
+            let controller = ChatViewController(model: model)
+            controller.onFirstAppear = { controller in
+                controller.tapAudio(id: "r2")
+                guard scenario == .voiceRepliesPaused else { return }
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(9))
+                    controller.tapAudio(id: "r2")
+                }
+            }
+            return controller
+        }
         #endif
         return ChatViewController(model: model)
     }

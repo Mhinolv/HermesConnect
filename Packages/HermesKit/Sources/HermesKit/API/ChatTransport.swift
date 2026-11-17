@@ -31,6 +31,8 @@ public protocol ChatTransport: Sendable {
     func submitVoicePrompt(sessionId: String, text: String, retryBeforeRowId: Int?) async throws -> Int?
     /// `POST /api/audio/transcribe` (docs/hermes-protocol.md 3.9). Returns the trimmed transcript.
     func transcribe(audio: Data, mimeType: String) async throws -> String
+    /// `POST /api/audio/speak` (docs/hermes-protocol.md 3.9, issue #10). Never `voice.tts`: that uses the server speaker.
+    func speak(text: String) async throws -> SpokenAudio
 }
 
 /// Transports with no voice support (offline transport, older fakes) fail voice memos.
@@ -41,6 +43,10 @@ extension ChatTransport {
     }
 
     public func transcribe(audio _: Data, mimeType _: String) async throws -> String {
+        throw VoiceMemoError.unsupported
+    }
+
+    public func speak(text _: String) async throws -> SpokenAudio {
         throw VoiceMemoError.unsupported
     }
 }
@@ -88,6 +94,10 @@ extension GatewayClient: ChatTransport {
 
     public func transcribe(audio: Data, mimeType: String) async throws -> String {
         try await HermesRESTClient(endpoint: endpoint).transcribe(audio: audio, mimeType: mimeType)
+    }
+
+    public func speak(text: String) async throws -> SpokenAudio {
+        try await HermesRESTClient(endpoint: endpoint).speak(text: text)
     }
 
     public func stopReply(sessionId: String) async throws -> Bool {

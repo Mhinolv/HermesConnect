@@ -26,6 +26,9 @@ public final class ChatViewModel {
     /// `session.resume` answered "not found" (4007): the server has no row for the stored id. The app
     /// drops the session and shows the list (QA #27 defect 1).
     public private(set) var isSessionGone = false
+    /// Issue #10: the reply to a voice memo whose audio just came. The screen plays it once when
+    /// "Auto-Play Voice Replies" is on. Each new reply gets a new value.
+    public private(set) var autoPlayReplyId: String?
 
     @ObservationIgnored private var thread = ChatThread()
     @ObservationIgnored private let transport: any ChatTransport
@@ -48,6 +51,10 @@ public final class ChatViewModel {
     @ObservationIgnored private let loadAudio: @Sendable (URL) throws -> Data
     /// Deletes a memo file when the owner deletes the memo.
     @ObservationIgnored private let removeAudio: @Sendable (URL) -> Void
+    /// Writes the audio of a voice reply to a file (issue #10). Tests use a fake.
+    @ObservationIgnored private let saveSpeech: @Sendable (SpokenAudio) throws -> VoiceReplyAudio
+    /// Replies with a speak call that runs.
+    @ObservationIgnored private var speaking: Set<String> = []
     /// Metadata only: ids, counts and states. Never the text of a message (issue #18).
     @ObservationIgnored private let log = HermesLog(category: "chat")
 
@@ -59,8 +66,10 @@ public final class ChatViewModel {
                 now: @escaping @Sendable () -> Date = { Date() },
                 makeId: @escaping @Sendable () -> String = { UUID().uuidString },
                 loadAudio: @escaping @Sendable (URL) throws -> Data = { try Data(contentsOf: $0) },
-                removeAudio: @escaping @Sendable (URL) -> Void = { try? FileManager.default.removeItem(at: $0) }) {
+                removeAudio: @escaping @Sendable (URL) -> Void = { try? FileManager.default.removeItem(at: $0) },
+                saveSpeech: @escaping @Sendable (SpokenAudio) throws -> VoiceReplyAudio = { try VoiceReplyFiles.save($0) }) {
         self.transport = transport
+        self.saveSpeech = saveSpeech
         self.loadAudio = loadAudio
         self.removeAudio = removeAudio
         self.session = session
@@ -246,6 +255,8 @@ public final class ChatViewModel {
         let id = makeId()
         thread.addOutgoingVoice(id: id, memo: memo, date: now())
         redrawNow()
+        // The owner never loses a recording: the memo is in the cache before the upload starts.
+        saveTranscript()
         return Task { await deliverVoice(id: id) }
     }
 
@@ -269,6 +280,14 @@ public final class ChatViewModel {
         if let url = thread.message(id: id)?.voice?.fileURL { removeAudio(url) }
         thread.remove(id: id)
         redrawNow()
+        saveTranscript()
+    }
+
+    /// Issue #10: "Audio unavailable. Tap to retry." on a voice reply. A manual retry does not auto-play.
+    @discardableResult
+    public func retrySpeech(id: String) -> Task<Void, Never>? {
+        guard thread.message(id: id)?.spokenReply == .failed else { return nil }
+        return speak(replyId: id, autoPlay: false)
     }
 
     /// "Reply failed. Tap to retry.": drop the failed reply and run the prompt again.
@@ -310,6 +329,7 @@ public final class ChatViewModel {
             thread.setTranscript(.failed, id: id)
             thread.setDelivery(.failed, id: id)
             redrawNow()
+            saveTranscript()
             return
         }
         guard thread.message(id: id) != nil else { return }
@@ -317,6 +337,7 @@ public final class ChatViewModel {
             thread.setTranscript(.empty, id: id)
             thread.setDelivery(.failed, id: id)
             redrawNow()
+            saveTranscript()
             return
         }
         thread.setTranscript(.done(transcript), id: id)
@@ -349,6 +370,7 @@ public final class ChatViewModel {
             log.notice("prompt not delivered: message \(id)")
             thread.setDelivery(.failed, id: id)
             thread.cancelWaiting()
+            if isVoice { saveTranscript() }
         }
         redrawNow()
     }
@@ -447,8 +469,48 @@ public final class ChatViewModel {
         case .text: scheduleRedraw()
         case .structure: redrawNow()
         case .completed(let id):
+            if isVoiceTurnReply(id) { _ = speak(replyId: id, autoPlay: true) }
             redrawNow()
             completedReplyId = id
+            saveTranscript()
+        }
+    }
+
+    // MARK: Voice replies (issue #10)
+
+    /// A complete reply to a delivered voice memo, with text to speak. A text turn never calls speak.
+    private func isVoiceTurnReply(_ id: String) -> Bool {
+        guard let reply = thread.message(id: id), reply.reply == .complete, reply.spokenReply == nil,
+              let promptId = reply.promptId, thread.message(id: promptId)?.voice != nil else { return false }
+        return !VoiceReplyText.spokenText(reply.text).isEmpty
+    }
+
+    /// `POST /api/audio/speak` with the final reply text. The audio bubble shows "Preparing audio…" at once.
+    private func speak(replyId id: String, autoPlay: Bool) -> Task<Void, Never>? {
+        guard let reply = thread.message(id: id), !speaking.contains(id) else { return nil }
+        let text = VoiceReplyText.spokenText(reply.text)
+        guard !text.isEmpty else { return nil }
+        speaking.insert(id)
+        thread.setSpokenReply(.preparing, id: id)
+        redrawNow()
+        let transport = self.transport
+        let saveSpeech = self.saveSpeech
+        return Task {
+            let result: SpokenReply
+            do {
+                // The reply text and the audio never go to a log.
+                let audio = try await Task.detached {
+                    try saveSpeech(try await transport.speak(text: text))
+                }.value
+                result = .ready(audio)
+            } catch {
+                result = .failed
+            }
+            speaking.remove(id)
+            guard thread.message(id: id) != nil else { return }
+            thread.setSpokenReply(result, id: id)
+            redrawNow()
+            if autoPlay, result.audio != nil { autoPlayReplyId = id }
             saveTranscript()
         }
     }

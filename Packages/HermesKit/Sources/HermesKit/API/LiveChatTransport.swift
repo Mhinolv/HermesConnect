@@ -198,6 +198,17 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport {
         }
     }
 
+    /// Issue #10: REST on the forwarded port, as `transcribe`.
+    public func speak(text: String) async throws -> SpokenAudio {
+        guard let endpoint else { throw GatewayError.notConnected }
+        do {
+            return try await makeREST(endpoint).speak(text: text)
+        } catch {
+            if Self.isStaleToken(error), endpoint == self.endpoint, status == .ready { staleToken() }
+            throw error
+        }
+    }
+
     public func history(sessionId: String) async throws -> [TranscriptMessage] {
         try await readyClient().history(sessionId: sessionId)
     }
