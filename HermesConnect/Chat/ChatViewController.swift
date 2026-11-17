@@ -38,6 +38,7 @@ final class ChatViewController: MessagesViewController {
         maintainPositionOnInputBarHeightChanged = true
         configureLayout()
         configureComposer()
+        restoreDraft()
         configureScrollButton()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, _) in
             self.textSizeChanged()
@@ -52,8 +53,8 @@ final class ChatViewController: MessagesViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // Empty session: no placeholder, the composer has focus.
-        if bubbles.isEmpty { messageInputBar.inputTextView.becomeFirstResponder() }
+        // Empty session: no placeholder, the composer has focus. Not while the history loads (issue #7).
+        if bubbles.isEmpty, !model.isLoadingHistory { messageInputBar.inputTextView.becomeFirstResponder() }
     }
 
     // MARK: Setup
@@ -128,6 +129,15 @@ final class ChatViewController: MessagesViewController {
         send.imageView?.contentMode = .scaleAspectFit
         bar.setRightStackViewWidthConstant(to: 36, animated: false)
         bar.setLeftStackViewWidthConstant(to: 0, animated: false)
+        updateSendButton()
+    }
+
+    /// The draft of this session (issue #7) goes back into the composer.
+    private func restoreDraft() {
+        let draft = model.draft
+        guard !draft.isEmpty else { return }
+        messageInputBar.inputTextView.text = draft
+        composerText = draft
         updateSendButton()
     }
 
@@ -561,11 +571,13 @@ extension ChatViewController: InputBarAccessoryViewDelegate {
         guard model.send(text) != nil else { return }
         inputBar.inputTextView.text = ""
         composerText = ""
+        model.updateDraft("")
         updateSendButton()
     }
 
     func inputBar(_: InputBarAccessoryView, textViewTextDidChangeTo text: String) {
         composerText = text
+        model.updateDraft(text)
         updateSendButton()
     }
 }

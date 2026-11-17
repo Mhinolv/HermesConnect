@@ -25,6 +25,19 @@ public protocol ChatTransport: Sendable {
     func submitPrompt(sessionId: String, text: String, retryBeforeRowId: Int?) async throws -> Int?
     /// `session.interrupt`. Returns `true` when the server stopped a turn.
     func stopReply(sessionId: String) async throws -> Bool
+    /// `session.history` with the live id: the whole transcript, oldest first (docs/hermes-protocol.md 3.4).
+    func history(sessionId: String) async throws -> [TranscriptMessage]
+}
+
+/// What the session list needs from the gateway (issue #7). `GatewayClient` and `LiveChatTransport` conform.
+public protocol SessionsTransport: Sendable {
+    /// Connection states and events, in order. Each read of the property gives a new stream where the
+    /// transport supports it (`LiveChatTransport`).
+    var events: AsyncStream<GatewayClientEvent> { get }
+    /// `session.list`: the stored sessions, most recent activity first (docs/hermes-protocol.md 3.4).
+    func fetchSessions() async throws -> [SessionListItem]
+    /// `session.most_recent`: the stored id of the newest session, or `nil` for no session.
+    func fetchMostRecentSessionId() async throws -> String?
 }
 
 /// The `source` value that iOS sends on `session.create` (issue #6, protocol 3.4).
@@ -53,5 +66,20 @@ extension GatewayClient: ChatTransport {
     public func stopReply(sessionId: String) async throws -> Bool {
         let result = try await interrupt(sessionId: sessionId)
         return result.interrupted ?? (result.status == "interrupted")
+    }
+
+    public func history(sessionId: String) async throws -> [TranscriptMessage] {
+        try await sessionHistory(sessionId: sessionId).messages
+    }
+}
+
+extension GatewayClient: SessionsTransport {
+    public func fetchSessions() async throws -> [SessionListItem] {
+        try await listSessions().map(SessionListItem.init(row:))
+    }
+
+    public func fetchMostRecentSessionId() async throws -> String? {
+        let id = try await mostRecentSession().sessionId
+        return id?.isEmpty == false ? id : nil
     }
 }

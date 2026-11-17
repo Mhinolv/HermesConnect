@@ -416,6 +416,11 @@ extension GatewayClient {
         try await call("session.list", params: params, as: SessionListResult.self).sessions
     }
 
+    /// `session.most_recent` (`methods_session.py:563-578`). Returns the stored id, or `nil` for no session.
+    public func mostRecentSession() async throws -> SessionMostRecentResult {
+        try await call("session.most_recent", params: EmptyParams())
+    }
+
     /// `session.history` with a live id (`methods_session.py:1978-1997`).
     public func sessionHistory(sessionId: String) async throws -> SessionHistoryResult {
         try await call("session.history", params: SessionIdParams(sessionId: sessionId))

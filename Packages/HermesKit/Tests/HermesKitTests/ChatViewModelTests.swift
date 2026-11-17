@@ -56,6 +56,17 @@ final class FakeChatTransport: ChatTransport, @unchecked Sendable {
         lock.withLock { _stops.append(sessionId) }
         return true
     }
+
+    private var _histories: [String] = []
+    var histories: [String] { lock.withLock { _histories } }
+    var transcript: [TranscriptMessage] = []
+    var failHistory = false
+
+    func history(sessionId: String) async throws -> [TranscriptMessage] {
+        lock.withLock { _histories.append(sessionId) }
+        if lock.withLock({ failHistory }) { throw Failure() }
+        return lock.withLock { transcript }
+    }
 }
 
 private func event(_ json: String) throws -> GatewayClientEvent {

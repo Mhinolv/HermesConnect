@@ -16,16 +16,17 @@ public enum ChatLinkStatus: Sendable, Equatable {
 /// The release chat transport (issue #6, fix round 2). It follows the #4 endpoint:
 /// a new endpoint gets a new `GatewayClient` (#5), and `nil` closes it.
 ///
-/// - One `events` stream for the whole app life. It forwards the events of the current client only.
+/// - `events` forwards the events of the current client only. Each read of it is a new stream (issue #7).
 /// - A stale token (close code 4401 or 4403, HTTP 401 or 403) asks `onStaleToken` for a new session once.
 ///   A second refusal before a good connect is `.failed`.
 /// - A send on a dropped socket reconnects once when the reason allows it.
 @MainActor @Observable
-public final class LiveChatTransport: ChatTransport {
+public final class LiveChatTransport: ChatTransport, SessionsTransport {
     public private(set) var status: ChatLinkStatus = .notConnected
 
-    @ObservationIgnored public nonisolated let events: AsyncStream<GatewayClientEvent>
-    @ObservationIgnored private let input: AsyncStream<GatewayClientEvent>.Continuation
+    /// Each read gives a new stream, so the session list and each chat read every event (issue #7).
+    public nonisolated var events: AsyncStream<GatewayClientEvent> { broadcast.subscribe() }
+    @ObservationIgnored private nonisolated let broadcast = GatewayEventBroadcast()
     @ObservationIgnored private let makeClient: @Sendable (GatewayEndpoint) -> GatewayClient
     @ObservationIgnored private var endpoint: GatewayEndpoint?
     @ObservationIgnored private var client: GatewayClient?
@@ -38,7 +39,6 @@ public final class LiveChatTransport: ChatTransport {
 
     public init(makeClient: @escaping @Sendable (GatewayEndpoint) -> GatewayClient = { GatewayClient(endpoint: $0) }) {
         self.makeClient = makeClient
-        (events, input) = AsyncStream.makeStream(of: GatewayClientEvent.self)
     }
 
     /// `true` for errors that mean "the token is not valid any more".
@@ -120,7 +120,7 @@ public final class LiveChatTransport: ChatTransport {
 
     private func forward(_ item: GatewayClientEvent, from client: GatewayClient) {
         guard client === self.client else { return }
-        input.yield(item)
+        broadcast.yield(item)
         guard case .state(.disconnected(let reason)) = item else { return }
         if Self.isStaleToken(reason) {
             staleToken()
@@ -177,5 +177,19 @@ public final class LiveChatTransport: ChatTransport {
 
     public func stopReply(sessionId: String) async throws -> Bool {
         try await readyClient().stopReply(sessionId: sessionId)
+    }
+
+    public func history(sessionId: String) async throws -> [TranscriptMessage] {
+        try await readyClient().history(sessionId: sessionId)
+    }
+
+    // MARK: SessionsTransport
+
+    public func fetchSessions() async throws -> [SessionListItem] {
+        try await readyClient().fetchSessions()
+    }
+
+    public func fetchMostRecentSessionId() async throws -> String? {
+        try await readyClient().fetchMostRecentSessionId()
     }
 }
