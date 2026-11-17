@@ -47,7 +47,8 @@ import sys
 import time
 
 # Version 2 (issue #29): `serve` uses one fixed port for each slot. The app pins it.
-GATE_VERSION = "2"
+# Version 3 (issue #51): `location` accepts the optional `arrived_at` of a visit.
+GATE_VERSION = "3"
 COMMANDS = ("serve", "location", "ping")
 
 DEFAULT_SLOT = hashlib.sha256(b"hermesconnect\0default").hexdigest()[:32]
@@ -482,7 +483,7 @@ def cmd_serve(options):
 # ---------------------------------------------------------------------------
 
 LOCATION_REQUIRED = ("lat", "lon", "accuracy_m", "timestamp")
-LOCATION_OPTIONAL = ("speed", "course")
+LOCATION_OPTIONAL = ("speed", "course", "arrived_at")  # arrived_at: gate 3 (issue #51)
 
 
 def _reject_constant(name):
@@ -563,6 +564,13 @@ def validate_location(raw):
     course = fix.get("course")
     if course is not None and (not _number(course) or not 0 <= course <= 360):
         raise bad("course must be a number from 0 to 360, or null")
+    arrived = None
+    if fix.get("arrived_at") is not None:
+        arrived = parse_timestamp(fix["arrived_at"]) if isinstance(fix["arrived_at"], str) else None
+        if arrived is None:
+            raise bad("arrived_at must be ISO 8601 with a time zone, or null")
+        if (arrived - now).total_seconds() > LOCATION_FUTURE_SLACK_S:
+            raise bad("arrived_at is in the future")
     return {
         "schemaVersion": LOCATION_SCHEMA,
         "lat": float(lat),
@@ -571,6 +579,7 @@ def validate_location(raw):
         "timestamp": iso_utc(moment),
         "speed": None if speed is None else float(speed),
         "course": None if course is None else float(course),
+        "arrived_at": None if arrived is None else iso_utc(arrived),
         "received_at": iso_utc(now),
         "source": "hermesconnect",
     }

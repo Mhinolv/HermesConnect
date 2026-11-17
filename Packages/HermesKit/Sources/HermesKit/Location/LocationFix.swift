@@ -12,6 +12,11 @@ public struct LocationFix: Sendable, Equatable, Codable, CustomStringConvertible
     public var speed: Double?
     /// Degrees from true north (0...360), or nil if not known.
     public var course: Double?
+    /// A visit only: when the owner arrived at the place. Nil if the owner already left, or if not known.
+    public var arrival: Date?
+    /// A visit only: when Core Location delivered the visit. iOS often delivers an arrival late, so the
+    /// 30 min limit of `LocationSharing` counts from this time, not from `timestamp` (QA #53 defect 1).
+    public var deliveredAt: Date?
 
     /// Returns nil if the values are not a usable fix (the same rules as the gate `location` command).
     /// A negative speed or course from Core Location means "not known" and becomes nil.
@@ -44,6 +49,9 @@ public struct LocationFix: Sendable, Equatable, Codable, CustomStringConvertible
         }
         self.init(latitude: latitude, longitude: longitude, horizontalAccuracy: horizontalAccuracy,
                   timestamp: timestamp)
+        // The owner is still at the place: send when they arrived.
+        if departure == .distantFuture, arrival != .distantPast, arrival <= now { self.arrival = arrival }
+        deliveredAt = now
     }
 
     /// The great-circle distance to `other` in meters.
@@ -85,12 +93,16 @@ public enum LocationPayload {
         var timestamp: String
         var speed: Double?
         var course: Double?
+        /// Gate 3 and later. `GateLocationUploader` leaves it out for an older gate.
+        var arrived_at: String?
     }
 
-    /// One JSON object with `lat`, `lon`, `accuracy_m`, `timestamp` (ISO 8601 UTC) and optional `speed`, `course`.
+    /// One JSON object with `lat`, `lon`, `accuracy_m`, `timestamp` (ISO 8601 UTC) and optional `speed`, `course`
+    /// and `arrived_at` (a visit, gate 3).
     public static func encode(_ fix: LocationFix, precision: LocationPrecision) -> Data {
         var body = Body(lat: fix.latitude, lon: fix.longitude, accuracy_m: fix.horizontalAccuracy,
-                        timestamp: timestampText(fix.timestamp), speed: fix.speed, course: fix.course)
+                        timestamp: timestampText(fix.timestamp), speed: fix.speed, course: fix.course,
+                        arrived_at: fix.arrival.map(timestampText))
         if precision == .approximate {
             body.lat = rounded(fix.latitude, limit: 90)
             body.lon = rounded(fix.longitude, limit: 180)
@@ -107,6 +119,19 @@ public enum LocationPayload {
     /// `2026-11-16T12:00:00.123Z`. The gate accepts ISO 8601 with a time zone.
     public static func timestampText(_ date: Date) -> String {
         date.formatted(Date.ISO8601FormatStyle(includingFractionalSeconds: true, timeZone: .gmt))
+    }
+
+    /// The first gate version that accepts `arrived_at`. Older gates refuse unknown fields.
+    public static let arrivalGateVersion = 3
+
+    /// The payload for a gate of `gateVersion`. An older gate gets it without `arrived_at`.
+    public static func forGate(_ payload: Data, gateVersion: String) -> Data {
+        if let version = Int(gateVersion), version >= arrivalGateVersion { return payload }
+        guard var body = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              body.removeValue(forKey: "arrived_at") != nil,
+              let data = try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
+        else { return payload }
+        return data
     }
 
     private static func rounded(_ value: Double, limit: Double) -> Double {

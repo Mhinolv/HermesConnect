@@ -61,15 +61,20 @@ private struct LocationAccessPrompt: ViewModifier {
             .onChange(of: model.connection) { _, state in
                 if case .connected = state { location.didConnect() }
             }
-            .onChange(of: scenePhase) { _, phase in
-                if phase == .active { location.flush() }
+            // Issue #51: `initial` covers the first launch, which can start in the active phase.
+            .onChange(of: scenePhase, initial: true) { _, phase in
+                switch phase {
+                case .active: location.appDidBecomeActive()
+                case .background: location.appDidEnterBackground()
+                default: break
+                }
             }
     }
 }
 
 extension View {
-    /// Shows the "Share Your Location" sheet after the first connect, and sends a waiting fix on connect
-    /// and when the app opens. `enabled` is false while another sheet shows.
+    /// Shows the "Share Your Location" sheet after the first connect. On connect and when the app opens, it
+    /// requests a new fix and sends it. `enabled` is false while another sheet shows.
     func locationAccessPrompt(enabled: Bool) -> some View {
         modifier(LocationAccessPrompt(enabled: enabled))
     }
