@@ -5,6 +5,8 @@ import HermesKit
 struct HermesConnectApp: App {
     @State private var model: AppModel
     @State private var sessions: SessionListModel
+    /// Made at launch, also for a relaunch in the background by a location event (issue #13).
+    @State private var location: LocationController
     /// The Release chat link to Hermes. Nil in the DEBUG demo.
     private let link: LiveChatTransport?
     private let usesAppLock: Bool
@@ -18,6 +20,7 @@ struct HermesConnectApp: App {
             let demo = AppModel.preview(setUp: true, hostKey: .sample)
             demo.previewConnection(.connected(gateVersion: "demo"))
             model = demo
+            location = LocationController.preview(enabled: false)
             usesAppLock = false
             return
         }
@@ -25,6 +28,7 @@ struct HermesConnectApp: App {
         let live = AppModel.live()
         let link = ChatLaunch.makeLink(renew: { await live.renewHermesSession() })
         model = live
+        location = LocationController.live()
         self.link = link
         sessions = ChatLaunch.makeSessions(link: link)
         usesAppLock = true
@@ -35,10 +39,12 @@ struct HermesConnectApp: App {
             if usesAppLock {
                 RootView(sessions: sessions, link: link)
                     .environment(model)
+                    .environment(location)
                     .appLock(model)
             } else {
                 RootView(sessions: sessions, link: link)
                     .environment(model)
+                    .environment(location)
             }
         }
     }
@@ -87,6 +93,7 @@ struct RootView: View {
         .sheet(isPresented: $showSetup) { SetupFlowView() }
         .sheet(isPresented: $showSettings) { SettingsView() }
         .hostTrustPresenter(enabled: !showSetup && !showSettings)
+        .locationAccessPrompt(enabled: !showSetup && !showSettings && model.pendingTrust == nil)
         .onChange(of: model.hermesEndpoint, initial: true) { _, endpoint in
             link?.setEndpoint(endpoint)
         }
@@ -121,7 +128,7 @@ struct RootView: View {
 
 struct RootView_Previews: PreviewProvider {
     static var previews: some View {
-        RootView().environment(AppModel.preview(setUp: false))
-        RootView().environment(AppModel.preview(setUp: true))
+        RootView().environment(AppModel.preview(setUp: false)).environment(LocationController.preview())
+        RootView().environment(AppModel.preview(setUp: true)).environment(LocationController.preview())
     }
 }

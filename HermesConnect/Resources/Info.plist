@@ -31,8 +31,10 @@
 	<string>Hermes takes photos that you send to your agent.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Hermes uses Face ID to unlock the app.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Hermes sends your location in the background, when you move a long distance or arrive at a place.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Hermes shares your location with your agent when you ask it to.</string>
+	<string>Hermes sends your location to your own Hermes server so that your agent can answer location questions.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Hermes records voice memos that you send to your agent.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
