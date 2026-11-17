@@ -152,6 +152,8 @@ public enum SiriDialog {
     public static let noReplies = "There are no replies from Hermes yet."
     public static let stillWorking = "Hermes is still working. I'll notify you when the reply comes."
     public static let replyFailed = "Hermes could not answer. Open the app to try again."
+    /// Issue #67: Siri does not run slash commands. The command card and `/new` need the chat screen.
+    public static let slashCommand = "Open the app to run slash commands."
 
     /// "No new replies. The last one, from <session title>:"
     public static func lastReply(title: String) -> String { "No new replies. The last one, from \(title):" }
@@ -302,9 +304,12 @@ public enum SiriAsk {
         case stillWorking(Pending)
         case unreachable
         case replyFailed
+        /// Issue #67: the text is a slash command. Nothing is sent.
+        case slashCommand
 
         public var dialog: String {
             switch self {
+            case .slashCommand: SiriDialog.slashCommand
             case .reply(let spoken, _): spoken.text
             case .stillWorking: SiriDialog.stillWorking
             case .unreachable: SiriDialog.unreachable
@@ -339,6 +344,8 @@ public enum SiriAsk {
                            poll: Duration = .milliseconds(100),
                            linkReady: @escaping @MainActor (Duration) async -> Bool) async -> Outcome {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Issue #67: a command never goes to the model as a prompt, and Siri has no screen for its card.
+        if SlashCommand(trimmed) != nil { return .slashCommand }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         var ready = false

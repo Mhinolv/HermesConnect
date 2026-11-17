@@ -787,8 +787,14 @@ Use these calls in this order. Everything else is optional for v1.
 | 19 | Title and list refresh | event `session.title`, event `sessions.changed`, then step 5 | 3.10 |
 | 20 | Rename, delete | `PATCH /api/sessions/K {title}`, `session.close` then `session.delete {session_id:K}` | 3.4, 3.5 |
 | 21 | Reconnect after suspend | `session.activate` + `session.events.since`, else `session.resume` | 4.2 |
+| 22 | Slash commands (issue #67) | Text that starts with `/`: `slash.exec`, on error 4018 `command.dispatch`, then act on `type`. Never `prompt.submit` with the raw text | 3.11 |
+| 23 | Local commands | `/new` (`/reset`, `/clear`) pushes a new chat. `/usage` calls `session.usage {session_id}` | 3.11 |
 
-Optional for v1: `message.react`, `session.steer`, `commands.catalog` + `slash.exec` + `command.dispatch`, `pdf.attach`, cron REST, the streaming audio sockets.
+Slash commands in the app (issue #67):
+- `HermesKit/Chat/SlashCommand.swift` parses the text (`apps/shared/src/slash.ts` rule) and holds `SlashCommandCatalog.local`, the entry point for suggestions (#68).
+- The slash worker answers an unknown command with plain output "Unknown command: …" in ANSI colors. The app strips the colors and shows it as an error card.
+
+Optional for v1: `message.react`, `session.steer`, `commands.catalog`, `complete.slash`, `pdf.attach`, cron REST, the streaming audio sockets.
 
 ---
 

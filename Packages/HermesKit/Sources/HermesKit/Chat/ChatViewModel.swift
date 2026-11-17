@@ -34,6 +34,10 @@ public final class ChatViewModel {
     /// Issue #15: the messages that the last history merge added, oldest first. The screen shows the
     /// "N New Messages" pill and VoiceOver reads the count once. `clearNewMessages()` empties it.
     public private(set) var newMessageIds: [String] = []
+    /// Issue #67: `/new`. The screen pushes a new chat for it.
+    public private(set) var newChatRequest: NewChatRequest?
+    /// Issue #67: text for the composer: a `prefill` result, or the typed text of a command that failed.
+    public private(set) var composerFill: ComposerFill?
 
     @ObservationIgnored private var thread = ChatThread()
     @ObservationIgnored private let transport: any ChatTransport
@@ -66,6 +70,8 @@ public final class ChatViewModel {
     /// accepted. Before that the server has no row, so launch cannot find the chat by its stored id.
     /// One new chat at a time holds it (`SessionListModel.newChat`).
     @ObservationIgnored private(set) var keepsNewChat: Bool
+    /// Issue #67: the prompt text of a `send` or `skill` result, by message id. The bubble shows `display`.
+    @ObservationIgnored private var commandPrompts: [String: String] = [:]
     /// Issue #12: the downloads of the `MEDIA:` files of this chat.
     @ObservationIgnored public let receivedFiles: ReceivedFileLoader
     /// Metadata only: ids, counts and states. Never the text of a message (issue #18).
@@ -312,14 +318,17 @@ public final class ChatViewModel {
 
     // MARK: Actions
 
-    /// Shows the bubble at once, then sends the text as it is (also text that starts with `/`).
-    /// Returns the send task (tests wait for it). Empty text after trimming sends nothing.
+    /// Shows the bubble at once, then sends the text. Returns the send task (tests wait for it).
+    /// Empty text after trimming sends nothing.
     /// Issue #8: `attachments` upload first, in order, each with its own progress ring. Then `prompt.submit`.
     /// Attachments with no text also send.
+    /// Issue #67: a slash command never goes to `prompt.submit` as text (`runCommand`). The screen keeps the
+    /// attachments in the composer for a command.
     @discardableResult
     public func send(_ text: String, attachments: [ChatAttachment] = []) -> Task<Void, Never>? {
         let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         guard hasText || !attachments.isEmpty else { return nil }
+        if hasText, let command = SlashCommand(text) { return runCommand(command) }
         let id = makeId()
         thread.addOutgoing(id: id, text: hasText ? text : "", date: now(), attachments: attachments)
         redrawNow()
@@ -453,7 +462,7 @@ public final class ChatViewModel {
             let session = try await currentSession()
             try await uploadAttachments(of: id, to: session.liveId)
             guard let message = thread.message(id: id) else { return }
-            let text = AttachmentPayload.promptText(message.text, attachments: message.attachments)
+            let text = commandPrompts[id] ?? AttachmentPayload.promptText(message.text, attachments: message.attachments)
             thread.beginTurn(promptId: id)
             redrawNow()
             let row = if isVoice {
@@ -530,6 +539,112 @@ public final class ChatViewModel {
         case .location:
             return nil
         }
+    }
+
+    // MARK: Slash commands (issue #67)
+
+    /// Runs a slash command (docs/hermes-protocol.md 3.11). `/new` and `/usage` run in the app. Other commands
+    /// call `slash.exec`, and on error 4018 `command.dispatch`. Output and errors show as a command card.
+    /// A failed command puts the typed text back in the composer. Returns the task (tests wait for it).
+    @discardableResult
+    public func runCommand(_ command: SlashCommand) -> Task<Void, Never> {
+        log.info("slash command: /\(command.name.count) characters")
+        switch SlashCommandCatalog.localAction(for: command.name) {
+        case .newChat?:
+            newChatRequest = NewChatRequest(id: makeId())
+            return Task {}
+        case .usage?:
+            return Task { await showUsage(command) }
+        case nil:
+            return Task { await runServerCommand(command, typed: command, depth: 0) }
+        }
+    }
+
+    private func showUsage(_ command: SlashCommand) async {
+        guard let slash = transport as? any SlashCommandTransport else {
+            return commandFailed(command, message: SlashCommandError.notSupported.message)
+        }
+        do {
+            let session = try await currentSession()
+            let usage = try await slash.sessionUsage(sessionId: session.liveId)
+            addCommandCard(ChatCommandCard(command: command.display, output: usage.text()))
+        } catch {
+            commandFailed(command, message: SlashCommandError.message(for: error, command: command))
+        }
+    }
+
+    private func runServerCommand(_ command: SlashCommand, typed: SlashCommand, depth: Int) async {
+        guard let slash = transport as? any SlashCommandTransport else {
+            return commandFailed(typed, message: SlashCommandError.notSupported.message)
+        }
+        let result: SlashExecResult
+        do {
+            let session = try await currentSession()
+            do {
+                result = try await slash.execSlash(sessionId: session.liveId, command: command.text)
+            } catch GatewayError.rpc(let code, _) where code == slashUseDispatchCode {
+                result = try await slash.dispatchCommand(sessionId: session.liveId, name: command.name,
+                                                         arg: command.arg.isEmpty ? nil : command.arg)
+            }
+        } catch {
+            return commandFailed(typed, message: SlashCommandError.message(for: error, command: command))
+        }
+        guard let outcome = SlashOutcome(result) else {
+            return commandFailed(typed, message: SlashCommandError.invalidAnswer.message)
+        }
+        switch outcome {
+        case .output(let raw):
+            let output = SlashOutputText.clean(raw)
+            if SlashOutputText.isUnknownCommand(output) {
+                return commandFailed(typed, message: "Unknown command: \(command.display)")
+            }
+            addCommandCard(ChatCommandCard(command: typed.display, output: output.isEmpty ? "(no output)" : output))
+        case .send(let message, let display, let notice):
+            showNotice(notice, for: typed)
+            let id = makeId()
+            let shown = display.flatMap { $0.isEmpty ? nil : $0 } ?? typed.text
+            commandPrompts[id] = message
+            thread.addOutgoing(id: id, text: shown, date: now())
+            redrawNow()
+            await deliver(id: id, retryBeforeRowId: nil)
+        case .prefill(let message, let notice):
+            showNotice(notice, for: typed)
+            composerFill = ComposerFill(id: makeId(), text: message, reason: .prefill)
+        case .alias(let target):
+            guard depth < 3, let next = SlashCommand("/" + target + (command.arg.isEmpty ? "" : " " + command.arg))
+            else { return commandFailed(typed, message: SlashCommandError.invalidAnswer.message) }
+            switch SlashCommandCatalog.localAction(for: next.name) {
+            case .newChat?:
+                newChatRequest = NewChatRequest(id: makeId())
+            case .usage?:
+                await showUsage(typed)
+            case nil:
+                await runServerCommand(next, typed: typed, depth: depth + 1)
+            }
+        }
+    }
+
+    private func showNotice(_ notice: String?, for command: SlashCommand) {
+        let text = notice.map(SlashOutputText.clean) ?? ""
+        guard !text.isEmpty else { return }
+        addCommandCard(ChatCommandCard(command: command.display, output: text))
+    }
+
+    private func addCommandCard(_ card: ChatCommandCard) {
+        thread.addCommandCard(id: makeId(), card: card, date: now())
+        redrawNow()
+    }
+
+    /// A red card. The typed text goes back into the composer.
+    private func commandFailed(_ command: SlashCommand, message: String) {
+        log.notice("slash command failed")
+        addCommandCard(ChatCommandCard(command: command.display, output: message, isError: true))
+        composerFill = ComposerFill(id: makeId(), text: command.text, reason: .restore)
+    }
+
+    /// The screen pushed the new chat of `request`.
+    public func clearNewChatRequest(_ request: NewChatRequest) {
+        if newChatRequest == request { newChatRequest = nil }
     }
 
     /// The live session. The first send creates it with `source: "ios"`. After a drop, the send resumes
@@ -641,6 +756,35 @@ public final class ChatViewModel {
 
     /// The thread state that is not drawn yet (tests).
     var pendingThread: ChatThread { thread }
+}
+
+/// Issue #67: the text of a red command card.
+public enum SlashCommandError: Error, Equatable {
+    case notSupported
+    case invalidAnswer
+
+    public var message: String {
+        switch self {
+        case .notSupported: "Commands are not available."
+        case .invalidAnswer: "Hermes sent an answer that the app cannot read."
+        }
+    }
+
+    /// The server `message` for an RPC error. 4018 from `command.dispatch` means no command has this name.
+    static func message(for error: any Error, command: SlashCommand) -> String {
+        switch error {
+        case GatewayError.rpc(let code, _) where code == slashUseDispatchCode:
+            return "Unknown command: \(command.display)"
+        case GatewayError.rpc(_, let message) where !message.isEmpty:
+            return message
+        case GatewayError.timeout:
+            return "Hermes did not answer in time."
+        case let error as SlashCommandError:
+            return error.message
+        default:
+            return "Hermes is not connected."
+        }
+    }
 }
 
 /// The chat transport has no attach calls (issue #8).

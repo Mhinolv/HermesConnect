@@ -59,6 +59,11 @@ public struct ChatThread: Sendable, Equatable {
     }
 
     /// Issue #8: the attach state of one attachment of an outgoing message.
+    /// Issue #67: the local card of a command, at the end of the thread.
+    public mutating func addCommandCard(id: String, card: ChatCommandCard, date: Date) {
+        messages.append(ChatMessage(id: id, role: .assistant, text: card.output, date: date, command: card))
+    }
+
     public mutating func setUpload(_ upload: ChatAttachment.Upload, attachment: String, message id: String,
                                    refText: String? = nil, sessionId: String? = nil) {
         guard let index = index(of: id),
@@ -164,7 +169,12 @@ public struct ChatThread: Sendable, Equatable {
             }
             return true
         }
-        let merged = history + kept
+        // Issue #67: a command card is local. It keeps its place by date between the history rows.
+        var merged = history + kept.filter { $0.command == nil }
+        for card in kept where card.command != nil {
+            let index = merged.firstIndex { $0.command == nil && $0.date > card.date } ?? merged.endIndex
+            merged.insert(card, at: index)
+        }
         // Issue #11: a prompt that the history answers has ended. A later turn must not ack it.
         ackPromptIds.removeAll { answered.contains($0) }
         guard merged != messages else { return false }

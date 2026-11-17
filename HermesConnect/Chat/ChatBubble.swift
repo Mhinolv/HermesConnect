@@ -26,7 +26,10 @@ struct ChatBubble: MessageType {
     var sentDate: Date { row.message.date }
     /// A voice memo and the audio of a voice reply (issue #10) draw in `ChatVoiceCell` (issue #9). Issue #8: a photo or location part draws as a photo.
     var kind: MessageKind {
-        if row.message.voice != nil || part.content == .spokenReply { return .custom(nil) }
+        // Issue #67: a command card draws in `ChatCommandCell`.
+        if row.message.voice != nil || part.content == .spokenReply || row.message.command != nil {
+            return .custom(nil)
+        }
         // Issue #12: a received image is a photo bubble. Received audio uses the #10 audio bubble (custom cell).
         if let file = part.receivedFile {
             switch file.kind {

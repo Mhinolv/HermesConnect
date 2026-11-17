@@ -86,6 +86,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case voiceSettingsReady = "voice-settings-ready"
         /// QA 52-1: the Parakeet model did not load ("Parakeet model damaged. Download again.").
         case voiceSettingsDamaged = "voice-settings-damaged"
+        /// Issue #67: a `/usage` output card and an unknown command error card.
+        case slashCommands = "slash-commands"
 
         static var current: Scenario? {
             ProcessInfo.processInfo.environment["HERMES_DEMO"].flatMap(Scenario.init(rawValue:))
@@ -100,7 +102,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                  .attachments, .voiceReplies, .voiceRepliesPaused, .voiceReplyText, .tapbacks, .tapbacksPicker, .receivedFiles, .receivedFilesPreview, .markdownTable, .markdownTableTop, .markdownSheet, .markdownBlocks,
                  .markdownBlocksTop, .catchUp, .catchUpPill,
                  .notificationSettings, .notificationsOff, .voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading,
-                 .voiceSettingsReady, .voiceSettingsDamaged: nil
+                 .voiceSettingsReady, .voiceSettingsDamaged, .slashCommands: nil
             }
         }
 
@@ -408,6 +410,14 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                                         promptId: "d7"))
         }
         if scenario == .attachments { messages += AttachmentDemo.messages(now: now) }
+        if scenario == .slashCommands {
+            let late = now.addingTimeInterval(-60)
+            messages.append(ChatMessage(id: "c1", role: .assistant, text: "", date: late, command: ChatCommandCard(
+                command: "/usage", output: "Usage: 12 calls · 48,210 in / 6,904 out · 55,114 total")))
+            messages.append(ChatMessage(id: "c2", role: .assistant, text: "", date: late.addingTimeInterval(20),
+                                        command: ChatCommandCard(command: "/foo", output: "Unknown command: /foo",
+                                                                 isError: true)))
+        }
         if scenario == .receivedFiles || scenario == .receivedFilesPreview { messages += ReceivedFileDemo.messages(now: now) }
         if scenario.showsTapbacks { messages += Self.tapbackMessages(now: now) }
         if scenario.showsMarkdown {

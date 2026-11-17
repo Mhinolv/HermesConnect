@@ -152,6 +152,12 @@ struct RootView: View {
                 // The list follows the chat, so a New Chat counts once it gets its id (QA #38 defect 2).
                 .onAppear { sessions.openChat(chat) }
                 .onDisappear { sessions.closeChat(chat) }
+                // Issue #67: `/new` pushes a new chat.
+                .onChange(of: chat.newChatRequest) { _, request in
+                    guard let request else { return }
+                    chat.clearNewChatRequest(request)
+                    path.append(.new(UUID().uuidString))
+                }
             }
             .hermesStartAlert()
         }
