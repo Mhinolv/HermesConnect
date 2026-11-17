@@ -1,13 +1,13 @@
 import HermesKit
 import UIKit
 
-/// Issue #11: one reaction on a bubble. A 28 pt Liquid Glass circle with a 14 pt SF Symbol.
+/// Issue #11: one reaction on a bubble. A 28 pt circle with a 14 pt SF Symbol (issue #49: solid, not glass).
 struct ReactionBadge: Equatable {
     enum Corner { case topLeading, topTrailing }
 
     var symbolName: String
     var corner: Corner
-    /// `true` for an owner tapback: white symbol on blue glass. `false` for an agent ack: `.secondaryLabel`.
+    /// `true` for an owner tapback: white symbol on blue. `false` for an agent ack: `.label` on gray.
     var isOwner: Bool
 
     static let size: CGFloat = 28
@@ -38,30 +38,39 @@ struct ReactionBadge: Equatable {
     }
 }
 
-/// One badge view.
-final class ReactionBadgeView: UIVisualEffectView {
+/// One badge view. Issue #49: a solid circle with a ring in the screen color, like iMessage. Glass let the
+/// bubble show through, so the badge looked dim and cut by the bubble edge.
+final class ReactionBadgeView: UIView {
     let imageView = UIImageView()
     private(set) var symbolName: String?
+    /// The ring between the badge and the bubble under it.
+    static let ringWidth: CGFloat = 2
 
     init(isOwner: Bool) {
-        let glass = UIGlassEffect()
-        if isOwner { glass.tintColor = .systemBlue }
-        super.init(effect: glass)
-        frame.size = CGSize(width: ReactionBadge.size, height: ReactionBadge.size)
-        cornerConfiguration = .capsule()
+        super.init(frame: CGRect(x: 0, y: 0, width: ReactionBadge.size, height: ReactionBadge.size))
+        // An owner tapback is blue with a white symbol. An agent ack is the incoming bubble gray.
+        backgroundColor = isOwner ? .systemBlue : .systemGray5
+        layer.cornerRadius = ReactionBadge.size / 2
+        layer.borderWidth = Self.ringWidth
         imageView.contentMode = .center
-        imageView.tintColor = isOwner ? .white : .secondaryLabel
+        imageView.tintColor = isOwner ? .white : .label
         imageView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: ReactionBadge.symbolSize,
                                                                               weight: .semibold)
-        imageView.frame = contentView.bounds
+        imageView.frame = bounds
         imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        contentView.addSubview(imageView)
+        addSubview(imageView)
         isUserInteractionEnabled = false
         isAccessibilityElement = false
+        updateRing()
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.updateRing() }
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    private func updateRing() {
+        layer.borderColor = UIColor.systemBackground.resolvedColor(with: traitCollection).cgColor
+    }
 
     /// Changes the symbol with `.replace`. With Reduce Motion, or with no symbol before, it changes at once.
     func setSymbol(_ name: String, from previous: String?) {

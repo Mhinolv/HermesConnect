@@ -24,7 +24,8 @@ public enum SessionCache {
     /// The file format version. Readers accept every version: missing keys get defaults.
     /// Version 2 (issue #10): voice memos, memos that were not delivered, and the audio of voice replies.
     /// Version 3 (issue #11): agent acks and owner tapbacks.
-    public static let formatVersion = 3
+    /// Version 4 (issue #49): the waveform of a voice reply.
+    public static let formatVersion = 4
     /// Issue #36: the transcript key of the new chat that has no server row yet. Its memos stay here,
     /// so a failed memo survives a quit. No stored id starts with `#`.
     public static let newChatId = "#new-chat"
@@ -103,10 +104,13 @@ struct CachedVoice: Codable, Equatable {
 struct CachedSpeech: Codable, Equatable {
     var path: String?
     var duration: TimeInterval
+    /// Version 4 (issue #49): the bubble levels, so a relaunch does not decode the file again. Older files: empty.
+    var waveform: [Float]
 
     init(_ spoken: SpokenReply) {
         path = spoken.audio.map { CachedPath.encode($0.fileURL) }
         duration = spoken.audio?.duration ?? 0
+        waveform = spoken.audio?.waveform ?? []
     }
 
     /// A file with no length did not decode (builds before issue #36). It reads as failed, with retry.
@@ -114,15 +118,17 @@ struct CachedSpeech: Codable, Equatable {
     var spoken: SpokenReply {
         let ext = path.map { ($0 as NSString).pathExtension.lowercased() }
         guard let path, duration > 0, ext != "ogg", ext != "opus" else { return .failed }
-        return .ready(VoiceReplyAudio(fileURL: CachedPath.decode(path), duration: duration))
+        return .ready(VoiceReplyAudio(fileURL: CachedPath.decode(path), duration: duration, waveform: waveform))
     }
 
-    private enum CodingKeys: String, CodingKey { case path, duration }
+    private enum CodingKeys: String, CodingKey { case path, duration, waveform }
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         path = try container.decodeIfPresent(String.self, forKey: .path)
         duration = try container.decodeIfPresent(TimeInterval.self, forKey: .duration) ?? 0
+        // A broken waveform drops only the waveform.
+        waveform = ((try? container.decodeIfPresent([Float].self, forKey: .waveform)) ?? nil) ?? []
     }
 }
 

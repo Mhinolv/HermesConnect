@@ -406,8 +406,9 @@ private final class Ids: @unchecked Sendable {
         #expect(messages[1].reply == .complete)
     }
 
-    @Test func formatVersionIsThree() {
-        #expect(SessionCache.formatVersion == 3)
+    /// Version 3 added the reactions. Issue #49 made it 4 (the voice reply waveform).
+    @Test func formatVersionIsAtLeastThree() {
+        #expect(SessionCache.formatVersion >= 3)
     }
 }
 
