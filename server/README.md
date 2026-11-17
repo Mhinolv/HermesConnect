@@ -118,6 +118,8 @@ Run these commands from a computer that has a test copy of the phone key (`phone
 
 `hermes-plugin/phone_location/` is a Hermes plugin with one tool, `phone_location`. The agent uses it for nearby places, travel and weather. The tool only reads `~/.hermes/hermesconnect/location.json`. It adds no command channel to the phone.
 
+Contract (issue #55): the server `weather` and `maps` plugins parse this tool's output. Keep the tool name `phone_location`, `handle(args: dict, **kw) -> str`, the result keys `latitude`, `longitude` and `source`, and `"error"` (from `tool_error`) when there is no location. `ContractTests` in `tests/test_phone_location.py` fails if one of them changes.
+
 | State of the phone fix | Result |
 |---|---|
 | 30 minutes old or less | The phone fix: `latitude`, `longitude`, `accuracy_m`, `located_at`, `minutes_ago`, `apple_maps`, `"source": "hermesconnect"`, `"stale": false`. |

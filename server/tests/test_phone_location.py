@@ -5,11 +5,13 @@ No test connects to a real server.
 """
 
 import importlib.util
+import inspect
 import json
 import os
 import sys
 import tempfile
 import types
+import typing
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
@@ -459,6 +461,80 @@ class RegistrationTests(unittest.TestCase):
         for word in ("subprocess", "socket", "os.system", "os.popen", "Popen", "urllib", "http.client",
                      "open(path, \"w", "eval(", "exec("):
             self.assertNotIn(word, source.replace("exec_module", ""), word)
+
+
+class ContractTests(PluginTestCase):
+    """Issue #55: the weather and maps plugins on the server parse this tool's output.
+
+    If one of these tests fails, the change breaks weather and maps. Change those plugins first.
+    """
+
+    def assert_location(self, raw, source):
+        self.assertIsInstance(raw, str)
+        result = json.loads(raw)
+        self.assertIsInstance(result, dict)
+        self.assertNotIn("error", result)
+        self.assertEqual(result["source"], source)
+        for key in ("latitude", "longitude"):
+            self.assertIsInstance(result[key], (int, float), key)
+            self.assertNotIsInstance(result[key], bool, key)
+        self.assertTrue(-90 <= result["latitude"] <= 90)
+        self.assertTrue(-180 <= result["longitude"] <= 180)
+        return result
+
+    def test_tool_name_is_phone_location(self):
+        ctx = mock.Mock()
+        self.plugin.register(ctx)
+        kwargs = ctx.register_tool.call_args.kwargs
+        self.assertEqual(kwargs["name"], "phone_location")
+        self.assertEqual(kwargs["schema"]["name"], "phone_location")
+        self.assertIs(kwargs["handler"], self.plugin.handle)
+
+    def test_handle_signature_is_args_dict_kw_returns_str(self):
+        signature = inspect.signature(self.plugin.handle)
+        params = list(signature.parameters.values())
+        self.assertEqual([p.name for p in params], ["args", "kw"])
+        self.assertEqual(params[0].kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        self.assertIs(params[0].default, inspect.Parameter.empty)
+        self.assertEqual(params[1].kind, inspect.Parameter.VAR_KEYWORD)
+        hints = typing.get_type_hints(self.plugin.handle)
+        self.assertIs(hints["args"], dict)
+        self.assertIs(hints["return"], str)
+
+    def test_handle_accepts_extra_keyword_arguments(self):
+        self.write_fix(record(minutes_ago=1))
+        self.assert_location(self.plugin.handle({}, task_id="t1", session="s"), "hermesconnect")
+
+    def test_phone_path_has_latitude_longitude_source(self):
+        self.write_fix(record(minutes_ago=1))
+        result = self.assert_location(self.plugin.handle({}), "hermesconnect")
+        self.assertEqual((result["latitude"], result["longitude"]), (37.3349, -122.009))
+
+    def test_old_phone_fix_has_latitude_longitude_source(self):
+        self.write_fix(record(minutes_ago=13 * 60))
+        self.assert_location(self.plugin.handle({}), "hermesconnect")
+
+    def test_findmy_path_has_latitude_longitude_source(self):
+        self.install_findmy()
+        result = self.assert_location(self.plugin.handle({}), "findmy")
+        self.assertEqual((result["latitude"], result["longitude"]), (40.0, -74.0))
+
+    def test_no_location_gives_only_error(self):
+        raw = self.plugin.handle({})
+        self.assertIsInstance(raw, str)
+        result = json.loads(raw)
+        self.assertEqual(set(result), {"error"})
+        self.assertIsInstance(result["error"], str)
+        self.assertTrue(result["error"])
+
+    def test_no_location_uses_tool_error(self):
+        calls = []
+        registry = sys.modules["tools.registry"]
+        with mock.patch.object(self.plugin, "tool_error",
+                               side_effect=lambda text: calls.append(text) or registry.tool_error(text)):
+            result = json.loads(self.plugin.handle({}))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(set(result), {"error"})
 
 
 if __name__ == "__main__":
