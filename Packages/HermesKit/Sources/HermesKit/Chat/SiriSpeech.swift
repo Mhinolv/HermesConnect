@@ -175,16 +175,22 @@ public enum SiriSettings {
     }
 }
 
-/// The timing of the Siri runs. App Intents have about 30 s (Apple: `IntentCancellationReason.timeout`).
+/// The timing of the Siri runs (issue #71).
 public enum SiriTiming {
-    /// The "Read Hermes" sync. After it, Siri reads the cache.
+    /// Siri ends a run that has no result after about 10 s and says "Something went wrong". The app launch
+    /// counts too. Apple gives no number (DTS, developer forums thread 764501). Developers measured about 10 s.
+    public static let siriLimit: Duration = .seconds(10)
+    /// The part of `siriLimit` that a cold launch in the background can use before `perform()` starts.
+    public static let launchMargin: Duration = .seconds(2)
+    /// The "Read Hermes" sync, with the connect. After it, Siri reads the cache.
     public static let readSync: Duration = .seconds(5)
     /// "Ask Hermes": the connect, the send and the reply. Then Siri says "Hermes is still working."
-    public static let askReply: Duration = .seconds(25)
+    public static let askReply: Duration = .seconds(6)
     /// "Ask Hermes" after a complete reply: the list refresh that marks the session read.
-    public static let markRead: Duration = .seconds(2)
-    /// A slow reply: how long the app waits for it in the background before the notification.
-    public static let followUp: Duration = .seconds(25)
+    public static let markRead: Duration = .seconds(1)
+    /// A slow reply: how long the app waits for it in the background before the notification. iOS ends the
+    /// background time first (about 30 s), unless the app has more time. Then the #15 refresh posts it.
+    public static let followUp: Duration = .seconds(600)
 
     /// Runs `work` and returns `true` when it ends before `timeout`. At the timeout it returns `false`,
     /// and `work` goes on.
@@ -326,7 +332,8 @@ public enum SiriAsk {
 
     /// 1. Wait for the link until the deadline. No link: "I can't reach Hermes right now." Nothing is sent.
     /// 2. The session: the cached active session, else `session.most_recent`, else a new chat.
-    /// 3. Send, then wait for the reply until the deadline.
+    /// 3. Send, then wait for the reply until the deadline. If Siri cancels the run first, nothing is sent.
+    ///    If Siri cancels the reply wait, the run ends at once with "still working".
     /// 4. A list refresh. A reply that Siri reads in full marks the session read. A cut reply stays unread.
     public static func run(text: String, sessions: SessionListModel, timeout: Duration = SiriTiming.askReply,
                            poll: Duration = .milliseconds(100),
@@ -347,6 +354,8 @@ public enum SiriAsk {
             }
             chat = mostRecent.map(sessions.chat(for:)) ?? sessions.newChat(key: UUID().uuidString)
         }
+        // Siri gave up before the send (issue #71): send nothing, so a new try sends the text once.
+        if Task.isCancelled { return .unreachable }
         let before = Set(chat.messages.map(\.id))
         let task = chat.send(trimmed)
         guard let promptId = chat.messages.last(where: { $0.role == .user && !before.contains($0.id) })?.id else {
@@ -365,7 +374,10 @@ public enum SiriAsk {
             case .failed:
                 return .replyFailed
             case .waiting:
-                if clock.now >= deadline { return .stillWorking(Pending(chat: chat, promptId: promptId)) }
+                // Siri cancelled the run: the text went out, so the follow-up posts the reply (issue #71).
+                if Task.isCancelled || clock.now >= deadline {
+                    return .stillWorking(Pending(chat: chat, promptId: promptId))
+                }
                 try? await Task.sleep(for: poll)
             }
         }
