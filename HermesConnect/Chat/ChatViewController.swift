@@ -56,6 +56,8 @@ final class ChatViewController: MessagesViewController {
     private var composerBottom: NSLayoutConstraint?
     /// Issue #8: the `plus` menu and the pending photos and files.
     private let attachments = AttachmentComposer()
+    /// Issue #68: the slash command suggestions above the field.
+    let slashSuggestions = SlashSuggestionComposer()
     /// Issue #11: the symbol that each badge showed last ("<message id>#ack"), for the `.replace` change.
     private var shownBadges: [String: String] = [:]
     /// Issue #11: the open tapback capsule (double-tap).
@@ -237,6 +239,7 @@ final class ChatViewController: MessagesViewController {
         send.imageView?.contentMode = .scaleAspectFit
         bar.setRightStackViewWidthConstant(to: 36, animated: false)
         attachments.install(in: bar, presenter: self)
+        slashSuggestions.install(in: bar)
         updateSendButton()
     }
 
