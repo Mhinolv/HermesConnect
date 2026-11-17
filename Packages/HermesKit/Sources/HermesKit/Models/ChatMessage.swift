@@ -39,9 +39,11 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
     public var userRowId: Int?
     /// For a reply: the id of the prompt that started the turn.
     public var promptId: String?
+    /// Set for a voice memo (issue #9). `text` is empty until the transcript comes, then it is the transcript.
+    public var voice: VoiceMemo?
 
     public init(id: String, role: Role, text: String, date: Date, delivery: Delivery? = nil,
-                reply: Reply? = nil, userRowId: Int? = nil, promptId: String? = nil) {
+                reply: Reply? = nil, userRowId: Int? = nil, promptId: String? = nil, voice: VoiceMemo? = nil) {
         self.id = id
         self.role = role
         self.text = text
@@ -50,6 +52,7 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
         self.reply = reply
         self.userRowId = userRowId
         self.promptId = promptId
+        self.voice = voice
     }
 
     public var isFailed: Bool {

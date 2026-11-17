@@ -4,9 +4,23 @@ import MessageKit
 import Observation
 import UIKit
 
-/// The text thread (issue #6). A thin MessageKit view of `ChatViewModel`: it draws, the model decides.
+/// The text thread (issue #6) with voice memos (issue #9). A thin MessageKit view of `ChatViewModel`:
+/// it draws, the model decides.
 final class ChatViewController: MessagesViewController {
     private let model: ChatViewModel
+    /// The mic button, the recording bar and the recorder (issue #9).
+    let voice: VoiceMemoController
+    private let player = VoiceMemoPlayer()
+    private let micButton = InputBarButtonItem()
+    private let recordingBar = VoiceRecordingBar()
+    private lazy var micPress = UILongPressGestureRecognizer(target: self, action: #selector(micPressChanged(_:)))
+    private let micPressDelegate = MicPressDelegate()
+    private var micPressStart: CGPoint = .zero
+    private var voiceCalculator: ChatVoiceSizeCalculator?
+    /// Memos whose transcript shows all lines.
+    private var expandedTranscripts: Set<String> = []
+    /// DEBUG demo: runs once when the screen shows (recording bar screenshots).
+    var onFirstAppear: ((ChatViewController) -> Void)?
     private var bubbles: [ChatBubble] = []
     /// Styled text per message id. Built again when the text or the text size changes.
     private var textCache: [String: (source: String, size: UIContentSizeCategory, text: NSAttributedString)] = [:]
@@ -16,8 +30,10 @@ final class ChatViewController: MessagesViewController {
     private let scrollButton = UIButton(configuration: .glass())
     private var composerText = ""
 
-    init(model: ChatViewModel) {
+    init(model: ChatViewModel, recorder: any VoiceRecording = AVVoiceRecorder(),
+         voiceFolder: URL = VoiceMemoFiles.directory()) {
         self.model = model
+        self.voice = VoiceMemoController(recorder: recorder, folder: voiceFolder)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -33,11 +49,13 @@ final class ChatViewController: MessagesViewController {
         messagesCollectionView.messagesDisplayDelegate = self
         messagesCollectionView.messageCellDelegate = self
         messagesCollectionView.register(ChatTextCell.self)
+        messagesCollectionView.register(ChatVoiceCell.self)
         messagesCollectionView.keyboardDismissMode = .interactive
         scrollsToLastItemOnKeyboardBeginsEditing = true
         maintainPositionOnInputBarHeightChanged = true
         configureLayout()
         configureComposer()
+        configureVoice()
         configureScrollButton()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, _) in
             self.textSizeChanged()
@@ -53,7 +71,11 @@ final class ChatViewController: MessagesViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         // Empty session: no placeholder, the composer has focus.
-        if bubbles.isEmpty { messageInputBar.inputTextView.becomeFirstResponder() }
+        if bubbles.isEmpty, !voice.isActive { messageInputBar.inputTextView.becomeFirstResponder() }
+        if let first = onFirstAppear {
+            onFirstAppear = nil
+            first(self)
+        }
     }
 
     // MARK: Setup
@@ -83,6 +105,11 @@ final class ChatViewController: MessagesViewController {
         layout.setMessageIncomingCellTopLabelAlignment(header)
         layout.setMessageOutgoingCellTopLabelAlignment(header)
         layout.sectionInset = UIEdgeInsets(top: 1, left: 0, bottom: 1, right: 0)
+        let voiceCalculator = ChatVoiceSizeCalculator(layout: layout, copying: layout.attributedTextMessageSizeCalculator)
+        voiceCalculator.bubbleSize = { [weak self] _, maxWidth in
+            ChatVoiceLayout.bubbleSize(traits: self?.traitCollection ?? .current, maxWidth: maxWidth)
+        }
+        self.voiceCalculator = voiceCalculator
     }
 
     private func configureComposer() {
@@ -131,6 +158,150 @@ final class ChatViewController: MessagesViewController {
         updateSendButton()
     }
 
+    private func configureVoice() {
+        let symbol = UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+        micButton.setImage(UIImage(systemName: "mic.fill", withConfiguration: symbol), for: .normal)
+        micButton.setSize(CGSize(width: 44, height: 44), animated: false)
+        micButton.tintColor = .white
+        micButton.backgroundColor = .systemBlue
+        micButton.layer.cornerRadius = 22
+        micButton.accessibilityLabel = "Record Voice Memo"
+        micButton.accessibilityHint = "Starts a recording. Double-tap Send to send it."
+        // Touches go to `micPress`. VoiceOver activation, and a touch the recognizer missed, start tap mode.
+        micButton.onTouchUpInside { [weak self] _ in self?.voice.startTapMode() }
+
+        micPressDelegate.shouldReceive = { [weak self] touch in self?.micPressShouldReceive(touch) ?? false }
+        micPress.minimumPressDuration = 0
+        micPress.delegate = micPressDelegate
+        messageInputBar.addGestureRecognizer(micPress)
+
+        recordingBar.onCancel = { [weak self] in self?.voice.cancel() }
+        recordingBar.onSend = { [weak self] in self?.voice.send() }
+        voice.onChange = { [weak self] in self?.updateRecordingBar() }
+        voice.onSend = { [weak self] memo in
+            self?.pinnedToBottom = true
+            self?.model.sendVoiceMemo(memo)
+        }
+        voice.onAccessDenied = { [weak self] in self?.showMicrophoneOff() }
+        voice.onRecordFailed = { [weak self] in self?.showRecordFailed() }
+        player.onChange = { [weak self] in self?.reloadVoiceRows() }
+        updateSendButton()
+    }
+
+    /// The 64 pt hit area of the 44 pt mic (driving use). VoiceOver uses the button activation instead.
+    private func micPressShouldReceive(_ touch: UITouch) -> Bool {
+        guard showsMic, !voice.isActive, !UIAccessibility.isVoiceOverRunning, micButton.window != nil else {
+            return false
+        }
+        let area = micButton.convert(micButton.bounds, to: messageInputBar).insetBy(dx: -10, dy: -10)
+        return area.contains(touch.location(in: messageInputBar))
+    }
+
+    @objc private func micPressChanged(_ gesture: UILongPressGestureRecognizer) {
+        let point = gesture.location(in: view)
+        switch gesture.state {
+        case .began:
+            micPressStart = point
+            player.stop()
+            voice.press()
+        case .changed:
+            voice.drag(dx: Double(point.x - micPressStart.x))
+        case .ended:
+            voice.release()
+        case .cancelled, .failed:
+            voice.touchCancelled()
+        default:
+            break
+        }
+    }
+
+    /// The recording bar takes the place of the text view while a memo records.
+    private func updateRecordingBar() {
+        let bar = messageInputBar
+        let capture = voice.capture
+        guard capture.isActive else {
+            if bar.middleContentView === recordingBar {
+                bar.setMiddleContentView(bar.inputTextView, animated: false)
+                updateSendButton()
+                UIAccessibility.post(notification: .layoutChanged, argument: micButton)
+            }
+            return
+        }
+        if bar.middleContentView !== recordingBar {
+            player.stop()
+            bar.inputTextView.resignFirstResponder()
+            bar.setStackViewItems([], forStack: .right, animated: false)
+            bar.setRightStackViewWidthConstant(to: 0, animated: false)
+            bar.setMiddleContentView(recordingBar, animated: false)
+            UIAccessibility.post(notification: .layoutChanged, argument: recordingBar.sendButton)
+        }
+        let mode: VoiceRecordingBar.Mode = switch capture.phase {
+        case .pressed, .holding: .hold(cancelProgress: capture.cancelProgress)
+        case .paused: .paused
+        case .recording, .idle: .tap
+        }
+        recordingBar.update(mode: mode, elapsed: voice.elapsed, levels: voice.levels)
+    }
+
+    /// The recording bar (tests).
+    var recordingBarMode: VoiceRecordingBar.Mode? {
+        messageInputBar.middleContentView === recordingBar ? recordingBar.mode : nil
+    }
+
+    private func showMicrophoneOff() {
+        let alert = UIAlertController(title: "Microphone Access Off",
+                                      message: "Turn on Microphone for Hermes in Settings to record voice memos.",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        let open = UIAlertAction(title: "Open Settings", style: .default) { _ in
+            guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+            UIApplication.shared.open(url)
+        }
+        alert.addAction(open)
+        alert.preferredAction = open
+        present(alert, animated: true)
+    }
+
+    private func showRecordFailed() {
+        let alert = UIAlertController(title: "Can't Record", message: "Another app may use the microphone. Try again.",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+
+    private func togglePlay(id: String) {
+        guard !voice.isActive, let memo = model.messages.first(where: { $0.id == id })?.voice else { return }
+        player.toggle(memo.fileURL)
+    }
+
+    private func toggleTranscript(id: String) {
+        guard model.messages.first(where: { $0.id == id })?.voice?.transcript.text != nil else { return }
+        if expandedTranscripts.remove(id) == nil { expandedTranscripts.insert(id) }
+        guard let index = bubbles.firstIndex(where: { $0.row.id == id }) else { return }
+        UIView.performWithoutAnimation {
+            messagesCollectionView.reloadSections(IndexSet(integer: index))
+        }
+    }
+
+    private func reloadVoiceRows() {
+        let rows = IndexSet(bubbles.indices.filter { bubbles[$0].row.message.voice != nil })
+        guard !rows.isEmpty else { return }
+        UIView.performWithoutAnimation {
+            messagesCollectionView.reloadSections(rows)
+        }
+    }
+
+    /// The transcript under a memo, and its height at the bubble width.
+    private func transcript(for row: ChatRow, message: MessageType, at indexPath: IndexPath)
+        -> (text: NSAttributedString?, height: CGFloat, width: CGFloat)? {
+        guard let voice = row.message.voice, let calculator = voiceCalculator else { return nil }
+        let maxWidth = calculator.messageContainerMaxWidth(for: message, at: indexPath)
+        let width = ChatVoiceLayout.bubbleSize(traits: traitCollection, maxWidth: maxWidth).width
+        let text = ChatVoiceLayout.transcriptText(for: voice, traits: traitCollection)
+        let height = ChatVoiceLayout.transcriptHeight(text, width: width, expanded: expandedTranscripts.contains(row.id))
+        return (text, height, width)
+    }
+
     private func configureScrollButton() {
         var config = UIButton.Configuration.glass()
         config.image = UIImage(systemName: "arrow.down")
@@ -169,8 +340,27 @@ final class ChatViewController: MessagesViewController {
         model.isReplyActive && composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// The mic replaces Send when the text is empty and no reply runs (issue #9 design notes).
+    var showsMic: Bool {
+        !showsStop && composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private func updateSendButton() {
-        let send = messageInputBar.sendButton
+        let bar = messageInputBar
+        guard !voice.isActive else { return }
+        let current = bar.rightStackViewItems.first as? UIView
+        if showsMic {
+            if current !== micButton {
+                bar.setStackViewItems([micButton], forStack: .right, animated: false)
+                bar.setRightStackViewWidthConstant(to: 44, animated: false)
+            }
+            return
+        }
+        if current !== bar.sendButton {
+            bar.setStackViewItems([bar.sendButton], forStack: .right, animated: false)
+            bar.setRightStackViewWidthConstant(to: 36, animated: false)
+        }
+        let send = bar.sendButton
         let symbol = UIImage.SymbolConfiguration(pointSize: 32)
         if showsStop {
             send.image = UIImage(systemName: "stop.circle.fill", withConfiguration: symbol)
@@ -331,14 +521,33 @@ final class ChatViewController: MessagesViewController {
         cell.isAccessibilityElement = true
         cell.accessibilityLabel = ChatTimeline.accessibilityLabel(for: row)
         cell.accessibilityHint = switch row.footnote {
-        case .notDelivered: "Double-tap for options."
+        case .notDelivered, .noSpeech: "Double-tap for options."
         case .replyFailed: "Double-tap to retry."
         default: nil
         }
-        var actions = [UIAccessibilityCustomAction(name: "Copy") { _ in
-            UIPasteboard.general.string = row.message.text
-            return true
-        }]
+        var actions: [UIAccessibilityCustomAction] = []
+        if let memo = row.message.voice {
+            let id = row.id
+            let playing = player.playingURL == memo.fileURL
+            actions.append(UIAccessibilityCustomAction(name: playing ? "Pause" : "Play") { [weak self] _ in
+                self?.togglePlay(id: id)
+                return true
+            })
+            if memo.transcript.text != nil, !expandedTranscripts.contains(id),
+               let info = transcript(for: row, message: bubbles[indexPath.section], at: indexPath),
+               ChatVoiceLayout.isTruncated(info.text, width: info.width) {
+                actions.append(UIAccessibilityCustomAction(name: "Show Full Transcript") { [weak self] _ in
+                    self?.toggleTranscript(id: id)
+                    return true
+                })
+            }
+        }
+        if !row.message.text.isEmpty {
+            actions.append(UIAccessibilityCustomAction(name: "Copy") { _ in
+                UIPasteboard.general.string = row.message.text
+                return true
+            })
+        }
         for run in ChatMarkdown.runs(row.message.text) {
             guard let url = run.link else { continue }
             actions.append(UIAccessibilityCustomAction(name: "Open \(run.text)") { _ in
@@ -362,13 +571,16 @@ final class ChatViewController: MessagesViewController {
                               point _: CGPoint) -> UIContextMenuConfiguration? {
         guard let indexPath = indexPaths.first, let row = bubble(at: indexPath)?.row else { return nil }
         return UIContextMenuConfiguration(identifier: indexPath as NSIndexPath, previewProvider: nil) { [weak self] _ in
-            var actions: [UIMenuElement] = [UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
-                UIPasteboard.general.string = row.message.text
-            }]
+            var actions: [UIMenuElement] = []
+            if !row.message.text.isEmpty {
+                actions.append(UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
+                    UIPasteboard.general.string = row.message.text
+                })
+            }
             if row.message.delivery == .failed, let self {
                 actions += self.sendFailureActions(for: row)
             }
-            return UIMenu(children: actions)
+            return actions.isEmpty ? nil : UIMenu(children: actions)
         }
     }
 
@@ -388,22 +600,36 @@ final class ChatViewController: MessagesViewController {
                 self?.model.retrySend(id: id)
             },
             UIAction(title: "Delete", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
-                self?.model.delete(id: id)
+                self?.deleteMessage(id: id)
             },
         ]
     }
 
     private func showSendFailureOptions(for row: ChatRow, from cell: UIView) {
-        let sheet = UIAlertController(title: nil, message: "Your message was not delivered.", preferredStyle: .actionSheet)
+        let text = switch row.message.voice?.transcript {
+        case .empty: "No speech was found in your voice memo."
+        case .failed: "Your voice memo was not transcribed."
+        case .pending, .done: "Your voice memo was not delivered."
+        case nil: "Your message was not delivered."
+        }
+        let sheet = UIAlertController(title: nil, message: text, preferredStyle: .actionSheet)
         sheet.addAction(UIAlertAction(title: "Try Again", style: .default) { [weak self] _ in
             self?.model.retrySend(id: row.id)
         })
         sheet.addAction(UIAlertAction(title: "Delete", style: .destructive) { [weak self] _ in
-            self?.model.delete(id: row.id)
+            self?.deleteMessage(id: row.id)
         })
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         sheet.popoverPresentationController?.sourceView = cell
         present(sheet, animated: true)
+    }
+
+    private func deleteMessage(id: String) {
+        if let url = model.messages.first(where: { $0.id == id })?.voice?.fileURL, player.playingURL == url {
+            player.stop()
+        }
+        expandedTranscripts.remove(id)
+        model.delete(id: id)
     }
 
     private func handleTap(in cell: MessageCollectionViewCell) {
@@ -411,7 +637,7 @@ final class ChatViewController: MessagesViewController {
             return
         }
         switch row.footnote {
-        case .notDelivered: showSendFailureOptions(for: row, from: cell)
+        case .notDelivered, .noSpeech: showSendFailureOptions(for: row, from: cell)
         case .replyFailed: model.retryReply(id: row.id)
         default: break
         }
@@ -482,6 +708,21 @@ extension ChatViewController: MessagesDataSource {
         ])
     }
 
+    func customCell(for message: MessageType, at indexPath: IndexPath,
+                    in messagesCollectionView: MessagesCollectionView) -> UICollectionViewCell {
+        let cell = messagesCollectionView.dequeueReusableCell(ChatVoiceCell.self, for: indexPath)
+        cell.configure(with: message, at: indexPath, and: messagesCollectionView)
+        guard let row = row(for: message), let memo = row.message.voice,
+              let info = transcript(for: row, message: message, at: indexPath) else { return cell }
+        let id = row.id
+        cell.configure(voice: memo, outgoing: row.message.role == .user, playing: player.playingURL == memo.fileURL,
+                       transcript: info.text, transcriptHeight: info.height,
+                       expanded: expandedTranscripts.contains(id), traits: traitCollection)
+        cell.onPlay = { [weak self] in self?.togglePlay(id: id) }
+        cell.onTranscriptTap = { [weak self] in self?.toggleTranscript(id: id) }
+        return cell
+    }
+
     func textCell(for message: MessageType, at indexPath: IndexPath,
                   in messagesCollectionView: MessagesCollectionView) -> UICollectionViewCell? {
         let cell = messagesCollectionView.dequeueReusableCell(ChatTextCell.self, for: indexPath)
@@ -498,8 +739,17 @@ extension ChatViewController: MessagesLayoutDelegate {
         row(for: message)?.timeHeader == nil ? 0 : ChatLabelStyle.height(.caption2, traitCollection, padding: 18)
     }
 
-    func messageBottomLabelHeight(for message: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> CGFloat {
-        row(for: message)?.footnote == nil ? 0 : ChatLabelStyle.height(.caption2, traitCollection, padding: 4)
+    /// A memo puts its transcript above the footnote, in the same area (`ChatVoiceCell`).
+    func messageBottomLabelHeight(for message: MessageType, at indexPath: IndexPath,
+                                  in _: MessagesCollectionView) -> CGFloat {
+        guard let row = row(for: message) else { return 0 }
+        let footnote = row.footnote == nil ? 0 : ChatLabelStyle.height(.caption2, traitCollection, padding: 4)
+        return footnote + (transcript(for: row, message: message, at: indexPath)?.height ?? 0)
+    }
+
+    func customCellSizeCalculator(for _: MessageType, at _: IndexPath,
+                                  in _: MessagesCollectionView) -> CellSizeCalculator {
+        voiceCalculator ?? MessageSizeCalculator(layout: flowLayout)
     }
 
     func cellBottomLabelHeight(for message: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> CGFloat {
@@ -567,5 +817,16 @@ extension ChatViewController: InputBarAccessoryViewDelegate {
     func inputBar(_: InputBarAccessoryView, textViewTextDidChangeTo text: String) {
         composerText = text
         updateSendButton()
+    }
+}
+
+// MARK: - Mic press
+
+/// Lets `micPress` take only touches on the mic and its 64 pt hit area.
+private final class MicPressDelegate: NSObject, UIGestureRecognizerDelegate {
+    var shouldReceive: (UITouch) -> Bool = { _ in false }
+
+    func gestureRecognizer(_: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        shouldReceive(touch)
     }
 }

@@ -73,7 +73,15 @@ struct ChatThreadView: UIViewControllerRepresentable {
     let model: ChatViewModel
 
     func makeUIViewController(context _: Context) -> ChatViewController {
-        ChatViewController(model: model)
+        #if DEBUG
+        if let scenario = DemoChatTransport.Scenario.current, scenario.recordsAtLaunch {
+            let controller = ChatViewController(model: model, recorder: DemoVoiceRecorder(),
+                                                voiceFolder: FileManager.default.temporaryDirectory)
+            controller.onFirstAppear = { DemoVoiceRecorder.start(scenario, on: $0.voice) }
+            return controller
+        }
+        #endif
+        return ChatViewController(model: model)
     }
 
     func updateUIViewController(_: ChatViewController, context _: Context) {}

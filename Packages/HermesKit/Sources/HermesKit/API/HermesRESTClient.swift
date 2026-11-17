@@ -171,12 +171,42 @@ public struct HermesRESTClient: Sendable {
         try await get("/api/ssh/ownership", query: [])
     }
 
-    func request(path: String, query: [URLQueryItem], authenticated: Bool = true) -> URLRequest {
+    /// `POST /api/audio/transcribe` with the clip as a base64 data URL (docs/hermes-protocol.md 3.9).
+    /// Returns the transcript, trimmed. An empty string means that the server found no speech.
+    /// The clip and the transcript never go to a log.
+    public func transcribe(audio: Data, mimeType: String = VoiceMemoLimits.mimeType) async throws -> String {
+        guard !audio.isEmpty, audio.count <= VoiceMemoLimits.maxUploadBytes else { throw VoiceMemoError.badClip }
+        var request = request(path: "/api/audio/transcribe", query: [], timeout: Self.transcribeTimeout)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(TranscribeRequest(
+            dataURL: "data:\(mimeType);base64,\(audio.base64EncodedString())", mimeType: mimeType))
+        let result: TranscribeResponse = try await load(request)
+        guard result.ok != false else { throw HermesAPIError.invalidResponse }
+        return (result.transcript ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// A 10-minute clip can take the provider a long time. The other calls use 15 s.
+    static let transcribeTimeout: TimeInterval = 120
+
+    private struct TranscribeRequest: Encodable {
+        var dataURL: String
+        var mimeType: String
+        enum CodingKeys: String, CodingKey { case dataURL = "data_url", mimeType = "mime_type" }
+    }
+
+    private struct TranscribeResponse: Decodable {
+        var ok: Bool?
+        var transcript: String?
+    }
+
+    func request(path: String, query: [URLQueryItem], authenticated: Bool = true,
+                 timeout: TimeInterval = 15) -> URLRequest {
         var components = URLComponents(url: endpoint.baseURL, resolvingAgainstBaseURL: false)!
         components.percentEncodedPath = path
         components.queryItems = query.isEmpty ? nil : query
         var request = URLRequest(url: components.url!)
-        request.timeoutInterval = 15
+        request.timeoutInterval = timeout
         if authenticated { request.setValue(endpoint.token, forHTTPHeaderField: "X-Hermes-Session-Token") }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         return request
@@ -184,8 +214,11 @@ public struct HermesRESTClient: Sendable {
 
     private func get<Output: Decodable>(_ path: String, query: [URLQueryItem],
                                         authenticated: Bool = true) async throws -> Output {
-        let (data, response) = try await loader.data(for: request(path: path, query: query,
-                                                                  authenticated: authenticated))
+        try await load(request(path: path, query: query, authenticated: authenticated))
+    }
+
+    private func load<Output: Decodable>(_ request: URLRequest) async throws -> Output {
+        let (data, response) = try await loader.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw HermesAPIError.invalidResponse }
         switch http.statusCode {
         case 200..<300: break

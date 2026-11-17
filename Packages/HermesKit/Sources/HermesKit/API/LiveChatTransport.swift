@@ -27,6 +27,7 @@ public final class LiveChatTransport: ChatTransport {
     @ObservationIgnored public nonisolated let events: AsyncStream<GatewayClientEvent>
     @ObservationIgnored private let input: AsyncStream<GatewayClientEvent>.Continuation
     @ObservationIgnored private let makeClient: @Sendable (GatewayEndpoint) -> GatewayClient
+    @ObservationIgnored private let makeREST: @Sendable (GatewayEndpoint) -> HermesRESTClient
     @ObservationIgnored private var endpoint: GatewayEndpoint?
     @ObservationIgnored private var client: GatewayClient?
     @ObservationIgnored private var forwardTask: Task<Void, Never>?
@@ -36,8 +37,10 @@ public final class LiveChatTransport: ChatTransport {
     /// The app asks the #4 bootstrap for a new Hermes session (`AppModel.renewHermesSession`).
     @ObservationIgnored public var onStaleToken: (@MainActor () async -> Void)?
 
-    public init(makeClient: @escaping @Sendable (GatewayEndpoint) -> GatewayClient = { GatewayClient(endpoint: $0) }) {
+    public init(makeClient: @escaping @Sendable (GatewayEndpoint) -> GatewayClient = { GatewayClient(endpoint: $0) },
+                makeREST: @escaping @Sendable (GatewayEndpoint) -> HermesRESTClient = { HermesRESTClient(endpoint: $0) }) {
         self.makeClient = makeClient
+        self.makeREST = makeREST
         (events, input) = AsyncStream.makeStream(of: GatewayClientEvent.self)
     }
 
@@ -177,5 +180,21 @@ public final class LiveChatTransport: ChatTransport {
 
     public func stopReply(sessionId: String) async throws -> Bool {
         try await readyClient().stopReply(sessionId: sessionId)
+    }
+
+    public func submitVoicePrompt(sessionId: String, text: String, retryBeforeRowId: Int?) async throws -> Int? {
+        try await readyClient().submitVoicePrompt(sessionId: sessionId, text: text, retryBeforeRowId: retryBeforeRowId)
+    }
+
+    /// REST on the forwarded port. It needs the #4 endpoint, not the socket.
+    /// A refused token asks for a new session once, as a socket refusal does.
+    public func transcribe(audio: Data, mimeType: String) async throws -> String {
+        guard let endpoint else { throw GatewayError.notConnected }
+        do {
+            return try await makeREST(endpoint).transcribe(audio: audio, mimeType: mimeType)
+        } catch {
+            if Self.isStaleToken(error), endpoint == self.endpoint, status == .ready { staleToken() }
+            throw error
+        }
     }
 }
