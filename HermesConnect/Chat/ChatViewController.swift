@@ -34,6 +34,7 @@ final class ChatViewController: MessagesViewController {
         let size: UIContentSizeCategory
         let width: CGFloat
         let streaming: Bool
+        let quote: ChatQuote?
     }
     /// Issue #56: the thread width of the bubble text. A table is a grid only when it fits.
     private var textWidth: CGFloat = 0
@@ -56,6 +57,8 @@ final class ChatViewController: MessagesViewController {
     private var composerBottom: NSLayoutConstraint?
     /// Issue #8: the `plus` menu and the pending photos and files.
     private let attachments = AttachmentComposer()
+    /// Issue #68: the slash command suggestions above the field.
+    let slashSuggestions = SlashSuggestionComposer()
     /// Issue #11: the symbol that each badge showed last ("<message id>#ack"), for the `.replace` change.
     private var shownBadges: [String: String] = [:]
     /// Issue #11: the open tapback capsule (double-tap).
@@ -80,6 +83,10 @@ final class ChatViewController: MessagesViewController {
     lazy var audioTranscripts = ReceivedAudioTranscripts(files: model.receivedFiles,
                                                          transcription: OnDeviceTranscription.shared.transcription,
                                                          permission: SystemSpeechPermission())
+    /// Issue #17: the quote box above the text view, the swipe to reply, and "Original message not loaded".
+    let quoteView = QuoteComposerView()
+    private let swipeReply = ChatSwipeReply()
+    private let noticePill = ChatNoticePill()
 
     init(model: ChatViewModel, recorder: any VoiceRecording = AVVoiceRecorder(),
          voiceFolder: URL = VoiceMemoFiles.directory(), readOnly: Bool = false) {
@@ -120,6 +127,7 @@ final class ChatViewController: MessagesViewController {
         } else {
             configureComposer()
             configureAttachments()
+            configureReply()
             configureVoice()
             restoreDraft()
         }
@@ -242,6 +250,7 @@ final class ChatViewController: MessagesViewController {
         send.imageView?.contentMode = .scaleAspectFit
         bar.setRightStackViewWidthConstant(to: 36, animated: false)
         attachments.install(in: bar, presenter: self)
+        slashSuggestions.install(in: bar)
         updateSendButton()
     }
 
@@ -704,9 +713,11 @@ final class ChatViewController: MessagesViewController {
             _ = model.autoPlayReplyId
             _ = model.newMessageIds
             _ = model.composerFill
+            _ = model.replyQuote
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
                 self?.applyComposerFill()
+                self?.applyReplyQuote()
                 self?.render()
                 self?.observeModel()
             }
@@ -730,7 +741,7 @@ final class ChatViewController: MessagesViewController {
         // The thread spans the screen width.
         textWidth = view.bounds.width
         let key = TextKey(source: message.text, size: traitCollection.preferredContentSizeCategory, width: textWidth,
-                          streaming: message.reply == .streaming)
+                          streaming: message.reply == .streaming, quote: message.quote)
         if let cached = textCache[message.id], cached.key == key {
             return cached.text
         }
@@ -935,6 +946,8 @@ final class ChatViewController: MessagesViewController {
         default: nil
         }
         var actions: [UIAccessibilityCustomAction] = []
+        // Issue #17: "Reply" after the actions of the bubble, on every return path.
+        defer { cell.accessibilityCustomActions = (cell.accessibilityCustomActions ?? []) + replyAccessibilityActions(for: row) }
         if let file = part.receivedFile {
             // Issue #12: "Hermes sent a file, report.pdf, 2 MB" with "Open", "Save to Files" and "Share".
             let state = model.receivedFiles.state(for: file)
@@ -1035,6 +1048,8 @@ final class ChatViewController: MessagesViewController {
             var actions: [UIMenuElement] = []
             // Issue #11: the six tapbacks in one row above the other actions.
             if let self, !self.readOnly, Self.canReact(row.message) { actions.append(self.tapbackMenu(for: row)) }
+            // Issue #17: "Reply" is the first action under the tapbacks.
+            if let self, let reply = self.replyMenuAction(for: row) { actions.append(reply) }
             if let file = part.receivedFile, let self {
                 // Issue #12: "Save to Files", "Share", and "Copy" for images. A file that is not here downloads first.
                 let source = collectionView.cellForItem(at: indexPath) ?? self.view!
@@ -1461,6 +1476,9 @@ extension ChatViewController: MessagesDataSource {
         cell.configure(with: message, at: indexPath, and: messagesCollectionView)
         cell.showsCaptionSpinner(row(for: message)?.footnote == .preparingAudio)
         cell.openLink = { url in UIApplication.shared.open(url) }
+        if let id = row(for: message).flatMap({ $0.message.quote == nil ? nil : $0.id }) {
+            cell.openQuote = { [weak self] in self?.showQuotedMessage(for: id) }
+        }
         return cell
     }
 }
@@ -1581,6 +1599,124 @@ extension ChatViewController: @preconcurrency MessageCellDelegate {
     func didTapMessageBottomLabel(in cell: MessageCollectionViewCell) { handleTap(in: cell) }
     func didTapAccessoryView(in cell: MessageCollectionViewCell) { handleTap(in: cell) }
     func didTapImage(in cell: MessageCollectionViewCell) { handleTap(in: cell) }
+}
+
+// MARK: - Reply by quote (issue #17)
+
+extension ChatViewController {
+    fileprivate func configureReply() {
+        quoteView.onCancel = { [weak self] in self?.model.cancelReply() }
+        messageInputBar.topStackView.insertArrangedSubview(quoteView, at: 0)
+        swipeReply.target = { [weak self] point in
+            guard let self, let indexPath = self.messagesCollectionView.indexPathForItem(at: point),
+                  let cell = self.messagesCollectionView.cellForItem(at: indexPath) as? MessageContentCell,
+                  let row = self.bubble(at: indexPath)?.row, QuoteReply.canQuote(row.message) else { return nil }
+            return (cell, row.id)
+        }
+        swipeReply.onReply = { [weak self] id in self?.startReply(to: id) }
+        swipeReply.install(on: messagesCollectionView)
+        noticePill.translatesAutoresizingMaskIntoConstraints = false
+        noticePill.isHidden = true
+        view.addSubview(noticePill)
+        NSLayoutConstraint.activate([
+            noticePill.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
+            noticePill.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            noticePill.widthAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.widthAnchor, constant: -32),
+            noticePill.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+        ])
+        applyReplyQuote()
+    }
+
+    /// The composer quote box follows `model.replyQuote`.
+    fileprivate func applyReplyQuote() {
+        guard !readOnly, quoteView.quote != model.replyQuote else { return }
+        quoteView.show(model.replyQuote)
+        messageInputBar.invalidateIntrinsicContentSize()
+    }
+
+    /// "Reply" from the swipe, the menu or VoiceOver: the quote shows in the composer and the keyboard opens.
+    func startReply(to id: String) {
+        guard !readOnly, model.startReply(to: id) else { return }
+        applyReplyQuote()
+        messageInputBar.inputTextView.becomeFirstResponder()
+    }
+
+    /// The "Reply" menu action (internal for tests).
+    func replyMenuAction(for row: ChatRow) -> UIAction? {
+        guard !readOnly, QuoteReply.canQuote(row.message) else { return nil }
+        let id = row.id
+        return UIAction(title: "Reply", image: UIImage(systemName: "arrowshape.turn.up.left")) { [weak self] _ in
+            self?.startReply(to: id)
+        }
+    }
+
+    fileprivate func replyAccessibilityActions(for row: ChatRow) -> [UIAccessibilityCustomAction] {
+        guard !readOnly, QuoteReply.canQuote(row.message) else { return [] }
+        let id = row.id
+        var actions = [UIAccessibilityCustomAction(name: "Reply") { [weak self] _ in
+            self?.startReply(to: id)
+            return true
+        }]
+        if row.message.quote != nil {
+            actions.append(UIAccessibilityCustomAction(name: "Show Original Message") { [weak self] _ in
+                self?.showQuotedMessage(for: id)
+                return true
+            })
+        }
+        return actions
+    }
+
+    /// A tap on the quote line: scroll to the original and highlight it for 1 s.
+    /// If it is not in the thread, show "Original message not loaded".
+    func showQuotedMessage(for id: String) {
+        guard let target = model.quotedMessageId(of: id),
+              let section = bubbles.firstIndex(where: { $0.row.id == target }) else {
+            noticePill.show(Self.originalNotLoaded)
+            return
+        }
+        pinnedToBottom = false
+        messagesCollectionView.layoutIfNeeded()
+        let animated = !UIAccessibility.isReduceMotionEnabled
+        messagesCollectionView.scrollToItem(at: IndexPath(item: 0, section: section), at: .centeredVertically,
+                                            animated: animated)
+        updateScrollButton()
+        Task { @MainActor [weak self] in
+            if animated { try? await Task.sleep(for: .milliseconds(350)) }
+            self?.highlight(messageId: target)
+        }
+    }
+
+    static let originalNotLoaded = "Original message not loaded"
+
+    private func highlight(messageId: String) {
+        for (section, bubble) in bubbles.enumerated() where bubble.row.id == messageId {
+            guard let cell = messagesCollectionView.cellForItem(at: IndexPath(item: 0, section: section))
+                    as? MessageContentCell else { continue }
+            let container = cell.messageContainerView
+            let flash = UIView(frame: container.bounds)
+            flash.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            flash.isUserInteractionEnabled = false
+            flash.backgroundColor = (bubble.row.message.role == .user ? UIColor.white : UIColor.systemBlue)
+                .withAlphaComponent(0.3)
+            container.addSubview(flash)
+            UIView.animate(withDuration: 0.25, delay: 1, options: []) { flash.alpha = 0 } completion: { _ in
+                flash.removeFromSuperview()
+            }
+            if section == bubbles.firstIndex(where: { $0.row.id == messageId }) {
+                UIAccessibility.post(notification: .layoutChanged, argument: cell)
+            }
+        }
+    }
+
+    #if DEBUG
+    /// The DEBUG demo `HERMES_DEMO_QUOTE=swipe`: a bubble held part way through the swipe.
+    func showSwipeForDemo(messageId: String, offset: CGFloat) {
+        guard let section = bubbles.firstIndex(where: { $0.row.id == messageId }),
+              let cell = messagesCollectionView.cellForItem(at: IndexPath(item: 0, section: section)) as? MessageContentCell
+        else { return }
+        swipeReply.move(cell, to: offset, in: messagesCollectionView)
+    }
+    #endif
 }
 
 // MARK: - Composer

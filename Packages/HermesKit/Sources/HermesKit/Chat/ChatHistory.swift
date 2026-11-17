@@ -48,6 +48,12 @@ public enum ChatHistory {
                         prompt.attachments = AttachmentRefs.attachments(for: refs.paths, rowId: id)
                     }
                 }
+                if voice == nil {
+                    // Issue #17: the server text starts with the quote block. The bubble shows the reply and the quote.
+                    let split = QuoteReply.split(prompt.text)
+                    if split.quote != nil { prompt.text = split.text }
+                    prompt.quote = shown?.quote ?? split.quote
+                }
                 result.append(prompt)
                 promptId = id
                 replyIndex = nil
