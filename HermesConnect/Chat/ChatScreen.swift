@@ -130,6 +130,19 @@ struct ChatThreadView: UIViewControllerRepresentable {
             }
             return controller
         }
+        if let scenario = DemoChatTransport.Scenario.current,
+           [.markdownTableTop, .markdownBlocksTop, .markdownSheet].contains(scenario) {
+            // Issue #56: the top of the Markdown reply, or its full text in the sheet.
+            let controller = ChatViewController(model: model)
+            controller.onFirstAppear = { controller in
+                if scenario == .markdownSheet {
+                    controller.showReplyText(id: "m2")
+                } else {
+                    controller.scrollToMessageForDemo(id: "m2")
+                }
+            }
+            return controller
+        }
         if DemoChatTransport.Scenario.current == .tapbacksPicker {
             let controller = ChatViewController(model: model)
             controller.onFirstAppear = { controller in

@@ -33,43 +33,29 @@ struct ChatBubble: MessageType {
 }
 
 /// Bubble text: inline Markdown, code blocks and links, with Dynamic Type fonts (issue #6).
+/// Issue #56: also tables, lists, quotes, headings and rules (`ChatMarkdownText`).
 enum ChatBubbleText {
     /// The link target of a run. Not `.link`, so the label draws our colors.
     static let linkKey = NSAttributedString.Key("HermesConnectLink")
 
-    static func make(_ message: ChatMessage, traits: UITraitCollection) -> NSAttributedString {
+    /// `width` is the widest text line of the bubble. A table shows as a grid only when it fits in it.
+    static func make(_ message: ChatMessage, traits: UITraitCollection, width: CGFloat? = nil) -> NSAttributedString {
         let outgoing = message.role == .user
-        let body = UIFont.preferredFont(forTextStyle: .body, compatibleWith: traits)
-        let color: UIColor = outgoing ? .white : .label
         if message.text.isEmpty {
             // A failed reply with no text.
-            let italic = body.fontDescriptor.withSymbolicTraits(.traitItalic).map { UIFont(descriptor: $0, size: 0) }
-            return NSAttributedString(string: "No reply", attributes: [.font: italic ?? body,
+            let body = UIFont.preferredFont(forTextStyle: .body, compatibleWith: traits)
+            return NSAttributedString(string: "No reply", attributes: [.font: body.adding(.traitItalic),
                                                                         .foregroundColor: UIColor.secondaryLabel])
         }
-        let mono = UIFontMetrics(forTextStyle: .body)
-            .scaledFont(for: .monospacedSystemFont(ofSize: 15, weight: .regular), compatibleWith: traits)
-        let codeBackground: UIColor = outgoing ? .white.withAlphaComponent(0.2) : .tertiarySystemFill
-        let result = NSMutableAttributedString()
-        for run in ChatMarkdown.runs(message.text) {
-            var font = run.isCode || run.isCodeBlock ? mono : body
-            var symbolic: UIFontDescriptor.SymbolicTraits = []
-            if run.isBold { symbolic.insert(.traitBold) }
-            if run.isItalic { symbolic.insert(.traitItalic) }
-            if !symbolic.isEmpty,
-               let descriptor = font.fontDescriptor.withSymbolicTraits(font.fontDescriptor.symbolicTraits.union(symbolic)) {
-                font = UIFont(descriptor: descriptor, size: 0)
-            }
-            var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
-            if run.isCode || run.isCodeBlock { attributes[.backgroundColor] = codeBackground }
-            if let link = run.link {
-                attributes[linkKey] = link
-                attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
-                if !outgoing { attributes[.foregroundColor] = UIColor.link }
-            }
-            result.append(NSAttributedString(string: run.text, attributes: attributes))
-        }
-        return result
+        return ChatMarkdownText.make(message.text, style: ChatMarkdownText.Style(traits: traits, outgoing: outgoing),
+                                     width: width, streaming: message.reply == .streaming)
+    }
+
+    /// The widest text line of a bubble in a thread of this width: the padding of `ChatViewController`
+    /// (10 + 56 pt) and the label insets of MessageKit (18 + 14 pt) go.
+    static func maxWidth(threadWidth: CGFloat, outgoing: Bool) -> CGFloat {
+        // The outgoing accessory (24 pt + 6 pt) takes space too.
+        max(0, threadWidth - 66 - 32 - (outgoing ? 30 : 0))
     }
 }
 
@@ -79,15 +65,38 @@ final class ChatTextCell: TextMessageCell {
     /// Issue #49 (QA #54): the spinner of the "Preparing audio…" caption row under a reply.
     let captionSpinner = UIActivityIndicatorView(style: .medium)
 
+    /// Issue #56: draws the text. `MessageLabel` puts one paragraph style on all of the text, so lists, quotes and
+    /// tables lose their indents and tab stops there. The label stays for MessageKit, hidden.
+    let markdownView = ChatMarkdownView()
+
     override func setupSubviews() {
         super.setupSubviews()
+        messageLabel.isHidden = true
+        messageContainerView.addSubview(markdownView)
         captionSpinner.hidesWhenStopped = true
         captionSpinner.isAccessibilityElement = false
         contentView.addSubview(captionSpinner)
     }
 
+    override func configure(with message: MessageType, at indexPath: IndexPath,
+                            and messagesCollectionView: MessagesCollectionView) {
+        super.configure(with: message, at: indexPath, and: messagesCollectionView)
+        if case .attributedText(let text) = message.kind {
+            markdownView.attributedText = text
+        } else {
+            markdownView.attributedText = nil
+        }
+    }
+
+    override func apply(_ layoutAttributes: UICollectionViewLayoutAttributes) {
+        super.apply(layoutAttributes)
+        markdownView.frame = messageContainerView.bounds
+        markdownView.textInsets = messageLabel.textInsets
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
+        markdownView.attributedText = nil
         openLink = nil
         captionSpinner.stopAnimating()
     }
@@ -100,6 +109,7 @@ final class ChatTextCell: TextMessageCell {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        if markdownView.frame != messageContainerView.bounds { markdownView.frame = messageContainerView.bounds }
         guard captionSpinner.isAnimating, let text = messageBottomLabel.attributedText, text.length > 0,
               let font = text.attribute(.font, at: text.length - 1, effectiveRange: nil) as? UIFont else { return }
         // The spinner grows with the text size, like the icon of the retry row.
@@ -119,25 +129,9 @@ final class ChatTextCell: TextMessageCell {
         return super.cellContentView(canHandle: touchPoint)
     }
 
-    /// The link under a point in the bubble. The label draws from the top left of its text insets.
+    /// The link under a point in the bubble (`messageContainerView` coordinates, the frame of the text view).
     private func link(at point: CGPoint) -> URL? {
-        guard let text = messageLabel.attributedText, text.length > 0 else { return nil }
-        let insets = messageLabel.textInsets
-        let container = NSTextContainer(size: messageLabel.bounds.inset(by: insets).size)
-        container.lineFragmentPadding = 0
-        container.lineBreakMode = messageLabel.lineBreakMode
-        container.maximumNumberOfLines = messageLabel.numberOfLines
-        let manager = NSLayoutManager()
-        manager.addTextContainer(container)
-        let storage = NSTextStorage(attributedString: text)
-        storage.addLayoutManager(manager)
-        let location = CGPoint(x: point.x - insets.left, y: point.y - insets.top)
-        let glyph = manager.glyphIndex(for: location, in: container)
-        let rect = manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
-        guard rect.insetBy(dx: -6, dy: -6).contains(location) else { return nil }
-        let index = manager.characterIndexForGlyph(at: glyph)
-        guard index < text.length else { return nil }
-        return text.attribute(ChatBubbleText.linkKey, at: index, effectiveRange: nil) as? URL
+        markdownView.link(at: point)
     }
 }
 

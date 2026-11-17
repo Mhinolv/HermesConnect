@@ -22,8 +22,18 @@ final class ChatViewController: MessagesViewController {
     /// DEBUG demo: runs once when the screen shows (recording bar screenshots).
     var onFirstAppear: ((ChatViewController) -> Void)?
     private var bubbles: [ChatBubble] = []
-    /// Styled text per message id. Built again when the text or the text size changes.
-    private var textCache: [String: (source: String, size: UIContentSizeCategory, text: NSAttributedString)] = [:]
+    /// Styled text per message id. Built again when the text, the text size or the thread width changes.
+    private var textCache: [String: (key: TextKey, text: NSAttributedString)] = [:]
+    private struct TextKey: Equatable {
+        let source: String
+        let size: UIContentSizeCategory
+        let width: CGFloat
+        let streaming: Bool
+    }
+    /// Issue #56: the thread width of the bubble text. A table is a grid only when it fits.
+    private var textWidth: CGFloat = 0
+    /// Issue #56: a streaming reply does not get shorter while a table row completes.
+    private var streamingHeights = ChatStreamingHeights()
     private var announcedReplyId: String?
     /// Issue #10: the last voice reply that the screen auto-played, or chose not to play.
     private var handledAutoPlayId: String?
@@ -412,7 +422,9 @@ final class ChatViewController: MessagesViewController {
     func showReplyText(id: String) {
         guard presentedViewController == nil, let message = model.messages.first(where: { $0.id == id }),
               !message.text.isEmpty else { return }
-        let sheet = ReplyTextViewController(text: ChatBubbleText.make(message, traits: traitCollection))
+        // The sheet text uses the full width, less the 16 pt insets of the text view.
+        let sheet = ReplyTextViewController(text: ChatBubbleText.make(message, traits: traitCollection,
+                                                                       width: view.bounds.width - 32))
         let navigation = UINavigationController(rootViewController: sheet)
         if let presentation = navigation.sheetPresentationController {
             presentation.detents = [.medium(), .large()]
@@ -572,6 +584,7 @@ final class ChatViewController: MessagesViewController {
         pinnedToBottom = true
         updateMaxTextViewHeight()
         textCache = [:]
+        streamingHeights.removeAll()
         bubbles = []
         render()
     }
@@ -595,12 +608,17 @@ final class ChatViewController: MessagesViewController {
     }
 
     private func styledText(for message: ChatMessage) -> NSAttributedString {
-        let size = traitCollection.preferredContentSizeCategory
-        if let cached = textCache[message.id], cached.source == message.text, cached.size == size {
+        // The thread spans the screen width.
+        textWidth = view.bounds.width
+        let key = TextKey(source: message.text, size: traitCollection.preferredContentSizeCategory, width: textWidth,
+                          streaming: message.reply == .streaming)
+        if let cached = textCache[message.id], cached.key == key {
             return cached.text
         }
-        let text = ChatBubbleText.make(message, traits: traitCollection)
-        textCache[message.id] = (message.text, size, text)
+        let width = ChatBubbleText.maxWidth(threadWidth: textWidth, outgoing: message.role == .user)
+        let text = streamingHeights.hold(ChatBubbleText.make(message, traits: traitCollection, width: width),
+                                         id: message.id, width: width, streaming: key.streaming)
+        textCache[message.id] = (key, text)
         return text
     }
 
@@ -679,6 +697,19 @@ final class ChatViewController: MessagesViewController {
         collection.setContentOffset(CGPoint(x: collection.contentOffset.x, y: target), animated: animated)
     }
 
+    override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        // Issue #56: a new thread width (rotation, split view) can turn a table grid into cards, or back.
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            guard let self, self.view.bounds.width != self.textWidth,
+                  self.model.messages.contains(where: { $0.text.contains("|") }) else { return }
+            self.textCache = [:]
+            self.streamingHeights.removeAll()
+            self.bubbles = []
+            self.render()
+        }
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         if pinnedToBottom { scrollToBottom() }
@@ -720,6 +751,15 @@ final class ChatViewController: MessagesViewController {
         pinnedToBottom = false
         messagesCollectionView.setContentOffset(CGPoint(x: 0, y: -messagesCollectionView.adjustedContentInset.top),
                                                 animated: false)
+        updateScrollButton()
+    }
+
+    /// The DEBUG demo `markdown-*-top`: the top of a message at the top of the screen.
+    func scrollToMessageForDemo(id: String) {
+        guard let section = bubbles.firstIndex(where: { $0.row.id == id }) else { return }
+        pinnedToBottom = false
+        messagesCollectionView.layoutIfNeeded()
+        messagesCollectionView.scrollToItem(at: IndexPath(item: 0, section: section), at: .top, animated: false)
         updateScrollButton()
     }
     #endif
