@@ -44,12 +44,17 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.mhinoverse.hermesconnect
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
   HermesConnectTests:
     type: bundle.unit-test
     platform: iOS
-    sources: [HermesConnectTests]
+    sources:
+      - HermesConnectTests
+      # Issue #42: the Ogg Opus reply fixture of the HermesKit tests, so the decode runs on iOS too.
+      - path: Packages/HermesKit/Tests/HermesKitTests/Fixtures/voice-reply.ogg
+        buildPhase: resources
     dependencies:
       - target: HermesConnect
 schemes:

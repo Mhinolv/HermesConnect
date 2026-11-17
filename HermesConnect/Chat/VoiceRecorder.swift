@@ -374,6 +374,8 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
     var onChange: (() -> Void)?
     /// About 10 times per second while a clip plays: the clip, its time and its length.
     var onProgress: ((URL, TimeInterval, TimeInterval) -> Void)?
+    /// Issue #42: the clip did not open or did not start. The screen shows the error state, not a silent Play.
+    var onFailure: ((URL) -> Void)?
 
     var currentTime: TimeInterval { player?.currentTime ?? 0 }
 
@@ -398,18 +400,27 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
             try session.setActive(true)
-            let player = try AVAudioPlayer(contentsOf: url)
-            player.delegate = self
-            player.currentTime = min(max(0, time), player.duration)
-            guard player.play() else { return }
-            self.player = player
-            playingURL = url
-            observeInterruptions()
-            setPlaying(true)
         } catch {
-            // A missing or broken file plays nothing. The bubble stays.
+            // The session did not start (for example during a call). The file can be good, so the bubble stays.
             onChange?()
+            return
         }
+        guard let player = try? AVAudioPlayer(contentsOf: url) else { return failed(url) }
+        player.delegate = self
+        player.currentTime = min(max(0, time), player.duration)
+        // Issue #42: AVAudioPlayer opens an Ogg file but cannot prepare it. That is an error, not a silent Play.
+        guard player.prepareToPlay(), player.play() else { return failed(url) }
+        self.player = player
+        playingURL = url
+        observeInterruptions()
+        setPlaying(true)
+    }
+
+    /// A missing or broken file plays nothing. Other audio comes back, and the screen shows the error.
+    private func failed(_ url: URL) {
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        onFailure?(url)
+        onChange?()
     }
 
     /// The owner dragged the progress bar. A clip that is not loaded starts at that point.

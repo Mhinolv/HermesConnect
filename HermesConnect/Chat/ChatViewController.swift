@@ -229,6 +229,7 @@ final class ChatViewController: MessagesViewController {
         voice.onRecordFailed = { [weak self] in self?.showRecordFailed() }
         player.onChange = { [weak self] in self?.reloadVoiceRows() }
         player.onProgress = { [weak self] url, time, _ in self?.showProgress(url: url, time: time) }
+        player.onFailure = { [weak self] url in self?.playbackFailed(url: url) }
         updateSendButton()
     }
 
@@ -325,6 +326,12 @@ final class ChatViewController: MessagesViewController {
         case .failed: model.retrySpeech(id: id)
         case .preparing, nil: break
         }
+    }
+
+    /// Issue #42: a voice reply that does not play shows "Audio unavailable. Tap to retry." A memo stays as is.
+    private func playbackFailed(url: URL) {
+        guard let reply = model.messages.first(where: { $0.spokenReply?.audio?.fileURL == url }) else { return }
+        model.speechDidNotPlay(id: reply.id)
     }
 
     /// The file of the audio bubble of a row: a memo or a voice reply.

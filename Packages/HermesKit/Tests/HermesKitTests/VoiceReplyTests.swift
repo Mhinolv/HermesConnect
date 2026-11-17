@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Synchronization
 import Testing
@@ -17,6 +18,44 @@ private func silentWAV(seconds: Double = 1, rate: Int = 8000) -> Data {
     data.append(contentsOf: Array("data".utf8)); append(UInt32(samples * 2))
     data.append(Data(count: samples * 2))
     return data
+}
+
+/// Issue #42: a 1.5 s reply as the server gives it. Kokoro makes a 24 kHz mono WAV, and
+/// `tools/tts_tool.py` converts it with `ffmpeg -acodec libopus -ac 1 -b:a 64k -vbr off`.
+func fixture(_ name: String) throws -> Data {
+    let parts = name.split(separator: ".")
+    let url = try #require(Bundle.module.url(forResource: String(parts[0]), withExtension: String(parts[1]),
+                                             subdirectory: "Fixtures"))
+    return try Data(contentsOf: url)
+}
+
+/// Issue #42: broken copies of the Ogg Opus fixture.
+func brokenOgg(_ kind: String) throws -> Data {
+    var data = try fixture("voice-reply.ogg")
+    switch kind {
+    case "truncated": return data.prefix(data.count / 2)
+    case "headers only": return data.prefix(oggHeaderPagesLength(data))
+    case "bad byte":
+        data[data.count / 2] ^= 0xFF
+        return data
+    default: return Data("OggS not a page".utf8)
+    }
+}
+
+/// The length of the first two pages (OpusHead and OpusTags).
+private func oggHeaderPagesLength(_ data: Data) -> Int {
+    let bytes = [UInt8](data)
+    var offset = 0
+    for _ in 0..<2 {
+        let segments = Int(bytes[offset + 26])
+        offset += 27 + segments + bytes[offset + 27..<offset + 27 + segments].reduce(0) { $0 + Int($1) }
+    }
+    return offset
+}
+
+/// `true` if AVAudioPlayer can play the file, not only open it.
+func plays(_ url: URL) -> Bool {
+    (try? AVAudioPlayer(contentsOf: url))?.prepareToPlay() ?? false
 }
 
 private func event(_ json: String) throws -> GatewayClientEvent {
@@ -108,6 +147,43 @@ private func complete(_ text: String, status: String = "complete") throws -> Gat
             try VoiceReplyFiles.save(SpokenAudio(data: bytes, mimeType: mime), in: folder)
         }
         // No broken file stays on disk.
+        #expect(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).isEmpty)
+    }
+
+    /// Issue #42: the server gives Ogg Opus. AVAudioPlayer opens it and reads 1.5 s, but it cannot play it.
+    @Test(arguments: ["audio/ogg", "audio/opus", "audio/mpeg"])
+    func oggOpusReplySavesAFileThatPlays(mime: String) throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "VoiceReplyTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let saved = try VoiceReplyFiles.save(SpokenAudio(data: try fixture("voice-reply.ogg"), mimeType: mime), in: folder)
+        #expect(plays(saved.fileURL))
+        #expect(abs(saved.duration - 1.5) < 0.1)
+        #expect(saved.fileURL.pathExtension == "wav")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).count == 1)
+    }
+
+    /// Issue #42: MP3 and WAV replies still save as they come, and they play.
+    @Test(arguments: [("voice-reply.mp3", "audio/mpeg", "mp3"), ("wav", "audio/wav", "wav")])
+    func mp3AndWAVRepliesStillPlay(name: String, mime: String, ext: String) throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "VoiceReplyTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let data = name == "wav" ? silentWAV(seconds: 1.5) : try fixture(name)
+        let saved = try VoiceReplyFiles.save(SpokenAudio(data: data, mimeType: mime), in: folder)
+        #expect(saved.fileURL.pathExtension == ext)
+        #expect(try Data(contentsOf: saved.fileURL) == data)
+        #expect(plays(saved.fileURL))
+        #expect(abs(saved.duration - 1.5) < 0.1)
+    }
+
+    /// Issue #42: a broken Ogg file is an error, so the bubble shows "Audio unavailable. Tap to retry."
+    @Test(arguments: ["truncated", "headers only", "bad byte", "not a page"])
+    func brokenOggIsRefused(kind: String) throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "VoiceReplyTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let data = try brokenOgg(kind)
+        #expect(throws: VoiceReplyError.cannotDecode) {
+            try VoiceReplyFiles.save(SpokenAudio(data: data, mimeType: "audio/ogg"), in: folder)
+        }
         #expect(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).isEmpty)
     }
 
@@ -356,6 +432,43 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         #expect((vm.messages.last?.spokenReply?.audio?.duration ?? 0) > 0)
     }
 
+    /// Issue #42: an Ogg Opus reply is ready and plays. A broken one shows the error state, and Retry works.
+    @Test func oggReplyIsReadyAndBrokenOggShowsTheErrorState() async throws {
+        let transport = FakeSpeakTransport()
+        transport.speakResult = .success(SpokenAudio(data: try brokenOgg("truncated"), mimeType: "audio/ogg"))
+        let folder = FileManager.default.temporaryDirectory.appending(path: "VoiceReplyTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let vm = ChatViewModel(transport: transport, redrawInterval: .seconds(60), loadAudio: { _ in Data("m4a".utf8) },
+                               removeAudio: { _ in }, saveSpeech: { try VoiceReplyFiles.save($0, in: folder) })
+        let id = try await voiceTurn(vm)
+        try await waitUntil { vm.messages.last?.spokenReply != .preparing }
+        #expect(vm.messages.last?.spokenReply == .failed)
+        #expect(ChatTimeline.rows(for: vm.messages).last?.footnote == .audioUnavailable)
+
+        transport.speakResult = .success(SpokenAudio(data: try fixture("voice-reply.ogg"), mimeType: "audio/ogg"))
+        await vm.retrySpeech(id: id)?.value
+        let audio = try #require(vm.messages.last?.spokenReply?.audio)
+        #expect(plays(audio.fileURL))
+        #expect(abs(audio.duration - 1.5) < 0.1)
+    }
+
+    /// Issue #42: a ready reply whose file does not play shows "Audio unavailable. Tap to retry.", and Retry speaks.
+    @Test func replyThatDoesNotPlayShowsTheErrorStateAndRetrySpeaks() async throws {
+        let transport = FakeSpeakTransport()
+        let vm = model(transport)
+        let id = try await voiceTurn(vm)
+        try await waitUntil { vm.messages.last?.spokenReply?.audio != nil }
+        vm.speechDidNotPlay(id: id)
+        #expect(vm.messages.last?.spokenReply == .failed)
+        #expect(ChatTimeline.rows(for: vm.messages).last?.footnote == .audioUnavailable)
+        await vm.retrySpeech(id: id)?.value
+        #expect(vm.messages.last?.spokenReply?.audio?.duration == 24)
+        #expect(transport.spoken.count == 2)
+        // A reply with no ready audio does not change.
+        vm.speechDidNotPlay(id: "nope")
+        #expect(vm.messages.last?.spokenReply?.audio != nil)
+    }
+
     @Test func historyMergeKeepsTheAudio() async throws {
         let transport = FakeSpeakTransport()
         let vm = model(transport)
@@ -548,6 +661,20 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
                                 reply: .complete, spokenReply: .ready(VoiceReplyAudio(fileURL: replyURL, duration: 0)))
         cache.saveTranscript([reply], sessionId: "k")
         #expect(FileSessionCacheStore(directory: cache.directory).loadTranscript(sessionId: "k").first?.spokenReply == .failed)
+    }
+
+    /// Issue #42: an `.ogg` or `.opus` reply that an older build saved reads as failed, so a tap speaks it again.
+    @Test(arguments: [("b.ogg", SpokenReply.failed), ("b.OPUS", .failed),
+                      ("b.wav", .ready(VoiceReplyAudio(fileURL: URL(fileURLWithPath: "/tmp/b.wav"), duration: 3)))])
+    func cachedOggReplyLoadsAsFailed(name: String, expected: SpokenReply) {
+        let cache = store()
+        defer { try? FileManager.default.removeItem(at: cache.directory) }
+        let audio = VoiceReplyAudio(fileURL: URL(fileURLWithPath: "/tmp/\(name)"), duration: 3)
+        let reply = ChatMessage(id: "a1", role: .assistant, text: "Done.", date: Date(timeIntervalSince1970: 1),
+                                reply: .complete, spokenReply: .ready(audio))
+        cache.saveTranscript([reply], sessionId: "k")
+        #expect(FileSessionCacheStore(directory: cache.directory).loadTranscript(sessionId: "k").first?.spokenReply
+            == expected)
     }
 
     @Test func pathsFollowAMovedAppFolder() {

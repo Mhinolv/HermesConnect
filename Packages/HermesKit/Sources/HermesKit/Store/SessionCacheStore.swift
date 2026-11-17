@@ -110,8 +110,10 @@ struct CachedSpeech: Codable, Equatable {
     }
 
     /// A file with no length did not decode (builds before issue #36). It reads as failed, with retry.
+    /// Issue #42: an `.ogg` or `.opus` file of an older build does not play on iOS. It reads as failed too.
     var spoken: SpokenReply {
-        guard let path, duration > 0 else { return .failed }
+        let ext = path.map { ($0 as NSString).pathExtension.lowercased() }
+        guard let path, duration > 0, ext != "ogg", ext != "opus" else { return .failed }
         return .ready(VoiceReplyAudio(fileURL: CachedPath.decode(path), duration: duration))
     }
 

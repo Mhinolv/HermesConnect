@@ -28,6 +28,9 @@ private final class SpeakingTransport: ChatTransport, @unchecked Sendable {
     func history(sessionId _: String) async throws -> [TranscriptMessage] { [] }
 }
 
+/// The test bundle, which holds the Ogg Opus fixture (issue #42).
+private final class FixtureBundle {}
+
 private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
     for _ in 0..<1000 {
         if await condition() { return }
@@ -58,10 +61,10 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         return (controller, recorder)
     }
 
-    private func speakingModel() -> (ChatViewModel, SpeakingTransport) {
+    private func speakingModel(messages: [ChatMessage] = []) -> (ChatViewModel, SpeakingTransport) {
         let transport = SpeakingTransport()
         let folder = self.folder
-        let model = ChatViewModel(transport: transport, loadAudio: { _ in Data("m4a".utf8) },
+        let model = ChatViewModel(transport: transport, messages: messages, loadAudio: { _ in Data("m4a".utf8) },
                                   saveSpeech: { try VoiceReplyFiles.save($0, in: folder) })
         return (model, transport)
     }
@@ -143,6 +146,45 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         try await Task.sleep(for: .milliseconds(50))
         #expect(controller.playerURL == nil)
         controller.voice.cancel()
+    }
+
+    /// Issue #42: the server gives Ogg Opus. On iOS the reply decodes to a file that plays.
+    @Test func oggOpusReplyPlaysOnTheIPhone() throws {
+        let ogg = try Data(contentsOf: try #require(Bundle(for: FixtureBundle.self)
+            .url(forResource: "voice-reply", withExtension: "ogg")))
+        let audio = try VoiceReplyFiles.save(SpokenAudio(data: ogg, mimeType: "audio/ogg"), in: folder)
+        #expect(abs(audio.duration - 1.5) < 0.1)
+        let reply = ChatMessage(id: "r", role: .assistant, text: "Lunch at noon.", date: .now, reply: .complete,
+                                spokenReply: .ready(audio))
+        let (controller, _) = makeController(ChatViewModel(transport: OfflineChatTransport(), messages: [reply]))
+        controller.tapAudio(id: "r")
+        #expect(controller.playerURL == audio.fileURL)
+        #expect(controller.playerIsPlaying)
+        controller.tapAudio(id: "r")
+    }
+
+    /// Issue #42: a ready reply with an `.ogg` file of an older build does not play silently.
+    /// The bubble shows "Audio unavailable. Tap to retry.", and the next tap speaks again.
+    @Test func replyThatDoesNotPlayShowsTheErrorState() async throws {
+        let url = folder.appendingPathComponent("old.ogg")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data(contentsOf: try #require(Bundle(for: FixtureBundle.self)
+            .url(forResource: "voice-reply", withExtension: "ogg"))).write(to: url)
+        var messages = readyReply()
+        messages[1].spokenReply = .ready(VoiceReplyAudio(fileURL: url, duration: 1.5))
+        let (model, transport) = speakingModel(messages: messages)
+        let (controller, _) = makeController(model, autoPlay: false)
+        controller.tapAudio(id: "r")
+        #expect(controller.playerURL == nil)
+        #expect(model.messages.last?.spokenReply == .failed)
+        #expect(ChatTimeline.rows(for: model.messages).last?.footnote == .audioUnavailable)
+
+        controller.tapAudio(id: "r")
+        try await waitUntil { model.messages.last?.spokenReply?.audio != nil }
+        #expect(transport.speaks == 1)
+        controller.tapAudio(id: "r")
+        #expect(controller.playerIsPlaying)
+        controller.tapAudio(id: "r")
     }
 
     @Test func settingsTextMatchesTheDesign() {

@@ -28,6 +28,15 @@ public struct AppLockPolicy: Sendable, Equatable {
         }
     }
 
+    /// Issue #16: `true` when the app is locked, or when a return at `date` will lock it.
+    /// A shortcut can run before `willEnterForeground`, so it checks this, not `isLocked`.
+    public func locks(at date: Date) -> Bool {
+        guard isEnabled else { return false }
+        if isLocked { return true }
+        guard let backgroundedAt else { return false }
+        return date.timeIntervalSince(backgroundedAt) >= Self.relockInterval
+    }
+
     public mutating func unlockSucceeded() {
         isLocked = false
     }
