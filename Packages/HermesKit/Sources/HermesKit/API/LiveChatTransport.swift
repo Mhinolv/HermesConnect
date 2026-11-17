@@ -1,0 +1,181 @@
+import Foundation
+import Observation
+
+/// The chat link to Hermes, as the chat screen shows it.
+public enum ChatLinkStatus: Sendable, Equatable {
+    /// No Hermes endpoint. The #4 bootstrap has not reported "Hermes ready".
+    case notConnected
+    case connecting
+    case ready
+    /// Hermes refused the token. The #4 bootstrap starts a new session ("Reconnecting").
+    case reconnecting
+    /// The new session was refused too. Sends fail until the owner retries.
+    case failed
+}
+
+/// The release chat transport (issue #6, fix round 2). It follows the #4 endpoint:
+/// a new endpoint gets a new `GatewayClient` (#5), and `nil` closes it.
+///
+/// - One `events` stream for the whole app life. It forwards the events of the current client only.
+/// - A stale token (close code 4401 or 4403, HTTP 401 or 403) asks `onStaleToken` for a new session once.
+///   A second refusal before a good connect is `.failed`.
+/// - A send on a dropped socket reconnects once when the reason allows it.
+@MainActor @Observable
+public final class LiveChatTransport: ChatTransport {
+    public private(set) var status: ChatLinkStatus = .notConnected
+
+    @ObservationIgnored public nonisolated let events: AsyncStream<GatewayClientEvent>
+    @ObservationIgnored private let input: AsyncStream<GatewayClientEvent>.Continuation
+    @ObservationIgnored private let makeClient: @Sendable (GatewayEndpoint) -> GatewayClient
+    @ObservationIgnored private var endpoint: GatewayEndpoint?
+    @ObservationIgnored private var client: GatewayClient?
+    @ObservationIgnored private var forwardTask: Task<Void, Never>?
+    @ObservationIgnored private var connectTask: Task<Void, Never>?
+    /// `true` after a renewal, until a connect succeeds.
+    @ObservationIgnored private var renewed = false
+    /// The app asks the #4 bootstrap for a new Hermes session (`AppModel.renewHermesSession`).
+    @ObservationIgnored public var onStaleToken: (@MainActor () async -> Void)?
+
+    public init(makeClient: @escaping @Sendable (GatewayEndpoint) -> GatewayClient = { GatewayClient(endpoint: $0) }) {
+        self.makeClient = makeClient
+        (events, input) = AsyncStream.makeStream(of: GatewayClientEvent.self)
+    }
+
+    /// `true` for errors that mean "the token is not valid any more".
+    public nonisolated static func isStaleToken(_ error: any Error) -> Bool {
+        switch error {
+        case GatewayError.disconnected(let reason): return isStaleToken(reason)
+        case HermesAPIError.unauthorized, HermesAPIError.http(status: 401), HermesAPIError.http(status: 403): return true
+        default: return false
+        }
+    }
+
+    public nonisolated static func isStaleToken(_ reason: GatewayDisconnectReason) -> Bool {
+        reason == .unauthorized || reason == .forbidden
+    }
+
+    /// The app calls this when the #4 endpoint changes. The same endpoint again does nothing.
+    public func setEndpoint(_ newEndpoint: GatewayEndpoint?) {
+        guard newEndpoint != endpoint else { return }
+        detach()
+        endpoint = newEndpoint
+        guard let newEndpoint else {
+            // A renewal closes the old endpoint first. Keep "Reconnecting" until the new one comes.
+            if status != .reconnecting, status != .failed { status = .notConnected }
+            return
+        }
+        let client = makeClient(newEndpoint)
+        self.client = client
+        forwardTask = Task { [weak self] in
+            for await item in client.events {
+                self?.forward(item, from: client)
+            }
+        }
+        startConnect(client)
+    }
+
+    /// "Not connected" tapped after `.failed`: ask for a new session again.
+    public func retry() {
+        guard status == .failed else { return }
+        renewed = false
+        staleToken()
+    }
+
+    private func detach() {
+        forwardTask?.cancel()
+        forwardTask = nil
+        connectTask?.cancel()
+        connectTask = nil
+        if let old = client {
+            client = nil
+            Task { await old.disconnect() }
+        }
+    }
+
+    private func startConnect(_ client: GatewayClient) {
+        if status != .reconnecting { status = .connecting }
+        connectTask = Task { [weak self] in
+            do {
+                try await client.connect()
+                self?.connected(client)
+            } catch {
+                // A stale token shows up as a `.state(.disconnected)` event too. `forward` handles it.
+                self?.connectFailed(client, error)
+            }
+        }
+    }
+
+    private func connected(_ client: GatewayClient) {
+        guard client === self.client else { return }
+        renewed = false
+        status = .ready
+    }
+
+    private func connectFailed(_ client: GatewayClient, _ error: any Error) {
+        guard client === self.client, !Self.isStaleToken(error), status != .reconnecting, status != .failed else {
+            return
+        }
+        status = .notConnected
+    }
+
+    private func forward(_ item: GatewayClientEvent, from client: GatewayClient) {
+        guard client === self.client else { return }
+        input.yield(item)
+        guard case .state(.disconnected(let reason)) = item else { return }
+        if Self.isStaleToken(reason) {
+            staleToken()
+        } else if status == .ready {
+            status = .notConnected
+        }
+    }
+
+    private func staleToken() {
+        guard !renewed else {
+            status = .failed
+            return
+        }
+        renewed = true
+        status = .reconnecting
+        let renew = onStaleToken
+        Task { await renew?() }
+    }
+
+    // MARK: ChatTransport
+
+    /// The current client, connected. A dropped socket reconnects once if the reason allows it.
+    private func readyClient() async throws -> GatewayClient {
+        guard let client else { throw GatewayError.notConnected }
+        if let connectTask { await connectTask.value }
+        guard client === self.client else { throw GatewayError.notConnected }
+        switch await client.state {
+        case .connected:
+            return client
+        case .disconnected(let reason) where reason.shouldReconnect:
+            do {
+                try await client.connect()
+                connected(client)
+                return client
+            } catch {
+                throw GatewayError.notConnected
+            }
+        default:
+            throw GatewayError.notConnected
+        }
+    }
+
+    public func startSession(source: String, idempotencyKey: String) async throws -> ChatSessionRef {
+        try await readyClient().startSession(source: source, idempotencyKey: idempotencyKey)
+    }
+
+    public func resumeSession(storedId: String, source: String) async throws -> ChatSessionRef {
+        try await readyClient().resumeSession(storedId: storedId, source: source)
+    }
+
+    public func submitPrompt(sessionId: String, text: String, retryBeforeRowId: Int?) async throws -> Int? {
+        try await readyClient().submitPrompt(sessionId: sessionId, text: text, retryBeforeRowId: retryBeforeRowId)
+    }
+
+    public func stopReply(sessionId: String) async throws -> Bool {
+        try await readyClient().stopReply(sessionId: sessionId)
+    }
+}

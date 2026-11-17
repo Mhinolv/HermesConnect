@@ -339,3 +339,97 @@ private struct FailingKeyStore: DeviceKeyStore {
         #expect(TrustServerSheet.hostKeyFile(for: ecdsa) == "ssh_host_ecdsa_key.pub")
     }
 }
+
+@MainActor
+@Suite struct ChatScreenTests {
+    private let messages = [
+        ChatMessage(id: "1", role: .user, text: "hi **there**", date: .now, delivery: .delivered),
+        ChatMessage(id: "2", role: .assistant, text: "See [docs](https://example.com)", date: .now, reply: .complete),
+    ]
+
+    @Test func controllerShowsOneSectionPerMessage() {
+        let controller = ChatViewController(model: ChatViewModel(transport: OfflineChatTransport(), messages: messages))
+        controller.loadViewIfNeeded()
+        #expect(controller.messagesCollectionView.numberOfSections == 2)
+    }
+
+    @Test func bubbleTextStylesMarkdownAndKeepsLinks() throws {
+        let traits = UITraitCollection(preferredContentSizeCategory: .large)
+        let outgoing = ChatBubbleText.make(messages[0], traits: traits)
+        #expect(outgoing.string == "hi there")
+        let bold = try #require(outgoing.attribute(.font, at: 4, effectiveRange: nil) as? UIFont)
+        #expect(bold.fontDescriptor.symbolicTraits.contains(.traitBold))
+        let incoming = ChatBubbleText.make(messages[1], traits: traits)
+        #expect(incoming.string == "See docs")
+        #expect(incoming.attribute(ChatBubbleText.linkKey, at: 5, effectiveRange: nil) as? URL
+            == URL(string: "https://example.com"))
+    }
+
+    @Test func offlineTransportFailsTheSend() async {
+        let model = ChatViewModel(transport: OfflineChatTransport())
+        await model.send("hello")?.value
+        #expect(model.messages.first?.delivery == .failed)
+    }
+}
+
+@MainActor
+@Suite struct ChatFixRoundTests {
+    private func longThread() -> [ChatMessage] {
+        let base = Date(timeIntervalSince1970: 1_763_288_100)
+        return (0..<16).map { index in
+            ChatMessage(id: "m\(index)", role: index.isMultiple(of: 2) ? .user : .assistant,
+                        text: String(repeating: "Long reply text that wraps. ", count: 1 + index % 4),
+                        date: base.addingTimeInterval(Double(index) * 30),
+                        delivery: index.isMultiple(of: 2) ? .delivered : nil,
+                        reply: index.isMultiple(of: 2) ? nil : .complete)
+        }
+    }
+
+    @Test func bottomOffsetMath() {
+        let insets = UIEdgeInsets(top: 100, left: 0, bottom: 80, right: 0)
+        #expect(ChatScroll.bottomOffset(contentHeight: 2000, viewHeight: 800, insets: insets) == 1280)
+        // Short content stays at the top.
+        #expect(ChatScroll.bottomOffset(contentHeight: 300, viewHeight: 800, insets: insets) == -100)
+        #expect(ChatScroll.isNearBottom(offset: 1250, contentHeight: 2000, viewHeight: 800, insets: insets))
+        #expect(!ChatScroll.isNearBottom(offset: 1000, contentHeight: 2000, viewHeight: 800, insets: insets))
+    }
+
+    /// QA #25 defect 1: a long thread at every text size opens with the last bubble above the composer.
+    @Test(arguments: [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge])
+    func longThreadOpensAtTheBottom(size: UIContentSizeCategory) async throws {
+        let controller = ChatViewController(model: ChatViewModel(transport: OfflineChatTransport(),
+                                                                 messages: longThread()))
+        controller.traitOverrides.preferredContentSizeCategory = size
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        for _ in 0..<20 {
+            controller.view.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let collection = controller.messagesCollectionView
+        let visibleBottom = collection.contentOffset.y + collection.bounds.height - collection.adjustedContentInset.bottom
+        #expect(collection.contentSize.height > collection.bounds.height)
+        #expect(abs(visibleBottom - collection.contentSize.height) < 1)
+        // The composer covers no content: the bottom inset reaches the composer top.
+        let composerTop = controller.inputContainerView.convert(controller.inputContainerView.bounds, to: collection).minY
+        #expect(collection.contentSize.height <= composerTop + 1)
+        #expect(controller.isPinnedToBottom)
+    }
+
+    @Test func subtitlePrefersFailedConnectionStages() {
+        #expect(ChatLaunch.subtitle(link: .reconnecting, connection: .startingHermes) == .reconnecting)
+        #expect(ChatLaunch.subtitle(link: .reconnecting, connection: .offline(nil)) == .connection)
+        #expect(ChatLaunch.subtitle(link: .failed, connection: .connected(gateVersion: "1")) == .chatFailed)
+        #expect(ChatLaunch.subtitle(link: .ready, connection: .connected(gateVersion: "1")) == .connection)
+        #expect(ChatLaunch.subtitle(link: nil, connection: .idle) == .connection)
+    }
+
+    @Test func staleTokenAsksAppForANewSession() async throws {
+        var renewals = 0
+        let link = ChatLaunch.makeLink { renewals += 1 }
+        await link.onStaleToken?()
+        #expect(renewals == 1)
+    }
+}
