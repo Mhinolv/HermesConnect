@@ -61,6 +61,14 @@ public struct ChatAttachment: Identifiable, Sendable, Equatable {
     /// Photos and location cards show as image bubbles. Files and PDFs show as file cells.
     public var showsAsImage: Bool { kind == .photo || kind == .location }
 
+    /// Issue #87: a sent audio file. Its file cell gets "Transcribe", like a received audio bubble (#50).
+    /// The types are the received audio types of issue #12, or an `audio/` MIME type.
+    public var isAudioFile: Bool {
+        guard kind == .file else { return false }
+        return ReceivedFile.audioExtensions.contains((name as NSString).pathExtension.lowercased())
+            || mimeType.lowercased().hasPrefix("audio/")
+    }
+
     /// `true` when the item must go to `session` before `prompt.submit`.
     public func needsUpload(to session: String) -> Bool {
         guard kind != .location else { return false }

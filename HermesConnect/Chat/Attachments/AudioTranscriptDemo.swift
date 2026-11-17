@@ -3,7 +3,7 @@ import AVFoundation
 import HermesKit
 
 /// DEBUG only: the audio file transcripts of `HERMES_DEMO=audio-transcripts` (issue #50).
-/// `HERMES_DEMO_TRANSCRIPTS` picks the files: `main` (default), `errors` or `permission`.
+/// `HERMES_DEMO_TRANSCRIPTS` picks the files: `main` (default), `errors`, `permission`, or `sent` (issue #87).
 /// No speech engine runs: the file name picks the result.
 enum AudioTranscriptDemo {
     static let folder = "/home/hermes/.hermes/outputs/audio/"
@@ -15,6 +15,9 @@ enum AudioTranscriptDemo {
         case errors
         /// Speech recognition is off: the line and the alert.
         case permission
+        /// Issue #87: audio files that the owner sent: "Transcribe", 42 %, a transcript, and a format that iOS
+        /// cannot read.
+        case sent
     }
 
     static var variant: Variant {
@@ -26,8 +29,30 @@ enum AudioTranscriptDemo {
         case .main: ["voicemail.wav", "interview.wav", "standup.wav"]
         case .errors: ["wind.wav", "radio.ogg", "lecture.wav"]
         case .permission: ["voicemail.wav"]
+        case .sent: []
         }
     }
+
+    /// Issue #87: the sent files of the `sent` variant. `Voice memo.wav` keeps "Transcribe".
+    static let sentNames = ["Voice memo.wav", "interview.wav", "standup.wav", "radio.ogg"]
+
+    /// Issue #87: the private copies of the sent files, made again at each launch (no saved transcript).
+    static let sentItems: [ChatAttachment] = {
+        let root = FileManager.default.temporaryDirectory.appending(path: "AudioTranscriptDemo-sent",
+                                                                     directoryHint: .isDirectory)
+        try? FileManager.default.removeItem(at: root)
+        return sentNames.enumerated().compactMap { index, name in
+            let id = "demo-sent-\(index)"
+            let folder = root.appending(path: id, directoryHint: .isDirectory)
+            let url = folder.appending(path: name)
+            guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)) != nil,
+                  let made = try? download(path: folder.path + "/" + name),
+                  (try? FileManager.default.moveItem(at: made, to: url)) != nil else { return nil }
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            return ChatAttachment(id: id, kind: .file, name: name, byteCount: size, fileURL: url,
+                                  mimeType: name.hasSuffix(".ogg") ? "audio/ogg" : "audio/wav", upload: .attached)
+        }
+    }()
 
     /// The files that start a run at launch. `voicemail.wav` in `main` keeps "Transcribe".
     static var started: [ReceivedFile] {
@@ -36,6 +61,15 @@ enum AudioTranscriptDemo {
 
     static func messages(now: Date) -> [ChatMessage] {
         let start = now.addingTimeInterval(-3 * 60)
+        if variant == .sent {
+            return [
+                ChatMessage(id: "at1", role: .user, text: "Here are the recordings from today.", date: start,
+                            delivery: .delivered, userRowId: 601, attachments: sentItems),
+                // The demo composer covers the end of the last row: keep the states above it.
+                ChatMessage(id: "at2", role: .assistant, text: "Got them. Tell me which one to summarize.",
+                            date: start.addingTimeInterval(20), reply: .complete, promptId: "at1"),
+            ]
+        }
         return [
             ChatMessage(id: "at1", role: .user, text: "Send me the recordings from today.", date: start,
                         delivery: .delivered, userRowId: 601),
@@ -112,6 +146,10 @@ enum AudioTranscriptDemo {
         Task { @MainActor in
             for _ in 0..<30 {
                 for file in started where transcripts.state(for: file) == .none { transcripts.start(file) }
+                // Issue #87: the sent files, but not the first one.
+                if variant == .sent {
+                    for item in sentItems.dropFirst() where transcripts.state(for: item) == .none { transcripts.start(item) }
+                }
                 try? await Task.sleep(for: .milliseconds(200))
             }
         }

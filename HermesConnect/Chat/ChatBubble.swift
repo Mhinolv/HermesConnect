@@ -94,11 +94,19 @@ final class ChatTextCell: TextMessageCell {
     /// Issue #56: draws the text. `MessageLabel` puts one paragraph style on all of the text, so lists, quotes and
     /// tables lose their indents and tab stops there. The label stays for MessageKit, hidden.
     let markdownView = ChatMarkdownView()
+    /// Issue #87: the #50 transcript line under a sent audio file cell. It takes the top of the bottom label area.
+    let transcriptLabel = UILabel()
+    var onTranscriptTap: (() -> Void)?
+    private var transcriptHeight: CGFloat = 0
+    private var bottomRegion: CGRect = .zero
 
     override func setupSubviews() {
         super.setupSubviews()
         messageLabel.isHidden = true
         messageContainerView.addSubview(markdownView)
+        transcriptLabel.lineBreakMode = .byTruncatingTail
+        transcriptLabel.isAccessibilityElement = false
+        contentView.addSubview(transcriptLabel)
         captionSpinner.hidesWhenStopped = true
         captionSpinner.isAccessibilityElement = false
         contentView.addSubview(captionSpinner)
@@ -118,6 +126,8 @@ final class ChatTextCell: TextMessageCell {
         super.apply(layoutAttributes)
         markdownView.frame = messageContainerView.bounds
         markdownView.textInsets = messageLabel.textInsets
+        bottomRegion = messageBottomLabel.frame
+        layoutTranscript()
     }
 
     override func prepareForReuse() {
@@ -126,6 +136,44 @@ final class ChatTextCell: TextMessageCell {
         openLink = nil
         openQuote = nil
         captionSpinner.stopAnimating()
+        transcriptLabel.attributedText = nil
+        transcriptHeight = 0
+        onTranscriptTap = nil
+    }
+
+    /// Issue #87: the transcript line, or "Transcribe", under the file cell. `height` includes the padding.
+    func configure(transcript: NSAttributedString?, height: CGFloat, lines: Int) {
+        transcriptLabel.attributedText = transcript
+        transcriptLabel.numberOfLines = lines
+        transcriptHeight = transcript == nil ? 0 : height
+        layoutTranscript()
+    }
+
+    /// Like `ChatVoiceCell`: the line takes the top of the bottom label area, so the footnote stays under it.
+    private func layoutTranscript() {
+        guard transcriptHeight > 0 else {
+            transcriptLabel.frame = .zero
+            return
+        }
+        let height = min(transcriptHeight, bottomRegion.height)
+        let pad = ChatVoiceLayout.transcriptPadding
+        let bubble = messageContainerView.frame
+        transcriptLabel.frame = CGRect(x: bubble.minX + pad.left, y: bottomRegion.minY + pad.top,
+                                       width: max(0, bubble.width - pad.left - pad.right),
+                                       height: max(0, height - pad.top - pad.bottom))
+        messageBottomLabel.frame = CGRect(x: bottomRegion.minX, y: bottomRegion.minY + height,
+                                          width: bottomRegion.width, height: bottomRegion.height - height)
+    }
+
+    /// Issue #87: a tap on the transcript line starts, cancels or expands it.
+    override func handleTapGesture(_ gesture: UIGestureRecognizer) {
+        let point = gesture.location(in: self)
+        if let onTranscriptTap, transcriptLabel.attributedText != nil,
+           transcriptLabel.frame.insetBy(dx: 0, dy: -4).contains(point) {
+            onTranscriptTap()
+            return
+        }
+        super.handleTapGesture(gesture)
     }
 
     /// Shows the spinner in the space that `ChatCaptionRow` leaves at the start of the caption row.
@@ -222,5 +270,19 @@ enum ChatCaptionRow {
     /// `true` for the footnotes that use the row: the voice reply audio states.
     static func uses(_ footnote: ChatRow.Footnote?) -> Bool {
         footnote == .preparingAudio || footnote == .audioUnavailable
+    }
+}
+
+/// Issue #87: the text bubble size. A sent audio file cell is at least as wide as the audio bubble, so the
+/// transcript line under it has the width of a received audio transcript.
+final class ChatTextSizeCalculator: TextMessageSizeCalculator {
+    /// The minimum bubble width of a message, or `nil` for the text width.
+    var minimumWidth: (MessageType, _ maxWidth: CGFloat) -> CGFloat? = { _, _ in nil }
+
+    override func messageContainerSize(for message: MessageType, at indexPath: IndexPath) -> CGSize {
+        var size = super.messageContainerSize(for: message, at: indexPath)
+        let maxWidth = messageContainerMaxWidth(for: message, at: indexPath)
+        if let minimum = minimumWidth(message, maxWidth) { size.width = max(size.width, min(minimum, maxWidth)) }
+        return size
     }
 }
