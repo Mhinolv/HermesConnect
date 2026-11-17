@@ -31,7 +31,7 @@ struct TranscriptionSettingsSection: View {
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
                 Text(Self.footer)
-                if engine == .parakeet, parakeet.state != .ready {
+                if engine == .parakeet, parakeet.state != .ready, parakeet.state != .damaged {
                     Text(Self.notDownloadedFooter)
                 }
             }
@@ -46,13 +46,13 @@ struct TranscriptionSettingsSection: View {
 
     @ViewBuilder private var parakeetRow: some View {
         switch parakeet.state {
-        case .notDownloaded, .failed:
+        case .notDownloaded, .failed, .damaged:
             LabeledContent("Parakeet") {
                 Button(parakeet.downloadTitle) { parakeet.download() }
             }
-            .accessibilityHint(parakeet.state == .failed ? Self.failedText : "")
-            if parakeet.state == .failed {
-                Text(Self.failedText).font(.footnote).foregroundStyle(.secondary)
+            .accessibilityHint(statusText ?? "")
+            if let statusText {
+                Text(statusText).font(.footnote).foregroundStyle(.secondary)
             }
         case .downloading(let fraction):
             LabeledContent("Parakeet") {
@@ -67,6 +67,15 @@ struct TranscriptionSettingsSection: View {
             Button("Delete Model", role: .destructive) {
                 Task { await parakeet.delete() }
             }
+        }
+    }
+
+    /// "Download failed." or "Parakeet model damaged. Download again." under the Download row.
+    private var statusText: String? {
+        switch parakeet.state {
+        case .failed: Self.failedText
+        case .damaged: TranscriptionModelStore.damagedText
+        case .notDownloaded, .downloading, .ready: nil
         }
     }
 

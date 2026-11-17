@@ -23,8 +23,10 @@ enum TranscriptionSettingsDemo {
         UserDefaults.standard.set(engine.rawValue, forKey: TranscriptionEngine.settingsKey)
         let store = TranscriptionModelStore(
             directory: FileManager.default.temporaryDirectory.appendingPathComponent("demo-parakeet"),
-            downloader: Downloader(installed: scenario == .voiceSettingsReady), sizeBytes: ParakeetTranscriber.sizeBytes)
+            downloader: Downloader(installed: scenario == .voiceSettingsReady || scenario == .voiceSettingsDamaged),
+            sizeBytes: ParakeetTranscriber.sizeBytes)
         if scenario == .voiceSettingsDownloading { store.download() }
+        if scenario == .voiceSettingsDamaged { store.reportLoadFailure() }
         cached = store
         return store
     }

@@ -400,3 +400,163 @@ private final class FakeDownloader: TranscriptionModelDownloading, @unchecked Se
         #expect(unloaded.withLock { $0 } == 1)
     }
 }
+
+// MARK: - QA 52-1: no hidden model download
+
+@Suite struct ParakeetFallbackChainTests {
+    @Test func parakeetFailureTriesAppleBeforeTheServer() async throws {
+        let apple = FakeRecognizer(.success("Apple text"))
+        let parakeet = FakeRecognizer(.failure(RecognizerFailed()))
+        let server = ServerCalls()
+        let text = try await VoiceTranscription(engine: { .parakeet }, apple: apple, parakeet: parakeet,
+                                                parakeetReady: { true })
+            .transcribe(fileURL: memoURL) { server.call("server") }
+        #expect(text == "Apple text")
+        #expect(parakeet.calls == [memoURL])
+        #expect(apple.calls == [memoURL])
+        #expect(server.count == 0)
+    }
+
+    @Test func parakeetAndAppleFailureUsesTheServer() async throws {
+        let apple = FakeRecognizer(.failure(RecognizerFailed()))
+        let parakeet = FakeRecognizer(.failure(RecognizerFailed()))
+        let server = ServerCalls()
+        let text = try await VoiceTranscription(engine: { .parakeet }, apple: apple, parakeet: parakeet,
+                                                parakeetReady: { true })
+            .transcribe(fileURL: memoURL) { server.call("server") }
+        #expect(text == "server")
+        #expect(apple.calls.count == 1)
+        #expect(server.count == 1)
+    }
+
+    @Test func appleFailureDoesNotTryParakeet() async throws {
+        let apple = FakeRecognizer(.failure(RecognizerFailed()))
+        let parakeet = FakeRecognizer(.success("p"))
+        let server = ServerCalls()
+        let text = try await VoiceTranscription(engine: { .appleOnDevice }, apple: apple, parakeet: parakeet,
+                                                parakeetReady: { true })
+            .transcribe(fileURL: memoURL) { server.call("server") }
+        #expect(text == "server")
+        #expect(parakeet.calls.isEmpty)
+    }
+}
+
+/// Records each change of the model library network switch, in order.
+private final class NetworkSwitch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _changes: [Bool] = []
+    var changes: [Bool] { lock.withLock { _changes } }
+    var isOffline: Bool { changes.last ?? false }
+    func set(offline: Bool) { lock.withLock { _changes.append(offline) } }
+}
+
+/// A download that records whether the network was on while it ran.
+private final class ProbeDownloader: TranscriptionModelDownloading, @unchecked Sendable {
+    let network: NetworkSwitch
+    let outcome: Result<Void, any Error>
+    private let lock = NSLock()
+    private var _sawOnline = false
+    init(network: NetworkSwitch, outcome: Result<Void, any Error>) {
+        self.network = network
+        self.outcome = outcome
+    }
+    var sawOnline: Bool { lock.withLock { _sawOnline } }
+    func isInstalled(at _: URL) -> Bool { false }
+    func download(to _: URL, progress _: @escaping @Sendable (Double) -> Void) async throws {
+        let online = !network.isOffline
+        lock.withLock { _sawOnline = online }
+        try outcome.get()
+    }
+}
+
+@Suite struct OfflineModelGateTests {
+    @Test func networkIsOffWhenTheGateIsMade() {
+        let network = NetworkSwitch()
+        _ = OfflineGatedDownloader(base: ProbeDownloader(network: network, outcome: .success(())),
+                                   setOffline: network.set(offline:))
+        #expect(network.changes == [true])
+    }
+
+    @Test func networkIsOnOnlyDuringTheDownload() async throws {
+        let network = NetworkSwitch()
+        let probe = ProbeDownloader(network: network, outcome: .success(()))
+        let gate = OfflineGatedDownloader(base: probe, setOffline: network.set(offline:))
+        try await gate.download(to: memoURL) { _ in }
+        #expect(probe.sawOnline)
+        #expect(network.changes == [true, false, true])
+        #expect(network.isOffline)
+    }
+
+    @Test func networkIsOffAgainAfterAFailedDownload() async {
+        let network = NetworkSwitch()
+        let probe = ProbeDownloader(network: network, outcome: .failure(RecognizerFailed()))
+        let gate = OfflineGatedDownloader(base: probe, setOffline: network.set(offline:))
+        await #expect(throws: RecognizerFailed.self) { try await gate.download(to: memoURL) { _ in } }
+        #expect(network.changes == [true, false, true])
+    }
+
+    @Test func installedCheckNeverTurnsTheNetworkOn() {
+        let network = NetworkSwitch()
+        let gate = OfflineGatedDownloader(base: ProbeDownloader(network: network, outcome: .success(())),
+                                          setOffline: network.set(offline:))
+        _ = gate.isInstalled(at: memoURL)
+        #expect(network.changes == [true])
+    }
+}
+
+@MainActor
+@Suite(.timeLimit(.minutes(1))) struct DamagedModelTests {
+    private func directory() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("parakeet-\(UUID().uuidString)")
+    }
+
+    private func waitUntil(_ condition: @escaping () -> Bool) async {
+        for _ in 0..<500 where !condition() { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+
+    @Test func loadFailureMarksTheModelDamagedAndNotReady() async {
+        let dir = directory()
+        let downloader = FakeDownloader()
+        downloader.markInstalled(dir)
+        let store = TranscriptionModelStore(directory: dir, downloader: downloader, sizeBytes: 1)
+        #expect(store.isReady)
+        store.reportLoadFailure()
+        #expect(!store.isReady)
+        await waitUntil { store.state == .damaged }
+        #expect(store.state == .damaged)
+        #expect(TranscriptionModelStore.damagedText == "Parakeet model damaged. Download again.")
+        // Parakeet picked, model damaged: the next memo uses Apple On-Device.
+        let transcription = VoiceTranscription(engine: { .parakeet }, apple: nil, parakeet: nil,
+                                               parakeetReady: { store.isReady })
+        #expect(transcription.effectiveEngine == .appleOnDevice)
+    }
+
+    @Test func downloadAfterDamageRemovesTheOldFilesThenIsReady() async throws {
+        let dir = directory()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let downloader = FakeDownloader()
+        downloader.markInstalled(dir)
+        let store = TranscriptionModelStore(directory: dir, downloader: downloader, sizeBytes: 1)
+        store.reportLoadFailure()
+        await waitUntil { store.state == .damaged }
+        store.download()
+        await waitUntil { downloader.isWaiting }
+        #expect(!FileManager.default.fileExists(atPath: dir.path))
+        downloader.finish()
+        await waitUntil { store.state == .ready }
+        #expect(store.state == .ready)
+        #expect(store.isReady)
+    }
+
+    @Test func deleteClearsTheDamage() async {
+        let dir = directory()
+        let downloader = FakeDownloader()
+        downloader.markInstalled(dir)
+        let store = TranscriptionModelStore(directory: dir, downloader: downloader, sizeBytes: 1)
+        store.reportLoadFailure()
+        await waitUntil { store.state == .damaged }
+        downloader.removeMark(dir)
+        await store.delete()
+        #expect(store.state == .notDownloaded)
+    }
+}

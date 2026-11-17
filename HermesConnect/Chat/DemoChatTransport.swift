@@ -65,6 +65,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case voiceSettingsParakeet = "voice-settings-parakeet"
         case voiceSettingsDownloading = "voice-settings-downloading"
         case voiceSettingsReady = "voice-settings-ready"
+        /// QA 52-1: the Parakeet model did not load ("Parakeet model damaged. Download again.").
+        case voiceSettingsDamaged = "voice-settings-damaged"
 
         static var current: Scenario? {
             ProcessInfo.processInfo.environment["HERMES_DEMO"].flatMap(Scenario.init(rawValue:))
@@ -78,7 +80,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             case .live, .thread, .empty, .list, .listEmpty, .listLoading, .voice, .recording, .hold, .paused,
                  .attachments, .voiceReplies, .voiceRepliesPaused, .tapbacks, .tapbacksPicker, .catchUp, .catchUpPill,
                  .notificationSettings, .notificationsOff, .voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading,
-                 .voiceSettingsReady: nil
+                 .voiceSettingsReady, .voiceSettingsDamaged: nil
             }
         }
 
@@ -105,7 +107,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         /// `true` for the Settings > Notifications scenarios (issue #15).
         var showsNotificationSettings: Bool { self == .notificationSettings || self == .notificationsOff }
         var showsVoiceSettings: Bool {
-            [.voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading, .voiceSettingsReady].contains(self)
+            [.voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading, .voiceSettingsReady,
+             .voiceSettingsDamaged].contains(self)
         }
     }
 

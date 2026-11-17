@@ -32,8 +32,36 @@ import Testing
         #expect(OnDeviceTranscription.shared.transcription.parakeet != nil)
     }
 
+    /// QA 52-1: FluidAudio is offline from launch, so a model that fails to load never downloads again.
+    @Test func modelLibraryIsOfflineAfterLaunchAndAfterADownload() async throws {
+        OnDeviceTranscription.lockModelNetwork()
+        _ = OnDeviceTranscription.shared
+        #expect(ParakeetDownloader.isLibraryOffline)
+        let probe = OnlineProbe()
+        let gate = OfflineGatedDownloader(base: probe, setOffline: ParakeetDownloader.setLibraryOffline)
+        try await gate.download(to: FileManager.default.temporaryDirectory) { _ in }
+        #expect(probe.wasOnline)
+        #expect(ParakeetDownloader.isLibraryOffline)
+    }
+
+    @Test func damagedTextShowsInSettings() {
+        #expect(TranscriptionModelStore.damagedText == "Parakeet model damaged. Download again.")
+    }
+
     @Test func footerSaysWhatLeavesThePhone() {
         #expect(TranscriptionSettingsSection.footer.contains("on this iPhone"))
         #expect(TranscriptionSettingsSection.notDownloadedFooter == "Parakeet is not downloaded.")
+    }
+}
+
+/// Reads the real FluidAudio switch while the "download" runs. Nothing goes to the network.
+private final class OnlineProbe: TranscriptionModelDownloading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _wasOnline = false
+    var wasOnline: Bool { lock.withLock { _wasOnline } }
+    func isInstalled(at _: URL) -> Bool { false }
+    func download(to _: URL, progress _: @escaping @Sendable (Double) -> Void) async throws {
+        let online = !ParakeetDownloader.isLibraryOffline
+        lock.withLock { _wasOnline = online }
     }
 }

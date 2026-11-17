@@ -15,6 +15,8 @@ struct HermesConnectApp: App {
     private let usesAppLock: Bool
 
     init() {
+        // QA 52-1: no model download unless the owner taps Download.
+        OnDeviceTranscription.lockModelNetwork()
         #if DEBUG
         if ChatLaunch.isDemo {
             sessions = ChatLaunch.makeDemoSessions()
