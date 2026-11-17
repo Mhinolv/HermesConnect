@@ -47,6 +47,12 @@ targets:
         # Issue #15: BGAppRefresh catch-up with local notifications (D5). No push entitlement.
         UIBackgroundModes: [audio, fetch]
         BGTaskSchedulerPermittedIdentifiers: [io.mhinoverse.hermesconnect.refresh]
+        # Issue #45: reply notifications are communication notifications, so Siri can announce them.
+        NSUserActivityTypes: [INSendMessageIntent]
+    entitlements:
+      path: HermesConnect/Resources/HermesConnect.entitlements
+      properties:
+        com.apple.developer.usernotifications.communication: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.mhinoverse.hermesconnect

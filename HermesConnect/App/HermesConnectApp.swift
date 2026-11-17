@@ -43,6 +43,8 @@ struct HermesConnectApp: App {
         let notifications = NotificationController()
         self.notifications = notifications
         UNUserNotificationCenter.current().delegate = notifications
+        // Issue #45: the Siri shortcuts run in this process, also in a launch in the background.
+        SiriRuntime.service = SiriService(model: live, link: link, sessions: sessions, notifications: notifications)
         // Issue #15: register before the app finishes launching (BGTaskScheduler rule).
         BackgroundRefresh.register {
             await BackgroundRefresh.run(model: live, link: link, sessions: sessions, notifications: notifications)

@@ -167,6 +167,8 @@ struct NotificationSettingsSection: View {
 
     static let previewTitle = "Show Message Preview"
     static let offTitle = "Notifications Off"
+    static let siriTitle = "Use Siri When Locked"
+    static let siriFooter = "Siri can read and send Hermes messages while your iPhone is locked."
     static let footer = "A notification says \"New message from Hermes\". Turn on the preview to show "
         + "the first part of the reply."
 
@@ -188,6 +190,12 @@ struct NotificationSettingsSection: View {
                 Text(Self.footer)
             }
             .task { await notifications.refreshStatus() }
+            // Issue #45: off by default. With it off, a locked iPhone makes Siri say "Unlock your iPhone to use Hermes."
+            Section {
+                Toggle(Self.siriTitle, isOn: $notifications.usesSiriWhenLocked)
+            } footer: {
+                Text(Self.siriFooter)
+            }
         }
     }
 }
