@@ -39,7 +39,8 @@ struct SettingsView: View {
                 Section {
                     LabeledContent("Status", value: connectionText)
                     Button("Connect") { Task { await model.connect() } }
-                        .disabled(model.connection == .connecting || !model.isSetUp)
+                        .disabled(model.connection == .connecting || model.connection == .startingHermes
+                                  || !model.isSetUp)
                 } header: {
                     Text("Connection")
                 } footer: {
@@ -89,20 +90,21 @@ struct SettingsView: View {
         }
     }
 
-    /// The Settings > Connection status. "Connected: PONG <version>" is the gate reply.
+    /// The Settings > Connection status. It never shows the port or the token (issue #4).
     private var connectionText: String {
         switch model.connection {
         case .idle: "Not connected"
         case .connecting: "Connecting…"
-        case .connected(let version): "Connected: PONG \(version)"
+        case .startingHermes: "Starting Hermes…"
+        case .connected: "Hermes ready"
         case .offline: "Offline"
-        case .hostKeyChanged: "Not connected"
+        case .hostKeyChanged, .notStarted: "Not connected"
         }
     }
 
     private var connectionReason: String? {
         switch model.connection {
-        case .offline(let error?): error.description
+        case .offline(let error?), .notStarted(let error): error.description
         case .hostKeyChanged: "The server host key changed. Hermes did not connect."
         default: nil
         }

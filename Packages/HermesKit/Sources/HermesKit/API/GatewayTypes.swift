@@ -17,8 +17,10 @@ public enum GatewayDisconnectReason: Sendable, Equatable {
     /// The transport failed (`URLError` code when known). No text, because it can hold the URL.
     case transportFailed(code: Int?)
 
-    /// `true` when a new session token is necessary (#4 runs again: "Starting Hermes…").
-    public var needsNewToken: Bool { self == .unauthorized }
+    /// `true` when the token can be stale, so #4 runs again with a new token ("Starting Hermes…").
+    /// 4401/401 and 4403/403 both count: uvicorn can refuse a stale token with HTTP 403 before
+    /// the accept (QA follow-up of PR #23).
+    public var needsNewToken: Bool { self == .unauthorized || self == .forbidden }
 
     /// `true` when a reconnect with the same token can work (#15 owns the policy).
     public var shouldReconnect: Bool {

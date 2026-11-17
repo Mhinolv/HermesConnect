@@ -18,16 +18,45 @@ public struct SSHEndpoint: Sendable, Equatable {
 }
 
 /// A command that the server gate accepts (`server/README.md`). The gate refuses all other commands.
-/// Issue #4 adds `serve`, issue #13 adds `location`.
+/// Issue #13 adds `location`.
 public enum GateCommand: String, Sendable, CaseIterable {
     case ping
+    /// Start or reuse `hermes serve` on the server loopback. stdin: the session token. stdout: `PORT <n>` (issue #4).
+    case serve
 }
 
 /// One open SSH connection. It has no PTY, no agent forwarding and no remote forwards.
 public protocol SSHSession: Sendable {
     /// Run one gate command on an exec channel and return its standard output.
-    func execute(_ command: GateCommand) async throws -> String
+    /// - Parameter stdin: Bytes for the command stdin. The session sends them, then EOF.
+    ///   `nil` sends EOF at once. The bytes never go into the command line.
+    func execute(_ command: GateCommand, stdin: Data?) async throws -> String
+    /// Listen on `127.0.0.1:<random port>` on this device. Each accepted connection opens a
+    /// `direct-tcpip` channel to `127.0.0.1:<remotePort>` on the server (`LoopbackForward.remoteHost`).
+    func openLoopbackForward(remotePort: Int) async throws -> any LoopbackForward
     func close() async
+}
+
+extension SSHSession {
+    public func execute(_ command: GateCommand) async throws -> String {
+        try await execute(command, stdin: nil)
+    }
+}
+
+/// A local listener on this device that forwards to the server loopback.
+public protocol LoopbackForward: Sendable {
+    /// The port of the listener on `127.0.0.1` of this device.
+    var localPort: Int { get }
+    /// Stop the listener and close the open connections.
+    func close() async
+}
+
+public enum LoopbackForwardTarget {
+    /// The only host that a forward opens on the server. The gate key line has `permitopen="127.0.0.1:*"`,
+    /// and `localhost` does not match it (`server/README.md`).
+    public static let remoteHost = "127.0.0.1"
+    /// The host of the listener on this device.
+    public static let localHost = "127.0.0.1"
 }
 
 /// Opens SSH connections. `CitadelSSHTransport` is the real one. Tests use `ScriptedSSHTransport`.
@@ -57,6 +86,12 @@ public enum SSHConnectionError: Error, Sendable, Equatable, CustomStringConverti
     case unexpectedReply
     /// The device key cannot be used for SSH.
     case unusableKey
+    /// The gate printed a port, but Hermes did not answer the health check in time (issue #4).
+    case hermesNotReady
+    /// Hermes refused the session token, also after one new token (issue #4).
+    case sessionTokenRejected
+    /// The local forward to the server loopback did not open (issue #4).
+    case forwardFailed
 
     public var description: String {
         switch self {
@@ -68,6 +103,9 @@ public enum SSHConnectionError: Error, Sendable, Equatable, CustomStringConverti
         case .gateError(let code): "The server gate returned an error: \(code)."
         case .unexpectedReply: "The server gate sent an unexpected reply."
         case .unusableKey: "The device key cannot be used for SSH."
+        case .hermesNotReady: "Hermes did not get ready in time."
+        case .sessionTokenRejected: "Hermes did not accept the session token."
+        case .forwardFailed: "The connection to Hermes on the server did not open."
         }
     }
 }
@@ -139,19 +177,35 @@ public struct HostConnector: Sendable {
 
 /// A fake `SSHTransport` that never opens a socket. For tests and previews.
 /// It calls the host key check like the real transport, and it records what happened.
+/// Its `serve` acts like the gate: the same token and a live server give the same port (reuse),
+/// other tokens start a new server (spawn).
 public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
     public struct Record: Sendable, Equatable {
         public var connectAttempts = 0
         /// Connections that passed the host key check and reached authentication.
         public var authentications = 0
         public var commands: [GateCommand] = []
+        /// The stdin bytes of each command, in the order of `commands`.
+        public var stdins: [Data?] = []
         public var closedSessions = 0
+        /// The server port of each forward that opened.
+        public var forwardPorts: [Int] = []
+        public var closedForwards = 0
+        /// Fake gate `serve` results.
+        public var spawns = 0
+        public var reuses = 0
     }
 
     private let lock = NSLock()
     private var _hostKey: HostKey
     private var _pingReply: Result<String, SSHConnectionError>
     private var _connectFailure: SSHConnectionError?
+    private var _serveFailure: SSHConnectionError?
+    private var _forwardFailure: SSHConnectionError?
+    private var _serverAlive = false
+    private var liveToken: Data?
+    private var livePort = 0
+    private var nextLocalPort = 50_000
     private var _record = Record()
 
     public init(hostKey: HostKey, pingReply: Result<String, SSHConnectionError> = .success("PONG 1\n"),
@@ -178,6 +232,23 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
         set { lock.withLock { _pingReply = newValue } }
     }
 
+    /// The error that the gate `serve` gives (for example `.gateError("hermes-not-found")`), or nil.
+    public var serveFailure: SSHConnectionError? {
+        get { lock.withLock { _serveFailure } }
+        set { lock.withLock { _serveFailure = newValue } }
+    }
+
+    public var forwardFailure: SSHConnectionError? {
+        get { lock.withLock { _forwardFailure } }
+        set { lock.withLock { _forwardFailure = newValue } }
+    }
+
+    /// `false` simulates a server that exited. The next `serve` spawns a new one.
+    public var serverAlive: Bool {
+        get { lock.withLock { _serverAlive } }
+        set { lock.withLock { _serverAlive = newValue } }
+    }
+
     public var record: Record { lock.withLock { _record } }
 
     public func connect(to endpoint: SSHEndpoint, key: DeviceKey,
@@ -193,27 +264,70 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
         return Session(transport: self)
     }
 
-    fileprivate func run(_ command: GateCommand) throws -> String {
-        let reply = lock.withLock { () -> Result<String, SSHConnectionError> in
+    fileprivate func run(_ command: GateCommand, stdin: Data?) throws -> String {
+        try lock.withLock { () throws -> String in
             _record.commands.append(command)
-            return _pingReply
+            _record.stdins.append(stdin)
+            switch command {
+            case .ping:
+                return try _pingReply.get()
+            case .serve:
+                if let failure = _serveFailure { throw failure }
+                var token = stdin ?? Data()
+                if token.last == UInt8(ascii: "\n") { token.removeLast() }
+                guard SessionToken.isValid(token) else { throw SSHConnectionError.gateError("bad-token") }
+                if _serverAlive, token == liveToken {
+                    _record.reuses += 1
+                } else {
+                    _record.spawns += 1
+                    liveToken = token
+                    livePort = 41_000 + _record.spawns
+                    _serverAlive = true
+                }
+                return "PORT \(livePort)\n"
+            }
         }
-        return try reply.get()
+    }
+
+    fileprivate func openForward(remotePort: Int) throws -> any LoopbackForward {
+        try lock.withLock { () throws -> any LoopbackForward in
+            if let failure = _forwardFailure { throw failure }
+            _record.forwardPorts.append(remotePort)
+            nextLocalPort += 1
+            return Forward(localPort: nextLocalPort, transport: self)
+        }
     }
 
     fileprivate func didClose() {
         lock.withLock { _record.closedSessions += 1 }
     }
 
+    fileprivate func didCloseForward() {
+        lock.withLock { _record.closedForwards += 1 }
+    }
+
     private struct Session: SSHSession {
         let transport: ScriptedSSHTransport
 
-        func execute(_ command: GateCommand) async throws -> String {
-            try transport.run(command)
+        func execute(_ command: GateCommand, stdin: Data?) async throws -> String {
+            try transport.run(command, stdin: stdin)
+        }
+
+        func openLoopbackForward(remotePort: Int) async throws -> any LoopbackForward {
+            try transport.openForward(remotePort: remotePort)
         }
 
         func close() async {
             transport.didClose()
+        }
+    }
+
+    private struct Forward: LoopbackForward {
+        let localPort: Int
+        let transport: ScriptedSSHTransport
+
+        func close() async {
+            transport.didCloseForward()
         }
     }
 }
