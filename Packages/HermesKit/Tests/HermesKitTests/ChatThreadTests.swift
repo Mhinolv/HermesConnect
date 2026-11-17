@@ -154,6 +154,25 @@ private final class IdMaker: @unchecked Sendable {
         #expect(thread.messages.last?.reply == .failed(message: nil))
     }
 
+    @Test func dropWhileThePromptIsSendingAddsNoFailedReply() {
+        var (thread, ids) = streaming()
+        #expect(thread.connectionLost(now: now, makeId: ids.callAsFunction) == .none)
+        #expect(thread.messages.count == 1)
+        // The send then fails: only "Not Delivered".
+        thread.setDelivery(.failed, id: "p1")
+        thread.cancelWaiting()
+        #expect(thread.turn == .idle)
+        #expect(ChatTimeline.rows(for: thread.messages).map(\.footnote) == [.notDelivered])
+    }
+
+    @Test func dropAfterDeliveryBeforeStartFailsTheReply() {
+        var (thread, ids) = streaming()
+        thread.setDelivery(.delivered, id: "p1")
+        #expect(thread.connectionLost(now: now, makeId: ids.callAsFunction) == .structure)
+        #expect(thread.messages.last?.reply == .failed(message: nil))
+        #expect(thread.turn == .idle)
+    }
+
     @Test func completeWithoutDeltasMakesTheBubble() throws {
         var (thread, ids) = streaming()
         let change = thread.apply(try complete(#"{"text":"Only final","status":"complete"}"#), now: now,

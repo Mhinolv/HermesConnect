@@ -11,7 +11,8 @@ final class ChatViewController: MessagesViewController {
     /// Styled text per message id. Built again when the text or the text size changes.
     private var textCache: [String: (source: String, size: UIContentSizeCategory, text: NSAttributedString)] = [:]
     private var announcedReplyId: String?
-    private var isAtBottom = true
+    /// The thread follows new text. A drag away from the bottom unpins it, and the `arrow.down` button shows.
+    private var pinnedToBottom = true
     private let scrollButton = UIButton(configuration: .glass())
     private var composerText = ""
 
@@ -75,7 +76,7 @@ final class ChatViewController: MessagesViewController {
         layout.setMessageOutgoingMessageBottomLabelAlignment(
             LabelAlignment(textAlignment: .right, textInsets: UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 18)))
         let statusAlignment = LabelAlignment(textAlignment: .left,
-                                             textInsets: UIEdgeInsets(top: 0, left: 18, bottom: 0, right: 0))
+                                             textInsets: UIEdgeInsets(top: 2, left: 18, bottom: 6, right: 0))
         layout.setMessageIncomingCellBottomLabelAlignment(statusAlignment)
         layout.setMessageOutgoingCellBottomLabelAlignment(statusAlignment)
         let header = LabelAlignment(textAlignment: .center, textInsets: .zero)
@@ -139,7 +140,9 @@ final class ChatViewController: MessagesViewController {
         scrollButton.translatesAutoresizingMaskIntoConstraints = false
         scrollButton.isHidden = true
         scrollButton.addAction(UIAction { [weak self] _ in
-            self?.messagesCollectionView.scrollToLastItem(animated: true)
+            self?.pinnedToBottom = true
+            self?.scrollToBottom(animated: true)
+            self?.updateScrollButton()
         }, for: .touchUpInside)
         view.addSubview(scrollButton)
         NSLayoutConstraint.activate([
@@ -183,6 +186,7 @@ final class ChatViewController: MessagesViewController {
     }
 
     private func textSizeChanged() {
+        pinnedToBottom = true
         updateMaxTextViewHeight()
         textCache = [:]
         bubbles = []
@@ -217,7 +221,6 @@ final class ChatViewController: MessagesViewController {
 
     private func render() {
         guard isViewLoaded else { return }
-        let wasAtBottom = isAtBottom
         let rows = ChatTimeline.rows(for: model.messages, statusLine: model.statusLine)
         let next = rows.map { ChatBubble(row: $0, text: styledText(for: $0.message)) }
         let old = bubbles
@@ -244,10 +247,9 @@ final class ChatViewController: MessagesViewController {
         }
         textCache = textCache.filter { id, _ in next.contains { $0.row.id == id } }
 
-        if wasAtBottom || newOutgoing {
-            messagesCollectionView.layoutIfNeeded()
-            messagesCollectionView.scrollToLastItem(animated: false)
-            isAtBottom = true
+        if pinnedToBottom || newOutgoing {
+            pinnedToBottom = true
+            scrollToBottom()
         }
         updateScrollButton()
         updateSendButton()
@@ -264,18 +266,53 @@ final class ChatViewController: MessagesViewController {
     }
 
     private func updateScrollButton() {
-        scrollButton.isHidden = isAtBottom || bubbles.isEmpty
+        scrollButton.isHidden = pinnedToBottom || bubbles.isEmpty
+    }
+
+    /// Puts the end of the last bubble just above the composer. MessageKit sets the composer inset after
+    /// layout, so this runs again on each layout and inset change while the thread is pinned (QA #25 defect 1).
+    private func scrollToBottom(animated: Bool = false) {
+        let collection = messagesCollectionView
+        guard collection.bounds.height > 0, !collection.isDragging, !collection.isDecelerating else { return }
+        collection.layoutIfNeeded()
+        let target = ChatScroll.bottomOffset(contentHeight: collection.contentSize.height,
+                                             viewHeight: collection.bounds.height,
+                                             insets: collection.adjustedContentInset)
+        guard abs(collection.contentOffset.y - target) > 0.5 else { return }
+        collection.setContentOffset(CGPoint(x: collection.contentOffset.x, y: target), animated: animated)
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if pinnedToBottom { scrollToBottom() }
+    }
+
+    override func scrollViewDidChangeAdjustedContentInset(_ scrollView: UIScrollView) {
+        super.scrollViewDidChangeAdjustedContentInset(scrollView)
+        // MessageKit changes the inset inside its own update. A scroll in this call is lost, so run it next.
+        guard pinnedToBottom else { return }
+        Task { @MainActor [weak self] in
+            guard let self, self.pinnedToBottom else { return }
+            self.scrollToBottom()
+        }
     }
 
     override func scrollViewDidScroll(_ scrollView: UIScrollView) {
         super.scrollViewDidScroll(scrollView)
-        let visibleBottom = scrollView.contentOffset.y + scrollView.bounds.height - scrollView.adjustedContentInset.bottom
-        let atBottom = visibleBottom >= scrollView.contentSize.height - 40
-        if atBottom != isAtBottom {
-            isAtBottom = atBottom
+        // Only the owner's scroll changes the pin. Layout and inset changes do not.
+        guard scrollView.isDragging || scrollView.isDecelerating else { return }
+        let pinned = ChatScroll.isNearBottom(offset: scrollView.contentOffset.y,
+                                             contentHeight: scrollView.contentSize.height,
+                                             viewHeight: scrollView.bounds.height,
+                                             insets: scrollView.adjustedContentInset)
+        if pinned != pinnedToBottom {
+            pinnedToBottom = pinned
             updateScrollButton()
         }
     }
+
+    /// The pin state (tests).
+    var isPinnedToBottom: Bool { pinnedToBottom }
 
     // MARK: Rows
 
@@ -381,6 +418,22 @@ final class ChatViewController: MessagesViewController {
     }
 }
 
+// MARK: - Scroll math
+
+/// Where "the bottom" of the thread is. Plain math, so tests cover every inset and text size.
+enum ChatScroll {
+    /// The content offset that shows the end of the content just above the bottom inset (the composer).
+    /// Short content stays at the top.
+    static func bottomOffset(contentHeight: CGFloat, viewHeight: CGFloat, insets: UIEdgeInsets) -> CGFloat {
+        max(-insets.top, contentHeight - viewHeight + insets.bottom)
+    }
+
+    static func isNearBottom(offset: CGFloat, contentHeight: CGFloat, viewHeight: CGFloat, insets: UIEdgeInsets,
+                             tolerance: CGFloat = 40) -> Bool {
+        offset >= bottomOffset(contentHeight: contentHeight, viewHeight: viewHeight, insets: insets) - tolerance
+    }
+}
+
 // MARK: - Text styles
 
 private enum ChatLabelStyle {
@@ -450,7 +503,7 @@ extension ChatViewController: MessagesLayoutDelegate {
     }
 
     func cellBottomLabelHeight(for message: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> CGFloat {
-        row(for: message)?.statusLine == nil ? 0 : ChatLabelStyle.height(.caption1, traitCollection, padding: 6)
+        row(for: message)?.statusLine == nil ? 0 : ChatLabelStyle.height(.caption1, traitCollection, padding: 12)
     }
 
     func messageTopLabelHeight(for _: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> CGFloat { 0 }

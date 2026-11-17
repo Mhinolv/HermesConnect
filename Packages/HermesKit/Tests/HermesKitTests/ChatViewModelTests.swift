@@ -37,6 +37,15 @@ final class FakeChatTransport: ChatTransport, @unchecked Sendable {
         return ChatSessionRef(liveId: "s1", storedId: "20261116_101500_ab12cd")
     }
 
+    private var _resumes: [String] = []
+    var resumes: [String] { lock.withLock { _resumes } }
+
+    func resumeSession(storedId: String, source: String) async throws -> ChatSessionRef {
+        lock.withLock { _resumes.append(storedId) }
+        if lock.withLock({ failStart }) { throw Failure() }
+        return ChatSessionRef(liveId: "s2", storedId: storedId)
+    }
+
     func submitPrompt(sessionId: String, text: String, retryBeforeRowId: Int?) async throws -> Int? {
         lock.withLock { _submits.append(Submit(sessionId: sessionId, text: text, retryBeforeRowId: retryBeforeRowId)) }
         if lock.withLock({ failSubmit }) { throw Failure() }
@@ -241,6 +250,30 @@ private final class Counter: @unchecked Sendable {
         vm.receive(.state(.disconnected(.heartbeatTimeout)))
         #expect(vm.messages.last?.reply == .failed(message: nil))
         #expect(!vm.isReplyActive)
+    }
+
+    @Test func sendAfterADropResumesTheStoredSession() async throws {
+        let transport = FakeChatTransport()
+        let vm = model(transport)
+        await vm.send("one")?.value
+        vm.receive(try event(#"{"type":"message.complete","session_id":"s1","payload":{"text":"ok","status":"complete"}}"#))
+        vm.receive(.state(.disconnected(.heartbeatTimeout)))
+        await vm.send("two")?.value
+        #expect(transport.starts.count == 1)
+        #expect(transport.resumes == ["20261116_101500_ab12cd"])
+        #expect(transport.submits.last == .init(sessionId: "s2", text: "two", retryBeforeRowId: nil))
+        // Events of the new live id reach the thread.
+        vm.receive(try event(#"{"type":"message.start","session_id":"s2","payload":{}}"#))
+        #expect(vm.turn == .typing)
+    }
+
+    @Test func dropBeforeASessionCreatesOnTheNextSend() async {
+        let transport = FakeChatTransport()
+        let vm = model(transport)
+        vm.receive(.state(.disconnected(.heartbeatTimeout)))
+        await vm.send("one")?.value
+        #expect(transport.starts.count == 1)
+        #expect(transport.resumes.isEmpty)
     }
 
     @Test func runReadsTheEventStream() async throws {

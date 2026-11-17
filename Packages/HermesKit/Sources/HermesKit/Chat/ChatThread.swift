@@ -107,9 +107,11 @@ public struct ChatThread: Sendable, Equatable {
     }
 
     /// The socket dropped during a turn. The reply fails, so the owner can retry.
+    /// A prompt that is still sending gets only "Not Delivered" from its send, not a failed reply too.
     @discardableResult
     public mutating func connectionLost(now: Date, makeId: () -> String) -> ChatThreadChange {
         guard turn != .idle else { return .none }
+        if turn == .waiting, let promptId, message(id: promptId)?.delivery == .sending { return .none }
         return fail(message: nil, now: now, makeId: makeId)
     }
 

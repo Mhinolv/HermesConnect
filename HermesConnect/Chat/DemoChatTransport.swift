@@ -54,6 +54,10 @@ final class DemoChatTransport: ChatTransport, @unchecked Sendable {
 
     struct DemoFailure: Error {}
 
+    func resumeSession(storedId: String, source _: String) async throws -> ChatSessionRef {
+        ChatSessionRef(liveId: Self.sessionId, storedId: storedId)
+    }
+
     func submitPrompt(sessionId _: String, text _: String, retryBeforeRowId _: Int?) async throws -> Int? {
         try await Task.sleep(for: .milliseconds(350))
         if scenario == .failed { throw DemoFailure() }

@@ -26,6 +26,8 @@ public final class ChatViewModel {
     @ObservationIgnored private let sessionKey: String
     @ObservationIgnored private var session: ChatSessionRef?
     @ObservationIgnored private var sessionTask: Task<ChatSessionRef, any Error>?
+    /// The socket dropped since the session opened. The next send calls `session.resume`.
+    @ObservationIgnored private var sessionIsStale = false
     @ObservationIgnored private var redrawTask: Task<Void, Never>?
     @ObservationIgnored private var lastRedraw: ContinuousClock.Instant?
 
@@ -70,6 +72,8 @@ public final class ChatViewModel {
             let makeId = self.makeId
             changed(thread.apply(event.kind, now: now(), makeId: makeId))
         case .state(.disconnected):
+            // The live id can die with the socket. The next send resumes the stored id.
+            sessionIsStale = session != nil
             let makeId = self.makeId
             changed(thread.connectionLost(now: now(), makeId: makeId))
         case .state, .serverRequest:
@@ -145,17 +149,25 @@ public final class ChatViewModel {
         redrawNow()
     }
 
-    /// The live session. The first send creates it with `source: "ios"`. Sends at the same time share one create.
+    /// The live session. The first send creates it with `source: "ios"`. After a drop, the send resumes
+    /// the stored id. Sends at the same time share one call.
     private func currentSession() async throws -> ChatSessionRef {
-        if let session { return session }
+        if let session, !sessionIsStale { return session }
         if let sessionTask { return try await sessionTask.value }
         let transport = self.transport
         let key = sessionKey
-        let task = Task { try await transport.startSession(source: ChatSource.iOS, idempotencyKey: key) }
+        let storedId = sessionIsStale ? session?.storedId : nil
+        let task = Task {
+            if let storedId {
+                return try await transport.resumeSession(storedId: storedId, source: ChatSource.iOS)
+            }
+            return try await transport.startSession(source: ChatSource.iOS, idempotencyKey: key)
+        }
         sessionTask = task
         do {
             let created = try await task.value
             session = created
+            sessionIsStale = false
             sessionTask = nil
             return created
         } catch {
