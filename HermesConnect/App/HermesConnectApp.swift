@@ -25,7 +25,9 @@ struct RootView: View {
                 if model.isSetUp {
                     ContentUnavailableView("Not Connected", systemImage: "bolt.horizontal.circle",
                                            description: Text("Chat comes in a later version."))
+                        .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
+                            ToolbarItem(placement: .principal) { ChatTitleView() }
                             ToolbarItem(placement: .topBarTrailing) {
                                 Button("Settings", systemImage: "gearshape") { showSettings = true }
                             }
@@ -45,6 +47,14 @@ struct RootView: View {
         }
         .sheet(isPresented: $showSetup) { SetupFlowView() }
         .sheet(isPresented: $showSettings) { SettingsView() }
+        .hostTrustPresenter(enabled: !showSetup && !showSettings)
+        .task(id: model.isSetUp) {
+            if model.isSetUp { await model.connect() }
+        }
+        .onChange(of: showSettings) { _, shown in
+            // A new server or a forgotten host key leaves the status idle. Connect when Settings closes.
+            if !shown, model.isSetUp, model.connection == .idle { Task { await model.connect() } }
+        }
     }
 }
 

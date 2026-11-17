@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import NIOSSH
 
 /// Where the private key of the device lives.
 public enum DeviceKeyKind: String, Sendable, Codable, Equatable {
@@ -42,6 +43,18 @@ public struct DeviceKey: Sendable {
     public func openSSH(comment: String) -> OpenSSHPublicKey {
         OpenSSHPublicKey(publicKey: publicKey, comment: comment)
     }
+
+    /// The key object for NIOSSH user authentication (issue #3). The Secure Enclave key stays in the hardware.
+    /// A signer that is not one of the HermesKit key sources cannot be used for SSH.
+    func sshPrivateKey() throws -> NIOSSHPrivateKey {
+        guard let source = signer as? any SSHPrivateKeySource else { throw DeviceKeyError.unsupportedSigner }
+        return try source.sshPrivateKey()
+    }
+}
+
+/// A signer that can give NIOSSH a key object. Only the HermesKit key sources conform.
+protocol SSHPrivateKeySource {
+    func sshPrivateKey() throws -> NIOSSHPrivateKey
 }
 
 extension DeviceKey: CustomStringConvertible, CustomDebugStringConvertible {
@@ -117,19 +130,28 @@ public struct SoftwareKeyFactory: DeviceKeyFactory {
 }
 
 /// Holds the wrapped Secure Enclave handle, not key material. The hardware does the signing.
-private struct SecureEnclaveSigner: DeviceKeySigner {
+private struct SecureEnclaveSigner: DeviceKeySigner, SSHPrivateKeySource {
     let representation: Data
 
     func sign(_ data: Data) throws -> P256.Signing.ECDSASignature {
         try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: representation).signature(for: data)
     }
+
+    /// NIOSSH signs through the Secure Enclave handle (`ecdsa-sha2-nistp256`).
+    func sshPrivateKey() throws -> NIOSSHPrivateKey {
+        NIOSSHPrivateKey(secureEnclaveP256Key: try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: representation))
+    }
 }
 
-private struct SoftwareSigner: DeviceKeySigner {
+private struct SoftwareSigner: DeviceKeySigner, SSHPrivateKeySource {
     let raw: Data
 
     func sign(_ data: Data) throws -> P256.Signing.ECDSASignature {
         try P256.Signing.PrivateKey(rawRepresentation: raw).signature(for: data)
+    }
+
+    func sshPrivateKey() throws -> NIOSSHPrivateKey {
+        NIOSSHPrivateKey(p256Key: try P256.Signing.PrivateKey(rawRepresentation: raw))
     }
 }
 
@@ -138,6 +160,7 @@ public enum DeviceKeyError: Error, Equatable, CustomStringConvertible {
     case corruptKey
     case keychain(OSStatus)
     case kindMismatch
+    case unsupportedSigner
 
     public var description: String {
         switch self {
@@ -145,6 +168,7 @@ public enum DeviceKeyError: Error, Equatable, CustomStringConvertible {
         case .corruptKey: "The stored key is not valid."
         case .keychain(let status): "Keychain error \(status)."
         case .kindMismatch: "The stored key was made by a different key source."
+        case .unsupportedSigner: "This key source cannot sign SSH requests."
         }
     }
 }

@@ -2,7 +2,7 @@ import Foundation
 
 /// The one Hermes server of the owner.
 public struct ServerProfile: Codable, Sendable, Equatable {
-    public static let currentVersion = 1
+    public static let currentVersion = 2
     public static let defaultPort = 22
     public static let defaultUser = "hermes"
 
@@ -11,14 +11,17 @@ public struct ServerProfile: Codable, Sendable, Equatable {
     public var port: Int
     public var user: String
     public var displayName: String
+    /// The pinned host key (issue #3). Nil until the owner trusts the server on the first connect.
+    public var hostKey: HostKey?
 
     public init(host: String, port: Int = ServerProfile.defaultPort,
-                user: String = ServerProfile.defaultUser, displayName: String? = nil) {
+                user: String = ServerProfile.defaultUser, displayName: String? = nil, hostKey: HostKey? = nil) {
         self.version = Self.currentVersion
         self.host = host.trimmingCharacters(in: .whitespacesAndNewlines)
         self.port = port
         self.user = user
         self.displayName = displayName ?? self.host
+        self.hostKey = hostKey
     }
 
     /// Tolerant decode: a missing field gets its default, so old files still load.
@@ -29,6 +32,13 @@ public struct ServerProfile: Codable, Sendable, Equatable {
         port = try container.decodeIfPresent(Int.self, forKey: .port) ?? Self.defaultPort
         user = try container.decodeIfPresent(String.self, forKey: .user) ?? Self.defaultUser
         displayName = try container.decodeIfPresent(String.self, forKey: .displayName) ?? host
+        // Version 1 files have no pin. A pin that does not parse counts as no pin, so the owner must trust again.
+        hostKey = (try? container.decodeIfPresent(HostKey.self, forKey: .hostKey)) ?? nil
+    }
+
+    /// True when `other` names a different server (host, port or user). A new server needs a new pin.
+    public func isDifferentServer(from other: ServerProfile) -> Bool {
+        host.caseInsensitiveCompare(other.host) != .orderedSame || port != other.port || user != other.user
     }
 
     public var isValid: Bool {
