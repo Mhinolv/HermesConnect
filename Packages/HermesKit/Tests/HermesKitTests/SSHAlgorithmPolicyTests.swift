@@ -70,7 +70,6 @@ import Testing
         let server: SSHServer
         let port: Int
         let hostKey: HostKey
-        let auth: CitadelTransportTests.RecordingAuthDelegate
     }
 
     private func startServer(algorithms: SSHAlgorithms = SSHAlgorithms()) async throws -> Server {
@@ -84,7 +83,7 @@ import Testing
             do {
                 let server = try await SSHServer.host(host: "127.0.0.1", port: port, hostKeys: [serverKey],
                                                       algorithms: algorithms, authenticationDelegate: auth)
-                return Server(server: server, port: port, hostKey: hostKey, auth: auth)
+                return Server(server: server, port: port, hostKey: hostKey)
             } catch {
                 lastError = error
             }
@@ -121,23 +120,34 @@ import Testing
         try await server.server.close()
     }
 
+    // MARK: Refusal with a scripted server (issue #59)
+
+    /// Connects to a scripted server that offers only weak algorithms, like a real OpenSSH server would.
+    private func connect(_ server: ScriptedKexInitServer) async throws -> any SSHSession {
+        let endpoint = SSHEndpoint(host: "127.0.0.1", port: server.port, user: "hermes")
+        return try await CitadelSSHTransport(connectTimeoutSeconds: 5).connect(to: endpoint, key: deviceKey) { _ in }
+    }
+
     @Test func serverWithOnlyCTRCipherIsRefused() async throws {
-        var algorithms = SSHAlgorithms()
-        algorithms.transportProtectionSchemes = .replace(with: [AES128CTR.self])
-        let server = try await startServer(algorithms: algorithms)
+        let server = try await ScriptedKexInitServer.start(keyExchanges: ["curve25519-sha256"], ciphers: ["aes128-ctr"])
         await #expect(throws: SSHConnectionError.noAllowedAlgorithms) { try await connect(server) }
-        #expect(server.auth.requests.isEmpty)
-        try await server.server.close()
+        // The client sent only its KEXINIT: no key exchange and no authentication.
+        let hello = try await server.clientHello()
+        #expect(hello.messageIDs == [ScriptedKexInitServer.kexInit])
+        #expect(hello.ciphers == SSHAlgorithmPolicy.offeredCiphers)
+        #expect(!hello.ciphers.contains("aes128-ctr"))
+        try await server.close()
     }
 
     @Test func serverWithOnlyDiffieHellmanGroup14SHA1IsRefused() async throws {
-        var algorithms = SSHAlgorithms()
-        algorithms.keyExchangeAlgorithms = .replace(with: [DiffieHellmanGroup14Sha1.self])
-        let server = try await startServer(algorithms: algorithms)
+        let server = try await ScriptedKexInitServer.start(keyExchanges: ["diffie-hellman-group14-sha1"],
+                                                           ciphers: ["aes256-gcm@openssh.com", "aes128-gcm@openssh.com"])
         await #expect(throws: SSHConnectionError.noAllowedAlgorithms) { try await connect(server) }
-        #expect(server.auth.requests.isEmpty)
-        // The server registered the weak types in the global NIOSSH registry. The client still does not offer them.
-        #expect(!SSHAlgorithmPolicy.offeredKeyExchanges.contains("diffie-hellman-group14-sha1"))
-        try await server.server.close()
+        // The client sent only its KEXINIT: no key exchange and no authentication.
+        let hello = try await server.clientHello()
+        #expect(hello.messageIDs == [ScriptedKexInitServer.kexInit])
+        #expect(hello.keyExchanges == SSHAlgorithmPolicy.offeredKeyExchanges)
+        #expect(!hello.keyExchanges.contains("diffie-hellman-group14-sha1"))
+        try await server.close()
     }
 }
