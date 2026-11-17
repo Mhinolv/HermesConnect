@@ -9,6 +9,7 @@ struct ChatScreen: View {
     var link: LiveChatTransport?
     /// The server has no row for this session (`session.resume` 4007). The root drops it and shows the list.
     var onSessionGone: () -> Void = {}
+    @Environment(NotificationController.self) private var notifications: NotificationController?
 
     var body: some View {
         ChatThreadView(model: model)
@@ -22,9 +23,15 @@ struct ChatScreen: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .principal) { ChatNavigationTitle(title: model.title, link: link) }
+                ToolbarItem(placement: .principal) {
+                    ChatNavigationTitle(title: model.title, link: link, updating: model.isUpdating)
+                }
             }
             .onAppear { model.startEvents() }
+            // Issue #15: ask for notification permission after the first reply, not at first launch.
+            .onChange(of: model.completedReplyId) { _, id in
+                if id != nil { notifications?.requestAfterFirstReply() }
+            }
             .task { await model.open() }
             .onChange(of: model.isSessionGone, initial: true) { _, gone in
                 if gone { onSessionGone() }
@@ -38,6 +45,8 @@ struct ChatNavigationTitle: View {
     @Environment(AppModel.self) private var app
     let title: String?
     var link: LiveChatTransport?
+    /// Issue #15: `open()` merges the server history into the cached messages.
+    var updating = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,7 +59,16 @@ struct ChatNavigationTitle: View {
     }
 
     @ViewBuilder private var status: some View {
-        switch ChatLaunch.subtitle(link: link?.status, connection: app.connection) {
+        switch ChatLaunch.subtitle(link: link?.status, connection: app.connection, updating: updating) {
+        case .updating:
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.mini)
+                Text("Updating…")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Connection status, Updating")
         case .reconnecting:
             HStack(spacing: 4) {
                 ProgressView().controlSize(.mini)
@@ -88,6 +106,12 @@ struct ChatThreadView: UIViewControllerRepresentable {
             let controller = ChatViewController(model: model, recorder: DemoVoiceRecorder(),
                                                 voiceFolder: FileManager.default.temporaryDirectory)
             controller.onFirstAppear = { DemoVoiceRecorder.start(scenario, on: $0.voice) }
+            return controller
+        }
+        if DemoChatTransport.Scenario.current == .catchUpPill {
+            // Issue #15: the owner reads older messages, so the catch-up shows the pill.
+            let controller = ChatViewController(model: model)
+            controller.onFirstAppear = { $0.unpinForDemo() }
             return controller
         }
         if let scenario = DemoChatTransport.Scenario.current, scenario.showsVoiceReplies {
@@ -168,10 +192,13 @@ enum ChatLaunch {
         case connection
         case reconnecting
         case chatFailed
+        /// Issue #15: connected, and the chat merges the missed messages.
+        case updating
     }
 
     /// The SSH and serve stages win when they fail (Offline, Not connected). Else the chat link state shows.
-    static func subtitle(link: ChatLinkStatus?, connection: AppModel.ConnectionState) -> Subtitle {
+    static func subtitle(link: ChatLinkStatus?, connection: AppModel.ConnectionState,
+                         updating: Bool = false) -> Subtitle {
         switch connection {
         case .offline, .notStarted, .hostKeyChanged: return .connection
         case .idle, .connecting, .startingHermes, .connected: break
@@ -179,8 +206,10 @@ enum ChatLaunch {
         switch link {
         case .reconnecting: return .reconnecting
         case .failed: return .chatFailed
-        default: return .connection
+        default: break
         }
+        if updating, case .connected = connection { return .updating }
+        return .connection
     }
 
     /// The Release chat link. `renew` asks #4 for a new Hermes session after a stale token.
@@ -189,6 +218,10 @@ enum ChatLaunch {
         link.onStaleToken = renew
         return link
     }
+
+    #if DEBUG
+    static var demoScenario: DemoChatTransport.Scenario? { DemoChatTransport.Scenario.current }
+    #endif
 
     static var isDemo: Bool {
         #if DEBUG
@@ -241,8 +274,9 @@ enum ChatLaunch {
         let cache = InMemorySessionCacheStore(sessions: rows, activeSessionId: active)
         let sessions = SessionListModel(transport: transport, chatTransport: transport, cache: cache)
         guard !scenario.showsList, scenario != .empty else { return sessions }
+        let seeds = transport.seedMessages(now: scenario.catchesUp ? DemoChatTransport.seedDate : Date())
         let model = ChatViewModel(transport: transport, storedSessionId: DemoChatTransport.storedId,
-                                  title: "Calendar and logs", messages: transport.seedMessages(), cache: cache)
+                                  title: "Calendar and logs", messages: seeds, cache: cache)
         sessions.register(model, for: DemoChatTransport.storedId)
         if let prompt = scenario.autoPrompt {
             Task {
@@ -259,4 +293,16 @@ enum ChatLaunch {
         return scenario == .empty ? .new("demo") : .session(DemoChatTransport.storedId)
     }
     #endif
+}
+
+/// Issue #15: the text of the "New Messages" pill.
+enum ChatNewMessages {
+    static func title(_ count: Int) -> String {
+        count == 1 ? "1 New Message" : "\(count) New Messages"
+    }
+
+    /// VoiceOver reads it once after the update.
+    static func spoken(_ count: Int) -> String {
+        count == 1 ? "1 new message" : "\(count) new messages"
+    }
 }

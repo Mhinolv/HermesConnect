@@ -1,6 +1,16 @@
 #if DEBUG
 import Foundation
 import HermesKit
+import UserNotifications
+
+/// DEBUG only: a notification center with a fixed permission, for the issue #15 screenshots.
+struct DemoNotificationCenter: NotificationCentering {
+    var status: UNAuthorizationStatus
+    func authorizationStatus() async -> UNAuthorizationStatus { status }
+    func requestAuthorization(options _: UNAuthorizationOptions) async throws -> Bool { status == .authorized }
+    func add(_: UNNotificationRequest) async throws {}
+    func setBadgeCount(_: Int) async throws {}
+}
 
 /// DEBUG only: a "Demo conversation" that replays fixture gateway events, so the chat screen
 /// runs on the Simulator with no server. Start it with the launch environment `HERMES_DEMO=<scenario>`.
@@ -43,6 +53,14 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         /// Issue #11: the same thread with the tapback capsule open on a reply.
         case tapbacksPicker = "tapbacks-picker"
 
+        /// Issue #15: the seeded thread shows "Updating…" for 4 s, then 2 missed messages arrive.
+        case catchUp = "catch-up"
+        /// Issue #15: the same catch-up while the owner reads older messages: the "New Messages" pill shows.
+        case catchUpPill = "catch-up-pill"
+        /// Issue #15: Settings > Notifications. `notifications-off` adds the "Notifications Off" row.
+        case notificationSettings = "notifications"
+        case notificationsOff = "notifications-off"
+
         static var current: Scenario? {
             ProcessInfo.processInfo.environment["HERMES_DEMO"].flatMap(Scenario.init(rawValue:))
         }
@@ -53,7 +71,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             case .streaming: "What's the weather in Austin this weekend?"
             case .failed: "Can you check the server logs?"
             case .live, .thread, .empty, .list, .listEmpty, .listLoading, .voice, .recording, .hold, .paused,
-                 .attachments, .voiceReplies, .voiceRepliesPaused, .tapbacks, .tapbacksPicker: nil
+                 .attachments, .voiceReplies, .voiceRepliesPaused, .tapbacks, .tapbacksPicker, .catchUp, .catchUpPill,
+                 .notificationSettings, .notificationsOff: nil
             }
         }
 
@@ -73,6 +92,12 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
 
         /// `true` for the tapback scenarios (issue #11).
         var showsTapbacks: Bool { self == .tapbacks || self == .tapbacksPicker }
+
+        /// `true` for the catch-up scenarios (issue #15).
+        var catchesUp: Bool { self == .catchUp || self == .catchUpPill }
+
+        /// `true` for the Settings > Notifications scenarios (issue #15).
+        var showsNotificationSettings: Bool { self == .notificationSettings || self == .notificationsOff }
     }
 
     let scenario: Scenario
@@ -165,9 +190,34 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         + "on Saturday morning instead of Friday, because the elevator is booked on Friday afternoon."
 
     /// The demo has no server transcript. The seeded messages stay as they are.
+    /// Issue #15: the catch-up scenarios return the seeded thread plus 2 missed messages after 4 s.
     func history(sessionId _: String) async throws -> [TranscriptMessage] {
-        throw DemoFailure()
+        guard scenario.catchesUp else { throw DemoFailure() }
+        try await Task.sleep(for: .seconds(4))
+        let seeds = seedMessages(now: Self.seedDate)
+        var rows = seeds.map { message in
+            var row = TranscriptMessage(role: message.role == .user ? "user" : "assistant", text: message.text,
+                                        rowId: message.userRowId ?? seeds.first { $0.id == message.promptId }
+                                            .flatMap(\.userRowId).map { $0 + 1 })
+            row.timestamp = message.date.timeIntervalSince1970
+            return row
+        }
+        let late = Self.seedDate.addingTimeInterval(-60)
+        for (index, (role, text)) in Self.missedMessages.enumerated() {
+            var row = TranscriptMessage(role: role, text: text, rowId: 107 + index)
+            row.timestamp = late.addingTimeInterval(Double(index) * 20).timeIntervalSince1970
+            rows.append(row)
+        }
+        return rows
     }
+
+    /// One date for the seeded thread, so the catch-up history keeps the same times.
+    static let seedDate = Date()
+
+    static let missedMessages = [
+        ("user", "Cron: morning digest"),
+        ("assistant", "Your digest: 3 new emails, rain after 4 PM, and the movers confirmed Saturday at 9 AM."),
+    ]
 
     // MARK: Session list
 

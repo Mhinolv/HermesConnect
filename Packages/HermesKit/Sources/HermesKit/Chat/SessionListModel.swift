@@ -13,6 +13,9 @@ public final class SessionListModel {
     /// `true` after the first `session.list` answer, or when the cache has rows.
     public private(set) var hasLoaded: Bool
     public private(set) var isRefreshing = false
+    /// Issue #15: the stored id of the chat on the screen. A refresh never gives it the blue dot.
+    /// It follows the chat, so a New Chat counts as soon as `session.create` gives it an id (QA #38 defect 2).
+    public var openSessionId: String? { openChatModel?.storedSessionId }
 
     @ObservationIgnored private let transport: any SessionsTransport
     @ObservationIgnored private let chatTransport: any ChatTransport
@@ -20,6 +23,7 @@ public final class SessionListModel {
     @ObservationIgnored private var chats: [String: ChatViewModel] = [:]
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
+    @ObservationIgnored private weak var openChatModel: ChatViewModel?
 
     /// `transport` and `chatTransport` are the same `LiveChatTransport` in the app. Tests give fakes.
     public init(transport: any SessionsTransport, chatTransport: any ChatTransport, cache: any SessionCacheStore) {
@@ -63,15 +67,47 @@ public final class SessionListModel {
         defer { isRefreshing = false }
         guard let rows = try? await transport.fetchSessions() else { return }
         let unread = Set(sessions.filter(\.isUnread).map(\.id))
-        let merged = rows.map { row in
-            var row = row
-            if unread.contains(row.id) { row.isUnread = true }
-            return row
-        }
+        // Issue #15: a row with more messages than the shown row has new content (blue dot).
+        let newContent = Set(CatchUp.changedSessions(cached: sessions, fresh: rows))
+        let merged = CatchUp.markUnread(rows, unread: unread, newContent: newContent, openSessionId: openSessionId)
         hasLoaded = true
         guard merged != sessions else { return }
         sessions = merged
         cache.saveSessions(merged)
+    }
+
+    /// The chat screen of `chat` appeared. Its session loses the blue dot and gets no new one.
+    public func openChat(_ chat: ChatViewModel?) {
+        openChatModel = chat
+        if let id = chat?.storedSessionId { markRead(id) }
+    }
+
+    /// The chat screen of `chat` went away. Another chat that is open stays open.
+    public func closeChat(_ chat: ChatViewModel) {
+        if openChatModel === chat { openChatModel = nil }
+    }
+
+    /// Issue #15: the number of sessions with the blue dot. The app badge shows it.
+    public var unreadCount: Int { sessions.filter(\.isUnread).count }
+
+    /// Issue #15: the owner opened the session. Its blue dot goes away.
+    public func markRead(_ id: String) {
+        guard let index = sessions.firstIndex(where: { $0.id == id }), sessions[index].isUnread else { return }
+        sessions[index].isUnread = false
+        cache.saveSessions(sessions)
+    }
+
+    /// Issue #15: one background catch-up (BGAppRefresh). It posts the notifications and sets the badge.
+    /// Then the list shows the new rows and dots. Returns `nil` when `session.list` fails.
+    @discardableResult
+    public func catchUp(showsPreview: Bool, notifier: any LocalNotifying) async -> CatchUpResult? {
+        cache.saveSessions(sessions)
+        let refresher = CatchUpRefresher(sessions: transport, chats: chatTransport, cache: cache, notifier: notifier)
+        guard let result = try? await refresher.run(showsPreview: showsPreview, openSessionId: openSessionId)
+        else { return nil }
+        sessions = cache.loadSessions()
+        hasLoaded = true
+        return result
     }
 
     /// `session.most_recent`, or `nil` when the server has no session or does not answer.

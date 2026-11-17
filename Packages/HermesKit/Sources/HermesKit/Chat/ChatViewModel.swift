@@ -29,6 +29,11 @@ public final class ChatViewModel {
     /// Issue #10: the reply to a voice memo whose audio just came. The screen plays it once when
     /// "Auto-Play Voice Replies" is on. Each new reply gets a new value.
     public private(set) var autoPlayReplyId: String?
+    /// Issue #15: `true` while `open()` merges the server history into cached messages ("Updating…").
+    public private(set) var isUpdating = false
+    /// Issue #15: the messages that the last history merge added, oldest first. The screen shows the
+    /// "N New Messages" pill and VoiceOver reads the count once. `clearNewMessages()` empties it.
+    public private(set) var newMessageIds: [String] = []
 
     @ObservationIgnored private var thread = ChatThread()
     @ObservationIgnored private let transport: any ChatTransport
@@ -160,7 +165,11 @@ public final class ChatViewModel {
 
     private func loadHistory() async {
         isLoadingHistory = messages.isEmpty
-        defer { isLoadingHistory = false }
+        isUpdating = !messages.isEmpty
+        defer {
+            isLoadingHistory = false
+            isUpdating = false
+        }
         do {
             // Always resume: the server reaps an idle live session 20 s after its socket drops.
             let live = try await resumedSession()
@@ -171,8 +180,18 @@ public final class ChatViewModel {
             // A running turn owns the end of the thread. Its `message.complete` brings the text.
             guard thread.turn == .idle else { return }
             let history = ChatHistory.messages(from: transcript, reusing: thread.messages, fallbackDate: now())
-            if thread.replaceHistory(history) { redrawNow() }
+            let shown = Set(thread.messages.map(\.id))
+            if thread.replaceHistory(history) {
+                // All new rows reach the screen in one update (issue #15).
+                let added = thread.messages.map(\.id).filter { !shown.contains($0) }
+                if !shown.isEmpty, !added.isEmpty { newMessageIds = added }
+                redrawNow()
+            }
             saveTranscript()
+        } catch where Self.isSessionNotFound(error) && !thread.messages.isEmpty {
+            // QA #38 defect 1: the server lost a row that has messages on the screen. Keep them and
+            // start a new session in its place. The chat stays open.
+            await replaceLostSession()
         } catch where Self.isSessionNotFound(error) {
             // A dead id (for example a New Chat that never got a prompt): never resume it again.
             needsOpen = false
@@ -183,6 +202,31 @@ public final class ChatViewModel {
         } catch {
             needsOpen = true
         }
+    }
+
+    /// `session.create` in place of a stored session that the server lost (4007). The thread, the cache and
+    /// the draft move to the new stored id. If the create fails, the next connect tries the open again.
+    private func replaceLostSession() async {
+        let lost = storedSessionId
+        let draft = self.draft
+        session = nil
+        sessionIsStale = false
+        storedSessionId = nil
+        do {
+            _ = try await currentSession()
+            needsOpen = false
+            log.notice("session not found: started a new session")
+            saveTranscript()
+            if !draft.isEmpty { updateDraft(draft) }
+        } catch {
+            if storedSessionId == nil { storedSessionId = lost }
+            needsOpen = true
+        }
+    }
+
+    /// The screen showed the new messages (the owner tapped the pill or scrolled to them).
+    public func clearNewMessages() {
+        if !newMessageIds.isEmpty { newMessageIds = [] }
     }
 
     /// `session.resume` error 4007: no stored session with this id (`methods_session.py`, protocol 3.4).
@@ -247,7 +291,9 @@ public final class ChatViewModel {
             changed(thread.connectionLost(now: now(), makeId: makeId))
         case .state(.connected):
             // Back after a drop or an offline open: resume and catch up with the history.
-            if needsOpen, storedSessionId != nil {
+            // Issue #15: a session that was open before also catches up. A reconnect after a suspend
+            // can replace the client with no `.disconnected` event.
+            if needsOpen || session != nil, storedSessionId != nil {
                 Task { await open() }
             }
         case .state, .serverRequest:
