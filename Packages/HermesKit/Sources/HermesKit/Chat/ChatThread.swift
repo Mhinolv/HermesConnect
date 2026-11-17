@@ -64,6 +64,20 @@ public struct ChatThread: Sendable, Equatable {
         if upload == .attached { messages[index].attachments[item].attachedSessionId = sessionId }
     }
 
+    /// A voice memo: the bubble shows at once with "Transcribing…" (issue #9).
+    public mutating func addOutgoingVoice(id: String, memo: VoiceMemo, date: Date) {
+        var memo = memo
+        memo.transcript = .pending
+        messages.append(ChatMessage(id: id, role: .user, text: "", date: date, delivery: .sending, voice: memo))
+    }
+
+    /// A transcript came, or the transcription failed. A transcript becomes the text of the voice turn.
+    public mutating func setTranscript(_ transcript: VoiceTranscript, id: String) {
+        guard let index = index(of: id), messages[index].voice != nil else { return }
+        messages[index].voice?.transcript = transcript
+        messages[index].text = transcript.text ?? ""
+    }
+
     public mutating func setDelivery(_ delivery: ChatMessage.Delivery, id: String, userRowId: Int? = nil) {
         guard let index = index(of: id) else { return }
         messages[index].delivery = delivery

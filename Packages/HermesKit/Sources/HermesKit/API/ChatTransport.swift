@@ -27,6 +27,22 @@ public protocol ChatTransport: Sendable {
     func stopReply(sessionId: String) async throws -> Bool
     /// `session.history` with the live id: the whole transcript, oldest first (docs/hermes-protocol.md 3.4).
     func history(sessionId: String) async throws -> [TranscriptMessage]
+    /// `prompt.submit` with `voice_turn: true`: the text is the transcript of a voice memo (protocol 3.7, 3.9).
+    func submitVoicePrompt(sessionId: String, text: String, retryBeforeRowId: Int?) async throws -> Int?
+    /// `POST /api/audio/transcribe` (docs/hermes-protocol.md 3.9). Returns the trimmed transcript.
+    func transcribe(audio: Data, mimeType: String) async throws -> String
+}
+
+/// Transports with no voice support (offline transport, older fakes) fail voice memos.
+/// The memo then shows "Not Delivered" and stays, so the owner can try again.
+extension ChatTransport {
+    public func submitVoicePrompt(sessionId _: String, text _: String, retryBeforeRowId _: Int?) async throws -> Int? {
+        throw VoiceMemoError.unsupported
+    }
+
+    public func transcribe(audio _: Data, mimeType _: String) async throws -> String {
+        throw VoiceMemoError.unsupported
+    }
 }
 
 /// What the session list needs from the gateway (issue #7). `GatewayClient` and `LiveChatTransport` conform.
@@ -61,6 +77,17 @@ extension GatewayClient: ChatTransport {
         let params = PromptSubmitParams(sessionId: sessionId, text: text, truncateBeforeRowId: retryBeforeRowId,
                                         confirmTruncate: retryBeforeRowId == nil ? nil : true)
         return try await submitPrompt(params).userRowId
+    }
+
+    public func submitVoicePrompt(sessionId: String, text: String, retryBeforeRowId: Int?) async throws -> Int? {
+        let params = PromptSubmitParams(sessionId: sessionId, text: text, voiceTurn: true,
+                                        truncateBeforeRowId: retryBeforeRowId,
+                                        confirmTruncate: retryBeforeRowId == nil ? nil : true)
+        return try await submitPrompt(params).userRowId
+    }
+
+    public func transcribe(audio: Data, mimeType: String) async throws -> String {
+        try await HermesRESTClient(endpoint: endpoint).transcribe(audio: audio, mimeType: mimeType)
     }
 
     public func stopReply(sessionId: String) async throws -> Bool {

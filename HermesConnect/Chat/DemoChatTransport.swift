@@ -24,6 +24,14 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case listEmpty = "list-empty"
         /// The session list before the first answer, with no cache (placeholder rows).
         case listLoading = "list-loading"
+        /// Seeded thread with voice memos in each state (issue #9). The composer shows the mic.
+        case voice
+        /// Seeded thread with hands-free recording at 0:12 (Cancel, timer, waveform, Send).
+        case recording
+        /// Seeded thread with a held recording and the finger part way to cancel ("Slide to Cancel").
+        case hold
+        /// Seeded thread with a recording that a phone call paused.
+        case paused
         /// Issue #8: photo, file and location bubbles, a failed upload, rings, and 3 items in the strip.
         case attachments
 
@@ -36,7 +44,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             switch self {
             case .streaming: "What's the weather in Austin this weekend?"
             case .failed: "Can you check the server logs?"
-            case .live, .thread, .empty, .list, .listEmpty, .listLoading, .attachments: nil
+            case .live, .thread, .empty, .list, .listEmpty, .listLoading, .voice, .recording, .hold, .paused,
+                 .attachments: nil
             }
         }
 
@@ -47,6 +56,9 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         static var search: String? {
             ProcessInfo.processInfo.environment["HERMES_DEMO_SEARCH"]
         }
+
+        /// `true` for the scenarios that show the recording bar with a fake recorder.
+        var recordsAtLaunch: Bool { self == .recording || self == .hold || self == .paused }
     }
 
     let scenario: Scenario
@@ -92,6 +104,20 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         lock.withLock { stopped = true }
         return true
     }
+
+    func submitVoicePrompt(sessionId: String, text: String, retryBeforeRowId: Int?) async throws -> Int? {
+        try await submitPrompt(sessionId: sessionId, text: text, retryBeforeRowId: retryBeforeRowId)
+    }
+
+    /// A fixed transcript after a short wait. The demo does not read the clip.
+    func transcribe(audio _: Data, mimeType _: String) async throws -> String {
+        try await Task.sleep(for: .milliseconds(1500))
+        if scenario == .failed { throw DemoFailure() }
+        return Self.memoTranscript
+    }
+
+    static let memoTranscript = "Remind me to call Sam at three about the lease, and ask whether the movers can come "
+        + "on Saturday morning instead of Friday, because the elevator is booked on Friday afternoon."
 
     /// The demo has no server transcript. The seeded messages stay as they are.
     func history(sessionId _: String) async throws -> [TranscriptMessage] {
@@ -212,6 +238,30 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                             + "to see only recent lines.",
                         date: recent.addingTimeInterval(15), reply: .complete, promptId: "d5"),
         ]
+        if scenario == .voice || scenario.recordsAtLaunch {
+            let late = now.addingTimeInterval(-3 * 60)
+            func memo(_ name: String, _ seconds: TimeInterval, _ transcript: VoiceTranscript) -> VoiceMemo {
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).m4a")
+                let levels = (0..<VoiceMemoLimits.waveformBars).map { index in
+                    Float(0.25 + 0.6 * abs(sin(Double(index) * 0.7 + seconds)))
+                }
+                return VoiceMemo(fileURL: url, duration: seconds, waveform: levels, transcript: transcript)
+            }
+            messages.append(ChatMessage(id: "v1", role: .user, text: Self.memoTranscript, date: late,
+                                        delivery: .delivered, userRowId: 107,
+                                        voice: memo("v1", 14, .done(Self.memoTranscript))))
+            messages.append(ChatMessage(id: "v2", role: .assistant,
+                                        text: "I'll remind you at 2:55 PM. I also asked the movers about Saturday.",
+                                        date: late.addingTimeInterval(8), reply: .complete, promptId: "v1"))
+            messages.append(ChatMessage(id: "v3", role: .user, text: "", date: late.addingTimeInterval(60),
+                                        delivery: .failed, voice: memo("v3", 3, .empty)))
+            messages.append(ChatMessage(id: "v4", role: .user, text: "", date: late.addingTimeInterval(90),
+                                        delivery: .failed, voice: memo("v4", 22, .failed)))
+            if scenario == .voice {
+                messages.append(ChatMessage(id: "v5", role: .user, text: "", date: late.addingTimeInterval(120),
+                                            delivery: .sending, voice: memo("v5", 9, .pending)))
+            }
+        }
         if scenario == .failed {
             messages.append(ChatMessage(id: "d7", role: .user, text: "Summarize today's inbox",
                                         date: recent.addingTimeInterval(90), delivery: .delivered, userRowId: 107))
@@ -221,6 +271,54 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         }
         if scenario == .attachments { messages += AttachmentDemo.messages(now: now) }
         return messages
+    }
+}
+/// DEBUG only: a recorder with no microphone. Time starts at 0:12 and the levels are a fixed wave.
+@MainActor
+final class DemoVoiceRecorder: VoiceRecording {
+    private var startedAt: Date?
+    private var pausedAt: TimeInterval?
+    private var ticks = 0
+    var onInterruption: (() -> Void)?
+
+    var access: MicrophoneAccess { .granted }
+    func requestAccess() async -> Bool { true }
+    func start(url _: URL) throws { startedAt = Date() }
+    func pause() { pausedAt = currentTime }
+    func stop() -> TimeInterval { defer { startedAt = nil }; return currentTime }
+    func discard() { startedAt = nil }
+
+    var currentTime: TimeInterval {
+        if let pausedAt { return pausedAt }
+        guard let startedAt else { return 0 }
+        return 12 + Date().timeIntervalSince(startedAt)
+    }
+
+    func level() -> Float {
+        ticks += 1
+        return -40 + 34 * Float(abs(sin(Double(ticks) * 0.45)) * (0.5 + 0.5 * abs(cos(Double(ticks) * 0.13))))
+    }
+
+    /// Puts the controller in the state of the scenario.
+    static func start(_ scenario: DemoChatTransport.Scenario, on controller: VoiceMemoController) {
+        switch scenario {
+        case .recording:
+            controller.startTapMode()
+        case .hold:
+            controller.press()
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(400))
+                controller.drag(dx: -34)
+            }
+        case .paused:
+            controller.startTapMode()
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(1200))
+                controller.interrupt()
+            }
+        default:
+            break
+        }
     }
 }
 #endif

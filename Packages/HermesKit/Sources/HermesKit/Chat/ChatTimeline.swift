@@ -9,6 +9,8 @@ public struct ChatRow: Sendable, Equatable, Identifiable {
         case notDelivered
         case replyFailed
         case stopped
+        /// A voice memo with no speech in it. No turn was sent (issue #9).
+        case noSpeech
 
         public var text: String {
             switch self {
@@ -17,10 +19,11 @@ public struct ChatRow: Sendable, Equatable, Identifiable {
             case .notDelivered: "Not Delivered"
             case .replyFailed: "Reply failed. Tap to retry."
             case .stopped: "Stopped"
+            case .noSpeech: "No speech found."
             }
         }
 
-        public var isError: Bool { self == .notDelivered || self == .replyFailed }
+        public var isError: Bool { self == .notDelivered || self == .replyFailed || self == .noSpeech }
     }
 
     public var message: ChatMessage
@@ -60,6 +63,7 @@ public enum ChatTimeline {
     private static func footnote(for message: ChatMessage, isLastOutgoing: Bool) -> ChatRow.Footnote? {
         switch message.role {
         case .user:
+            if message.voice?.transcript == .empty { return .noSpeech }
             switch message.delivery {
             case .failed: return .notDelivered
             case .sending: return isLastOutgoing ? .sending : nil
@@ -103,6 +107,14 @@ public enum ChatTimeline {
         let time = row.message.date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, locale: locale,
                                                                calendar: calendar, timeZone: calendar.timeZone))
         var parts = [sender]
+        if let voice = row.message.voice {
+            parts.append("Voice memo, \(VoiceMemoFormat.spokenDuration(voice.duration))")
+            switch voice.transcript {
+            case .pending: parts.append("Transcribing")
+            case .failed: parts.append("Couldn't transcribe")
+            case .done, .empty: break
+            }
+        }
         if !row.message.text.isEmpty { parts.append(row.message.text) }
         parts.append(time)
         if let footnote = row.footnote, footnote != .sending, footnote != .delivered { parts.append(footnote.text) }
