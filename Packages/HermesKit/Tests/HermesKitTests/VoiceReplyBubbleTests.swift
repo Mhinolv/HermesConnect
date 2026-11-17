@@ -157,11 +157,15 @@ private func tempFolder() -> URL {
         #expect(shown.map(\.id) == ["r"])
     }
 
-    @Test func preparingShowsTheTextBubbleThenThePreparingBubble() {
+    /// QA #54 defect 1: no empty audio bubble. The text bubble has a caption row under it.
+    @Test func preparingIsTheTextBubbleWithAPreparingCaption() {
         let shown = parts(reply(.preparing))
-        #expect(shown.map(\.content) == [.text, .spokenReply])
-        #expect(shown.map(\.id) == ["r", "r#speech"])
-        #expect(shown[0].row.hasTail == false)
+        #expect(shown.map(\.content) == [.text])
+        #expect(shown.map(\.id) == ["r"])
+        #expect(shown[0].row.hasTail)
+        #expect(shown[0].row.footnote?.text == "Preparing audio…")
+        #expect(shown[0].row.footnote?.isError == false)
+        #expect(ChatBubbleParts.accessibilityLabel(for: shown[0]).contains("Preparing audio…"))
     }
 
     @Test func readyIsOneVoiceBubbleWithTheRowId() {
@@ -174,11 +178,13 @@ private func tempFolder() -> URL {
         #expect(ChatBubbleParts.accessibilityLabel(for: shown[0]) == "Hermes voice reply, 0:07, Noted. Saved it.")
     }
 
-    @Test func failedKeepsTheTextReadableWithRetry() {
+    /// QA #54 defect 1: the failed state is the text bubble with a red retry caption, no empty bubble.
+    @Test func failedIsTheTextBubbleWithARetryCaption() {
         let shown = parts(reply(.failed))
-        #expect(shown.map(\.content) == [.text, .spokenReply])
-        #expect(shown.last?.row.footnote == .audioUnavailable)
-        #expect(shown.first?.row.footnote == nil)
+        #expect(shown.map(\.content) == [.text])
+        #expect(shown.map(\.id) == ["r"])
+        #expect(shown[0].row.footnote == .audioUnavailable)
+        #expect(ChatBubbleParts.accessibilityLabel(for: shown[0]).contains("Audio unavailable. Tap to retry."))
     }
 
     @Test func tapbackOnTheVoiceBubbleIsRead() {
@@ -212,9 +218,9 @@ private func tempFolder() -> URL {
                         reply: .complete, promptId: "u2"),
         ]
         let parts = ChatBubbleParts.parts(for: ChatTimeline.rows(for: messages))
-        #expect(parts.map(\.id) == ["u1", "u2", "a1", "a1#speech", "a2"])
-        #expect(parts[4].row.timeHeader != nil)
+        #expect(parts.map(\.id) == ["u1", "u2", "a1", "a2"])
+        #expect(parts[3].row.timeHeader != nil)
         let space = parts.indices.map { ChatBubbleParts.spaceAbove(parts[$0], after: $0 > 0 ? parts[$0 - 1] : nil) }
-        #expect(space == [10, 2, 10, 2, 10])
+        #expect(space == [10, 2, 10, 10])
     }
 }

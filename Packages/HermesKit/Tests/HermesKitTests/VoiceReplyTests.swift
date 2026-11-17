@@ -351,11 +351,12 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         let transport = FakeSpeakTransport()
         let vm = model(transport)
         let id = try await voiceTurn(vm)
-        // The audio bubble shows at once with "Preparing audio…".
+        // "Preparing audio…" shows at once under the text bubble (QA #54: no empty audio bubble).
         #expect(vm.messages.last?.spokenReply == .preparing)
         #expect(vm.autoPlayReplyId == nil)
         let parts = ChatBubbleParts.parts(for: ChatTimeline.rows(for: vm.messages))
-        #expect(parts.suffix(2).map(\.content) == [.text, .spokenReply])
+        #expect(parts.last?.content == .text)
+        #expect(parts.last?.row.footnote?.text == "Preparing audio…")
 
         try await waitUntil { vm.messages.last?.spokenReply?.audio != nil }
         #expect(vm.messages.last?.spokenReply == .ready(VoiceReplyAudio(fileURL: replyURL, duration: 24)))

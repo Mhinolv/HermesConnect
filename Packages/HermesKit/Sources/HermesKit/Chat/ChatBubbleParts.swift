@@ -7,9 +7,9 @@ public struct ChatBubblePart: Sendable, Equatable, Identifiable {
     public enum Content: Sendable, Equatable {
         case text
         case attachment(ChatAttachment)
-        /// Issue #10: the audio bubble of a reply to a voice memo. Issue #49 (owner decision): with ready audio
-        /// it is the only bubble of the reply, and the reply text shows under it. While the audio is on its way,
-        /// or after it failed, it shows under the text bubble.
+        /// Issue #10: the audio bubble of a reply to a voice memo. Issue #49 (owner decision): it shows only
+        /// with ready audio, as the only bubble of the reply, with the reply text under it. While the audio is
+        /// on its way, or after it failed, the text bubble shows with a caption row (QA #54).
         case spokenReply
     }
 
@@ -29,12 +29,10 @@ public enum ChatBubbleParts {
         let items = row.message.attachments
         var parts: [ChatBubblePart]
         if let spoken = row.message.spokenReply, spoken.audio != nil, items.isEmpty {
-            // Issue #49: one voice bubble with the row id, so the row reloads in place and the scroll does not jump.
+            // Issue #49: one voice bubble with the row id. The text bubble had the same id, so the row reloads
+            // in place and the scroll does not jump. "Preparing audio…" and the retry line are the text
+            // bubble footnote (QA #54), so there is no empty audio bubble.
             return [ChatBubblePart(row: row, content: .spokenReply, id: row.id)]
-        } else if row.message.spokenReply != nil {
-            // The text bubble keeps the row id, so it does not change when the audio bubble comes.
-            parts = [ChatBubblePart(row: row, content: .text, id: row.id),
-                     ChatBubblePart(row: row, content: .spokenReply, id: "\(row.id)#speech")]
         } else if items.isEmpty {
             return [ChatBubblePart(row: row, content: .text, id: row.id)]
         } else {

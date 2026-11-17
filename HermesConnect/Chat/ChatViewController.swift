@@ -765,7 +765,7 @@ final class ChatViewController: MessagesViewController {
         cell.accessibilityLabel = ChatBubbleParts.accessibilityLabel(for: part)
         cell.accessibilityHint = switch row.footnote {
         case .notDelivered, .noSpeech: "Double-tap for options."
-        case .replyFailed: "Double-tap to retry."
+        case .replyFailed, .audioUnavailable: "Double-tap to retry."
         default: nil
         }
         var actions: [UIAccessibilityCustomAction] = []
@@ -1118,6 +1118,9 @@ extension ChatViewController: MessagesDataSource {
 
     func messageBottomLabelAttributedText(for message: MessageType, at _: IndexPath) -> NSAttributedString? {
         guard let footnote = row(for: message)?.footnote else { return nil }
+        if ChatCaptionRow.uses(footnote) {
+            return ChatCaptionRow.text(footnote, font: ChatLabelStyle.font(.caption2, traitCollection))
+        }
         return NSAttributedString(string: footnote.text, attributes: [
             .font: ChatLabelStyle.font(.caption2, traitCollection),
             .foregroundColor: footnote.isError ? UIColor.systemRed : UIColor.secondaryLabel,
@@ -1166,6 +1169,7 @@ extension ChatViewController: MessagesDataSource {
                   in messagesCollectionView: MessagesCollectionView) -> UICollectionViewCell? {
         let cell = messagesCollectionView.dequeueReusableCell(ChatTextCell.self, for: indexPath)
         cell.configure(with: message, at: indexPath, and: messagesCollectionView)
+        cell.showsCaptionSpinner(row(for: message)?.footnote == .preparingAudio)
         cell.openLink = { url in UIApplication.shared.open(url) }
         return cell
     }
@@ -1182,7 +1186,13 @@ extension ChatViewController: MessagesLayoutDelegate {
     func messageBottomLabelHeight(for message: MessageType, at indexPath: IndexPath,
                                   in _: MessagesCollectionView) -> CGFloat {
         guard let row = row(for: message) else { return 0 }
-        let footnote = row.footnote == nil ? 0 : ChatLabelStyle.height(.caption2, traitCollection, padding: 4)
+        var footnote = row.footnote == nil ? 0 : ChatLabelStyle.height(.caption2, traitCollection, padding: 4)
+        // QA #54: the caption row of a reply wraps at large text sizes. The retry row is a 44 pt tap target.
+        if let caption = row.footnote, ChatCaptionRow.uses(caption) {
+            // The label spans the row and has an 18 pt leading inset. 8 pt more keeps a margin.
+            let width = messagesCollectionView.bounds.width - 18 - 8
+            footnote = ChatCaptionRow.height(caption, font: ChatLabelStyle.font(.caption2, traitCollection), width: width)
+        }
         return footnote + (transcript(for: row, message: message, at: indexPath)?.height ?? 0)
     }
 

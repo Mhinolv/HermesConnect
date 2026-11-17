@@ -189,23 +189,90 @@ import UIKit
         #expect(shown[1] is ChatTextCell)
     }
 
-    @Test func preparingReplyShowsTheTextBubbleAndThePreparingBubble() throws {
-        let shown = cells(makeController(try reply(.preparing)))
-        #expect(shown.count == 3)
-        #expect(shown[1] is ChatTextCell)
-        let voice = try #require(shown[2] as? ChatVoiceCell)
-        #expect(voice.transcriptLabel.text == "Preparing audio…")
-        #expect(!voice.seeks)
+    /// All views under a view, the view too.
+    private func allViews(_ view: UIView) -> [UIView] {
+        [view] + view.subviews.flatMap(allViews)
     }
 
-    @Test func failedReplyKeepsTheTextWithTheRetryBubble() throws {
-        let controller = makeController(try reply(.failed))
+    /// QA #54 defect 1: no empty grey bubble. A spinner and "Preparing audio…" show under the text bubble.
+    @Test func preparingReplyIsTheTextBubbleWithASpinnerCaption() throws {
+        let shown = cells(makeController(try reply(.preparing)))
+        #expect(shown.count == 2, "bubbles: \(shown.count)")
+        let text = try #require(shown.last as? ChatTextCell)
+        #expect(text.messageBottomLabel.text?.contains("Preparing audio…") == true)
+        let spinner = allViews(text).compactMap { $0 as? UIActivityIndicatorView }.first { !$0.isHidden }
+        #expect(spinner?.isAnimating == true, "no spinner in the caption row")
+        // The spinner sits in the caption row, at its leading end.
+        if let spinner {
+            let frame = spinner.convert(spinner.bounds, to: text.contentView)
+            #expect(text.messageBottomLabel.frame.insetBy(dx: 0, dy: -4).contains(CGPoint(x: frame.midX, y: frame.midY)))
+        }
+    }
+
+    /// QA #54 defect 1: the failed state is the text bubble with a red retry caption that is a 44 pt target.
+    @Test func failedReplyIsTheTextBubbleWithARetryCaption() async throws {
+        let folder = self.folder
+        let model = ChatViewModel(transport: ToneSpeakingTransport(), messages: try reply(.failed),
+                                  saveSpeech: { try VoiceReplyFiles.save($0, in: folder) })
+        let controller = ChatViewController(model: model, recorder: FakeVoiceRecorder(), voiceFolder: folder)
+        controller.autoPlayEnabled = { false }
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        controller.view.layoutIfNeeded()
         let shown = cells(controller)
-        #expect(shown.count == 3)
-        #expect(shown[1] is ChatTextCell)
-        let voice = try #require(shown[2] as? ChatVoiceCell)
-        #expect(voice.accessibilityLabel == "Hermes voice reply, Audio unavailable. Tap to retry.")
-        #expect(voice.accessibilityHint == "Double-tap to retry.")
+        #expect(shown.count == 2, "bubbles: \(shown.count)")
+        let text = try #require(shown.last as? ChatTextCell)
+        let caption = try #require(text.messageBottomLabel.attributedText)
+        #expect(caption.string.contains("Audio unavailable. Tap to retry."))
+        var hasIcon = false
+        caption.enumerateAttribute(.attachment, in: NSRange(location: 0, length: caption.length)) { value, _, _ in
+            if let image = (value as? NSTextAttachment)?.image, image.size.height > 1 { hasIcon = true }
+        }
+        #expect(hasIcon, "no arrow.clockwise in the caption row")
+        let color = caption.attribute(.foregroundColor, at: caption.length - 1, effectiveRange: nil) as? UIColor
+        #expect(color == .systemRed)
+        #expect(text.messageBottomLabel.frame.height >= 44)
+        #expect(text.accessibilityLabel?.contains("Audio unavailable. Tap to retry.") == true)
+        #expect(text.accessibilityHint == "Double-tap to retry.")
+        // A tap on the row speaks again. Then the voice bubble shows in the same row.
+        controller.didTapMessageBottomLabel(in: text)
+        try await waitUntilReady(model)
+        controller.messagesCollectionView.layoutIfNeeded()
+        #expect(cells(controller).last is ChatVoiceCell)
+    }
+
+    /// QA #54 defect 1 at AX5: the caption row wraps and has room for every line. The spinner grows with the text.
+    @Test(arguments: [SpokenReply.failed, .preparing])
+    func captionRowFitsItsTextAtAX5(state: SpokenReply) throws {
+        let model = ChatViewModel(transport: OfflineChatTransport(), messages: try reply(state))
+        let controller = ChatViewController(model: model, recorder: FakeVoiceRecorder(), voiceFolder: folder)
+        controller.autoPlayEnabled = { false }
+        controller.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        controller.view.layoutIfNeeded()
+        let text = try #require(cells(controller).last as? ChatTextCell)
+        text.layoutIfNeeded()
+        let label = text.messageBottomLabel
+        let caption = try #require(label.attributedText)
+        let width = label.bounds.width - label.textInsets.left - label.textInsets.right
+        let needed = caption.boundingRect(with: CGSize(width: width, height: .greatestFiniteMagnitude),
+                                          options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil).height
+        #expect(label.bounds.height >= needed.rounded(.up), "row \(label.bounds.height), text \(needed)")
+        if state == .preparing {
+            let font = try #require(caption.attribute(.font, at: caption.length - 1, effectiveRange: nil) as? UIFont)
+            #expect(text.captionSpinner.frame.height >= font.capHeight, "spinner \(text.captionSpinner.frame.height)")
+        }
+    }
+
+    private func waitUntilReady(_ model: ChatViewModel) async throws {
+        for _ in 0..<400 {
+            if model.messages.last?.spokenReply?.audio != nil { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        Issue.record("the audio did not come")
     }
 
     @Test func readyReplyShowsTwoLinesOfTextUnderTheWaveform() throws {
@@ -312,7 +379,7 @@ import UIKit
         let collection = controller.messagesCollectionView
         collection.layoutIfNeeded()
         #expect(controller.isPinnedToBottom)
-        #expect(collection.numberOfSections == 33)
+        #expect(collection.numberOfSections == 32)
 
         await model.retrySpeech(id: "r")?.value
         #expect(model.messages.last?.spokenReply?.audio != nil)
