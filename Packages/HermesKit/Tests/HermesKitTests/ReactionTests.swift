@@ -155,6 +155,100 @@ private final class Ids: @unchecked Sendable {
         #expect(ack(thread) == .seen)
     }
 
+    /// QA #40 defect 1: a second prompt during a turn. Hermes queues it and runs it after the first.
+    @Test func aSecondPromptDuringATurnKeepsEachAckOnItsOwnPrompt() throws {
+        var (thread, ids) = delivered("Book the train")
+        thread.apply(.messageStart(MessageStartPayload()), now: base, makeId: ids.callAsFunction)
+        thread.addOutgoing(id: "p2", text: "Thanks", date: base)
+        thread.beginTurn(promptId: "p2")
+        thread.setDelivery(.delivered, id: "p2", userRowId: 9)
+        #expect(ack(thread) == .seen)
+        #expect(thread.message(id: "p2")?.agentAck == .seen)
+
+        thread.apply(try complete(#"{"text":"Booked.","status":"complete"}"#), now: base, makeId: ids.callAsFunction)
+        #expect(ack(thread) == .done)
+        #expect(thread.message(id: "p2")?.agentAck == .seen)
+
+        thread.apply(.messageStart(MessageStartPayload()), now: base, makeId: ids.callAsFunction)
+        #expect(thread.message(id: "p2")?.agentAck == .seen)
+        thread.apply(try complete(#"{"text":"Any time.","status":"complete"}"#), now: base, makeId: ids.callAsFunction)
+        #expect(ack(thread) == .done)
+        #expect(thread.message(id: "p2")?.agentAck == .thanks)
+    }
+
+    /// QA #40 defect 1: a second prompt that fails to send does not take the ack of the running turn.
+    @Test func aFailedSecondPromptDoesNotMoveTheAck() throws {
+        var (thread, ids) = delivered("Book the train")
+        thread.addOutgoing(id: "p2", text: "And a hotel", date: base)
+        thread.beginTurn(promptId: "p2")
+        thread.setDelivery(.failed, id: "p2")
+        thread.cancelWaiting()
+        thread.apply(try complete(#"{"text":"Booked.","status":"complete"}"#), now: base, makeId: ids.callAsFunction)
+        #expect(ack(thread) == .done)
+        #expect(thread.message(id: "p2")?.agentAck == nil)
+    }
+
+    /// QA #40 defect 2: the socket drops in a turn, the server ends it, and catch-up shows the reply.
+    @Test func catchUpReplacesTheThumbsDownOfADroppedTurn() {
+        var (thread, ids) = delivered("Check the disk")
+        thread.apply(.messageStart(MessageStartPayload()), now: base, makeId: ids.callAsFunction)
+        thread.connectionLost(now: base, makeId: ids.callAsFunction)
+        #expect(ack(thread) == .failed)
+        let transcript = [
+            TranscriptMessage(role: "user", text: "Check the disk", rowId: 7),
+            TranscriptMessage(role: "assistant", text: "The disk is 41% full.", rowId: 8),
+        ]
+        thread.replaceHistory(ChatHistory.messages(from: transcript, reusing: thread.messages, fallbackDate: base))
+        #expect(thread.messages.map(\.text) == ["Check the disk", "The disk is 41% full."])
+        #expect(ack(thread) == .done)
+    }
+
+    /// QA #40 defect 2: a prompt that thanks the agent gets the heart after catch-up.
+    @Test func catchUpGivesAHeartToAThanksPrompt() {
+        var (thread, ids) = delivered("thanks!")
+        thread.connectionLost(now: base, makeId: ids.callAsFunction)
+        let transcript = [TranscriptMessage(role: "user", text: "thanks!", rowId: 7),
+                          TranscriptMessage(role: "assistant", text: "Any time.", rowId: 8)]
+        thread.replaceHistory(ChatHistory.messages(from: transcript, reusing: thread.messages, fallbackDate: base))
+        #expect(ack(thread) == .thanks)
+    }
+
+    /// Catch-up with no reply in the history keeps the thumbs down. A prompt with no ack gets none.
+    @Test func catchUpWithNoReplyKeepsTheAck() {
+        var (thread, ids) = delivered("Check the disk")
+        thread.connectionLost(now: base, makeId: ids.callAsFunction)
+        let transcript = [TranscriptMessage(role: "user", text: "Check the disk", rowId: 7)]
+        thread.replaceHistory(ChatHistory.messages(from: transcript, reusing: thread.messages, fallbackDate: base))
+        #expect(ack(thread) == .failed)
+
+        let old = [TranscriptMessage(role: "user", text: "From the desktop", rowId: 1),
+                   TranscriptMessage(role: "assistant", text: "Ok", rowId: 2)]
+        #expect(ChatHistory.messages(from: old, fallbackDate: base).allSatisfy { $0.agentAck == nil })
+    }
+
+    /// A catch-up that answers a queued prompt ends its ack, so a later turn does not ack it.
+    @Test func catchUpEndsTheAckOfAnAnsweredPrompt() throws {
+        var (thread, ids) = delivered("Book the train")
+        thread.apply(try complete(#"{"text":"Booked.","status":"complete"}"#), now: base, makeId: ids.callAsFunction)
+        thread.addOutgoing(id: "p2", text: "And a hotel", date: base)
+        thread.beginTurn(promptId: "p2")
+        thread.setDelivery(.delivered, id: "p2", userRowId: 9)
+        #expect(thread.message(id: "p2")?.agentAck == .seen)
+        // The events of the p2 turn were lost. The history has its reply.
+        thread.connectionLost(now: base, makeId: ids.callAsFunction)
+        let transcript = [TranscriptMessage(role: "user", text: "Book the train", rowId: 7),
+                          TranscriptMessage(role: "assistant", text: "Booked.", rowId: 8),
+                          TranscriptMessage(role: "user", text: "And a hotel", rowId: 9),
+                          TranscriptMessage(role: "assistant", text: "Hotel booked.", rowId: 10)]
+        thread.replaceHistory(ChatHistory.messages(from: transcript, reusing: thread.messages, fallbackDate: base))
+        #expect(thread.message(id: "p2")?.agentAck == .done)
+        // A cron turn now acks nothing.
+        thread.apply(.messageStart(MessageStartPayload()), now: base, makeId: ids.callAsFunction)
+        thread.apply(try errorEvent(), now: base, makeId: ids.callAsFunction)
+        #expect(thread.message(id: "p2")?.agentAck == .done)
+        #expect(ack(thread) == .done)
+    }
+
     @Test func rules() {
         #expect(AgentAckRules.isSlashCommand("/help"))
         #expect(AgentAckRules.isSlashCommand("\n /model"))

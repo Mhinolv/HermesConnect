@@ -33,9 +33,10 @@ public struct ChatThread: Sendable, Equatable {
     private var replyId: String?
     /// The prompt of the current turn, for a reply retry.
     private var promptId: String?
-    /// Issue #11: the prompt that gets the agent ack of the running turn. A turn that the phone did not
-    /// start (cron, background) has none, so it never acks an old prompt.
-    private var ackPromptId: String?
+    /// Issue #11: the prompts from the phone whose turn did not end, oldest first. The first one gets the
+    /// ack of the running turn. Hermes queues a prompt sent during a turn, so each prompt keeps its own ack
+    /// (QA #40 defect 1). A turn that the phone did not start (cron, background) finds none.
+    private var ackPromptIds: [String] = []
     /// Text per `message.delta` segment.
     private var segments: [Int: String] = [:]
     /// UTF-16 units applied per segment, to drop chunks that come twice (`offset`).
@@ -93,8 +94,11 @@ public struct ChatThread: Sendable, Equatable {
         if let userRowId { messages[index].userRowId = userRowId }
         // Issue #11: Hermes took the prompt of the running turn. A send again or a failed send has no ack.
         switch delivery {
-        case .delivered: if id == ackPromptId, turn != .idle { setAck(.seen) }
-        case .sending, .failed: messages[index].agentAck = nil
+        case .delivered: if ackPromptIds.contains(id) { setAck(.seen, on: id) }
+        case .sending: messages[index].agentAck = nil
+        case .failed:
+            messages[index].agentAck = nil
+            ackPromptIds.removeAll { $0 == id }
         }
     }
 
@@ -119,9 +123,9 @@ public struct ChatThread: Sendable, Equatable {
         return true
     }
 
-    /// The ack of the running turn goes on its prompt. A slash command never gets one (D3).
-    private mutating func setAck(_ ack: AgentAck?) {
-        guard let ackPromptId, let index = index(of: ackPromptId), messages[index].role == .user else { return }
+    /// The ack goes on a prompt from the phone. A slash command never gets one (D3).
+    private mutating func setAck(_ ack: AgentAck?, on id: String?) {
+        guard let id, let index = index(of: id), messages[index].role == .user else { return }
         messages[index].agentAck = AgentAckRules.isSlashCommand(messages[index].text) ? nil : ack
     }
 
@@ -133,14 +137,13 @@ public struct ChatThread: Sendable, Equatable {
     /// A prompt went out. The Stop button shows until the turn ends.
     public mutating func beginTurn(promptId: String) {
         self.promptId = promptId
-        ackPromptId = promptId
+        if !ackPromptIds.contains(promptId) { ackPromptIds.append(promptId) }
         if turn == .idle { turn = .waiting }
     }
 
     /// `prompt.submit` failed before the turn started.
     public mutating func cancelWaiting() {
         guard turn == .waiting else { return }
-        setAck(nil)
         endTurn()
     }
 
@@ -162,6 +165,8 @@ public struct ChatThread: Sendable, Equatable {
             return true
         }
         let merged = history + kept
+        // Issue #11: a prompt that the history answers has ended. A later turn must not ack it.
+        ackPromptIds.removeAll { answered.contains($0) }
         guard merged != messages else { return false }
         messages = merged
         return true
@@ -177,7 +182,7 @@ public struct ChatThread: Sendable, Equatable {
             resetStream()
             replyId = nil
             turn = .typing
-            setAck(.seen)
+            setAck(.seen, on: ackPromptIds.first)
             return .structure
         case .messageDelta(let delta):
             return applyDelta(delta, now: now, makeId: makeId)
@@ -205,7 +210,11 @@ public struct ChatThread: Sendable, Equatable {
     public mutating func connectionLost(now: Date, makeId: () -> String) -> ChatThreadChange {
         guard turn != .idle else { return .none }
         if turn == .waiting, let promptId, message(id: promptId)?.delivery == .sending { return .none }
-        return fail(message: nil, now: now, makeId: makeId)
+        let change = fail(message: nil, now: now, makeId: makeId)
+        // Issue #11: the queued prompts get no events on this socket. Catch-up sets their final ack.
+        for id in ackPromptIds { setAck(.failed, on: id) }
+        ackPromptIds = []
+        return change
     }
 
     private mutating func applyDelta(_ delta: MessageDeltaPayload, now: Date, makeId: () -> String) -> ChatThreadChange {
@@ -297,12 +306,13 @@ public struct ChatThread: Sendable, Equatable {
 
     /// Issue #11: the final ack of the turn. `reply` is the state of the reply, `nil` for a turn with no text.
     private mutating func ackTurnEnd(_ reply: ChatMessage.Reply?) {
-        guard let ackPromptId, let prompt = message(id: ackPromptId) else { return }
-        setAck(AgentAckRules.ack(endingWith: reply, prompt: prompt.text))
+        guard !ackPromptIds.isEmpty else { return }
+        let id = ackPromptIds.removeFirst()
+        guard let prompt = message(id: id) else { return }
+        setAck(AgentAckRules.ack(endingWith: reply, prompt: prompt.text), on: id)
     }
 
     private mutating func endTurn() {
-        ackPromptId = nil
         resetStream()
         replyId = nil
         statusLine = nil

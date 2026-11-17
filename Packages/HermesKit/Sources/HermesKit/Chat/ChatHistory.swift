@@ -67,11 +67,18 @@ public enum ChatHistory {
             }
         }
         // Issue #11: the server has no reactions. A bubble keeps the agent ack and tapback that it has on the phone.
+        // A live ack (eyes) or a thumbs down from a dropped socket follows the reply in the history (QA #40).
         let shown = Dictionary(current.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let replies = Dictionary(result.compactMap { message in
+            message.role == .assistant ? message.promptId.map { ($0, message.reply) } : nil
+        }, uniquingKeysWith: { first, _ in first })
         for index in result.indices {
             guard let message = shown[result[index].id] else { continue }
             result[index].agentAck = message.agentAck
             result[index].tapback = message.tapback
+            if message.agentAck == .seen || message.agentAck == .failed, let reply = replies[message.id] {
+                result[index].agentAck = AgentAckRules.ack(endingWith: reply, prompt: result[index].text)
+            }
         }
         return result
     }
