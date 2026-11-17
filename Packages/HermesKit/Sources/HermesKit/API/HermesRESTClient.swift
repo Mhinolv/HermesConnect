@@ -126,7 +126,8 @@ public struct SSHOwnershipProof: Decodable, Sendable, Equatable {
 /// (docs/hermes-protocol.md 2.1, 3.5). Use it for paged lists and paged history.
 public struct HermesRESTClient: Sendable {
     public let endpoint: GatewayEndpoint
-    private let loader: any HTTPDataLoading
+    /// Internal for the cron calls in `CronTransport.swift` (issue #73).
+    let loader: any HTTPDataLoading
 
     public init(endpoint: GatewayEndpoint, loader: any HTTPDataLoading = URLSessionHTTPLoader()) {
         self.endpoint = endpoint

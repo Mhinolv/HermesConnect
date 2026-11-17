@@ -40,8 +40,9 @@ public final class SessionListModel {
     }
 
     /// The rows that match the search text (title or preview). An empty query gives every row.
+    /// Issue #73: no cron runs. The Jobs tab shows them. Catch-up and the app badge still count them.
     public func filtered(_ query: String) -> [SessionListItem] {
-        sessions.filter { $0.matches(query) }
+        sessions.filter { !$0.isCronRun && $0.matches(query) }
     }
 
     public func session(id: String) -> SessionListItem? {
@@ -93,6 +94,17 @@ public final class SessionListModel {
 
     /// Issue #15: the number of sessions with the blue dot. The app badge shows it.
     public var unreadCount: Int { sessions.filter(\.isUnread).count }
+
+    // MARK: Cron runs (issue #73)
+
+    /// The rows of the chats list: every row but the cron runs.
+    public var chatRows: [SessionListItem] { SessionListItem.chats(sessions) }
+
+    /// The badge of the Chats tab.
+    public var chatsUnreadCount: Int { chatRows.filter(\.isUnread).count }
+
+    /// The cron runs with the blue dot. The Jobs tab shows them on the job rows, and its badge counts them.
+    public var unreadCronRuns: [SessionListItem] { sessions.filter { $0.isCronRun && $0.isUnread } }
 
     /// Issue #15: the owner opened the session. Its blue dot goes away.
     public func markRead(_ id: String) {

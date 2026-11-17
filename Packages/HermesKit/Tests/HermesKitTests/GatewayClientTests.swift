@@ -357,13 +357,21 @@ private struct Harness {
                              result: #"{"session_id":null,"title":null,"started_at":null,"source":null}"#)
         #expect(try await none == nil)
 
+        // Issue #73: a cron run is not a chat, so launch does not open it.
+        async let cron = harness.client.fetchMostRecentSessionId()
+        harness.socket.reply(to: try await harness.socket.waitForRequest("session.most_recent", count: 3),
+                             result: #"{"session_id":"cron_a1_20261117_080003","title":"Zillow","started_at":1,"source":"cron"}"#)
+        #expect(try await cron == nil)
+
         async let list = harness.client.fetchSessions()
         harness.socket.reply(to: try await harness.socket.waitForRequest("session.list"), result: """
         {"sessions":[{"id":"k2","title":"","preview":"Daily digest","started_at":1763290100,"source":"cron"},        {"id":"k1","title":"Trip","preview":"Book it","started_at":1763290000,"message_count":4,"source":"ios"}]}
         """)
         let items = try await list
+        // Issue #73: the list keeps cron runs, so catch-up sees them. Only the chats list hides them.
         #expect(items.map(\.id) == ["k2", "k1"])
         #expect(items[0].displayTitle == "Untitled")
+        #expect(items[0].isCronRun)
         #expect(items[0].sourceBadge == SessionListItem.SourceBadge(symbol: "clock", text: "Cron"))
         #expect(items[1].sourceBadge == nil)
         #expect(items[1].startedAt == Date(timeIntervalSince1970: 1763290000))

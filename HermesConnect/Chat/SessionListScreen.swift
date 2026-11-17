@@ -51,7 +51,7 @@ struct SessionListScreen: View {
         }
         .listStyle(.plain)
         .overlay {
-            switch SessionRowText.overlay(hasLoaded: model.hasLoaded, total: model.sessions.count,
+            switch SessionRowText.overlay(hasLoaded: model.hasLoaded, total: model.chatRows.count,
                                           matches: rows.count, query: query) {
             case .noChats:
                 ContentUnavailableView {
