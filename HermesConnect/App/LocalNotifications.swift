@@ -11,6 +11,14 @@ protocol NotificationCentering: Sendable {
     func requestAuthorization(options: UNAuthorizationOptions) async throws -> Bool
     func add(_ request: UNNotificationRequest) async throws
     func setBadgeCount(_ count: Int) async throws
+    /// Issue #84: the delivered notifications of one server ("Remove Server").
+    func deliveredIdentifiers(server: UUID) async -> [String]
+    func removeDelivered(identifiers: [String])
+}
+
+extension NotificationCentering {
+    func deliveredIdentifiers(server _: UUID) async -> [String] { [] }
+    func removeDelivered(identifiers _: [String]) {}
 }
 
 /// `UNUserNotificationCenter` is thread-safe. Its async API does not carry `Sendable`.
@@ -27,6 +35,16 @@ struct SystemNotificationCenter: NotificationCentering, @unchecked Sendable {
 
     func add(_ request: UNNotificationRequest) async throws { try await center.add(request) }
     func setBadgeCount(_ count: Int) async throws { try await center.setBadgeCount(count) }
+
+    func deliveredIdentifiers(server: UUID) async -> [String] {
+        await center.deliveredNotifications().filter {
+            LocalNotificationPoster.serverID(in: $0.request.content.userInfo) == server
+        }.map(\.request.identifier)
+    }
+
+    func removeDelivered(identifiers: [String]) {
+        center.removeDeliveredNotifications(withIdentifiers: identifiers)
+    }
 }
 
 /// Posts the catch-up notifications and sets the badge (`LocalNotifying`). No push entitlement (D5).
@@ -35,27 +53,40 @@ struct LocalNotificationPoster: LocalNotifying {
 
     /// The user info key with the stored id. A tap opens this session.
     static let sessionIdKey = "sessionId"
+    /// Issue #84: the user info key with the server id (`uuidString`). A tap switches to this server first.
+    static let serverIdKey = "serverId"
 
-    /// One request per session: a newer reply replaces the older notification of the same session.
+    /// One request per session and server: a newer reply replaces the older notification of the same session.
+    /// Issue #84: the thread is "<server id>/<session id>".
     static func request(for notification: CatchUpNotification) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = notification.title
         content.body = notification.body
         content.sound = .default
-        content.threadIdentifier = notification.sessionId
-        content.userInfo = [sessionIdKey: notification.sessionId]
-        return UNNotificationRequest(identifier: "reply-\(notification.sessionId)", content: content, trigger: nil)
+        content.threadIdentifier = notification.threadIdentifier
+        var info: [AnyHashable: Any] = [sessionIdKey: notification.sessionId]
+        if let server = notification.serverID { info[serverIdKey] = server.uuidString }
+        content.userInfo = info
+        return UNNotificationRequest(identifier: notification.requestIdentifier, content: content, trigger: nil)
+    }
+
+    /// The server id of a notification, or nil for a notification of a build before #84.
+    static func serverID(in userInfo: [AnyHashable: Any]) -> UUID? {
+        (userInfo[serverIdKey] as? String).flatMap(UUID.init(uuidString:))
     }
 
     /// Issue #45: the incoming message of a communication notification, so Siri "Announce Notifications" can
     /// read it. The content is the notification body: with "Show Message Preview" off it has no message text.
+    /// Issue #84: with two or more servers, the sender is the server, so Siri announces the server name.
     static func messageIntent(for notification: CatchUpNotification) -> INSendMessageIntent {
-        let hermes = INPerson(personHandle: INPersonHandle(value: "hermes", type: .unknown), nameComponents: nil,
-                              displayName: "Hermes", image: nil, contactIdentifier: nil, customIdentifier: "hermes")
+        let handle = notification.serverID.map { "hermes-\($0.uuidString)" } ?? "hermes"
+        let hermes = INPerson(personHandle: INPersonHandle(value: handle, type: .unknown), nameComponents: nil,
+                              displayName: notification.senderName, image: nil, contactIdentifier: nil,
+                              customIdentifier: handle)
         return INSendMessageIntent(recipients: nil, outgoingMessageType: .outgoingMessageText,
                                    content: notification.body,
                                    speakableGroupName: INSpeakableString(spokenPhrase: notification.title),
-                                   conversationIdentifier: notification.sessionId, serviceName: nil,
+                                   conversationIdentifier: notification.threadIdentifier, serviceName: nil,
                                    sender: hermes, attachments: nil)
     }
 
@@ -86,6 +117,8 @@ final class NotificationController: NSObject, UNUserNotificationCenterDelegate {
     private(set) var status: UNAuthorizationStatus = .notDetermined
     /// The stored id of a notification that the owner tapped. The root opens it, then clears it.
     var pendingSessionId: String?
+    /// Issue #84: the server of the tapped notification. Nil for a notification of a build before #84.
+    var pendingServerId: UUID?
 
     @ObservationIgnored let poster: LocalNotificationPoster
     @ObservationIgnored private let center: any NotificationCentering
@@ -154,7 +187,17 @@ final class NotificationController: NSObject, UNUserNotificationCenterDelegate {
     /// A tap on a notification. The App Lock cover stays on top until the owner unlocks.
     func open(userInfo: [AnyHashable: Any]) {
         guard let id = userInfo[LocalNotificationPoster.sessionIdKey] as? String, !id.isEmpty else { return }
+        pendingServerId = LocalNotificationPoster.serverID(in: userInfo)
         pendingSessionId = id
+    }
+
+    /// Issue #84: "Remove Server" removes the delivered notifications of that server.
+    func removeDelivered(server: UUID) {
+        let center = self.center
+        Task {
+            let ids = await center.deliveredIdentifiers(server: server)
+            if !ids.isEmpty { center.removeDelivered(identifiers: ids) }
+        }
     }
 
     // MARK: UNUserNotificationCenterDelegate
@@ -166,7 +209,14 @@ final class NotificationController: NSObject, UNUserNotificationCenterDelegate {
     }
 
     nonisolated func userNotificationCenter(_: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        let id = response.notification.request.content.userInfo[LocalNotificationPoster.sessionIdKey] as? String
-        await MainActor.run { open(userInfo: id.map { [LocalNotificationPoster.sessionIdKey: $0] } ?? [:]) }
+        let info = response.notification.request.content.userInfo
+        let id = info[LocalNotificationPoster.sessionIdKey] as? String
+        let server = info[LocalNotificationPoster.serverIdKey] as? String
+        await MainActor.run {
+            var userInfo: [AnyHashable: Any] = [:]
+            userInfo[LocalNotificationPoster.sessionIdKey] = id
+            userInfo[LocalNotificationPoster.serverIdKey] = server
+            open(userInfo: userInfo)
+        }
     }
 }

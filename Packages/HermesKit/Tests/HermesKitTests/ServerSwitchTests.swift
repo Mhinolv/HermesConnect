@@ -156,21 +156,45 @@ private func waitUntil(_ condition: () -> Bool) async throws {
     ]
     private let labRows = [SessionListItem(id: "20261117_090000_lab001", title: "Build logs", messageCount: 3)]
 
+    private let home = UUID()
+    private let lab = UUID()
+
     @Test func aSwitchShowsTheRedactedRowsThenOnlyTheNewServerRows() async {
-        let cache = InMemorySessionCacheStore(sessions: homeRows, activeSessionId: homeRows[0].id)
+        let caches = ServerCaches(inMemory: home,
+                                  seed: [home: InMemorySessionCacheStore(sessions: homeRows, activeSessionId: homeRows[0].id)])
+        let cache = caches.sessions
         let transport = FakeSessionsTransport(rows: homeRows)
         let sessions = SessionListModel(transport: transport, chatTransport: FakeChatTransport(), cache: cache)
         #expect(sessions.hasLoaded)
-        sessions.switchServer(carryingUnread: [], heldOutboxes: [])
-        #expect(!sessions.hasLoaded, "the redacted rows show")
+        caches.select(lab)
+        sessions.switchServer(carryingUnread: [])
+        #expect(!sessions.hasLoaded, "Lab has no cache: the redacted rows show")
         #expect(sessions.sessions.isEmpty)
-        #expect(cache.loadSessions().isEmpty, "a relaunch does not show the old rows")
         #expect(cache.loadActiveSessionId() == nil, "launch does not open a chat of the old server")
         transport.rows = labRows
         await sessions.refresh()
         #expect(sessions.sessions.map(\.id) == labRows.map(\.id))
         #expect(sessions.unreadCount == 0, "the first load of a server is not new content")
-        #expect(cache.loadSessions().map(\.id) == labRows.map(\.id))
+        #expect(caches.sessionStore(for: lab).loadSessions().map(\.id) == labRows.map(\.id))
+        #expect(caches.sessionStore(for: home).loadSessions() == homeRows, "the Home folder does not change")
+        #expect(caches.sessionStore(for: home).loadActiveSessionId() == homeRows[0].id)
+    }
+
+    /// Issue #84: a switch back shows the list of the server at once, from its cache.
+    @Test func aSwitchBackShowsTheCachedRowsAndTheActiveIdAtOnce() async {
+        let caches = ServerCaches(inMemory: lab, seed: [
+            home: InMemorySessionCacheStore(sessions: homeRows, activeSessionId: homeRows[1].id),
+            lab: InMemorySessionCacheStore(sessions: labRows),
+        ])
+        let sessions = SessionListModel(transport: FakeSessionsTransport(rows: labRows),
+                                        chatTransport: FakeChatTransport(), cache: caches.sessions)
+        caches.select(home)
+        sessions.switchServer(carryingUnread: [homeRows[1].id])
+        #expect(sessions.hasLoaded)
+        #expect(sessions.sessions.map(\.id) == homeRows.map(\.id))
+        #expect(sessions.sessions.filter(\.isUnread).map(\.id) == homeRows.map(\.id),
+                "the cached dot and the dot of the book")
+        #expect(sessions.cachedActiveSessionId == homeRows[1].id, "the last open chat of Home comes back")
     }
 
     @Test func aLateAnswerOfTheOldServerIsDropped() async throws {
@@ -179,7 +203,7 @@ private func waitUntil(_ condition: () -> Bool) async throws {
                                         cache: InMemorySessionCacheStore())
         let old = Task { await sessions.refresh() }
         try await waitUntil { transport.isHolding }
-        sessions.switchServer(carryingUnread: [], heldOutboxes: [])
+        sessions.switchServer(carryingUnread: [])
         transport.release()
         await old.value
         #expect(sessions.sessions.isEmpty)
@@ -194,10 +218,11 @@ private func waitUntil(_ condition: () -> Bool) async throws {
 
     @Test func theBlueDotsOfAServerComeBackWhenItIsActiveAgain() async {
         let transport = FakeSessionsTransport(rows: labRows)
-        let sessions = SessionListModel(transport: transport, chatTransport: FakeChatTransport(),
-                                        cache: InMemorySessionCacheStore(sessions: labRows))
+        let caches = ServerCaches(inMemory: lab, seed: [lab: InMemorySessionCacheStore(sessions: labRows)])
+        let sessions = SessionListModel(transport: transport, chatTransport: FakeChatTransport(), cache: caches.sessions)
         let kept = ServerStateBook.Entry(unreadIds: [homeRows[0].id], unreadChats: 1)
-        sessions.switchServer(carryingUnread: kept.unreadIds, heldOutboxes: [])
+        caches.select(home)
+        sessions.switchServer(carryingUnread: kept.unreadIds)
         // Before the first load the book entry stays as it was.
         #expect(sessions.serverState(fallback: kept) == kept)
         transport.rows = homeRows.map { var row = $0; row.isUnread = false; return row }
@@ -210,7 +235,7 @@ private func waitUntil(_ condition: () -> Bool) async throws {
         let transport = FakeSessionsTransport(rows: homeRows.map { var row = $0; row.isUnread = false; return row })
         let cache = InMemorySessionCacheStore()
         let sessions = SessionListModel(transport: transport, chatTransport: FakeChatTransport(), cache: cache)
-        sessions.switchServer(carryingUnread: [homeRows[1].id], heldOutboxes: [])
+        sessions.switchServer(carryingUnread: [homeRows[1].id])
         await sessions.catchUp(showsPreview: false, notifier: SilentNotifier())
         #expect(sessions.sessions.filter(\.isUnread).map(\.id) == [homeRows[1].id])
         #expect(cache.loadSessions().filter(\.isUnread).map(\.id) == [homeRows[1].id])
@@ -218,11 +243,13 @@ private func waitUntil(_ condition: () -> Bool) async throws {
 
     @Test func chatsOfTheOldServerStopAndNeverResumeOnTheNewServer() async throws {
         let chats = FakeChatTransport()
+        let caches = ServerCaches(inMemory: home, seed: [home: InMemorySessionCacheStore(sessions: homeRows)])
         let sessions = SessionListModel(transport: FakeSessionsTransport(rows: homeRows), chatTransport: chats,
-                                        cache: InMemorySessionCacheStore(sessions: homeRows))
+                                        cache: caches.sessions)
         let old = sessions.chat(for: homeRows[0].id)
         sessions.openChat(old)
-        sessions.switchServer(carryingUnread: [], heldOutboxes: [])
+        caches.select(lab)
+        sessions.switchServer(carryingUnread: [])
         #expect(sessions.openSessionId == nil)
         chats.input.yield(connected)
         try await Task.sleep(for: .milliseconds(100))
@@ -231,56 +258,78 @@ private func waitUntil(_ condition: () -> Bool) async throws {
     }
 
     @Test func theOutboxOfAnotherServerWaitsForItsOwnServer() async throws {
-        let cache = InMemorySessionCacheStore()
+        let caches = ServerCaches(inMemory: home)
         let stored = homeRows[0].id
         let offline = OutboxTransport(online: false)
-        let chat = ChatViewModel(transport: offline, storedSessionId: stored, cache: cache, redrawInterval: .zero)
+        let chat = ChatViewModel(transport: offline, storedSessionId: stored, cache: caches.sessions.pinned(),
+                                 redrawInterval: .zero)
         await chat.send("one")?.value
-        #expect(cache.outboxSessionIds() == [stored])
+        #expect(caches.sessionStore(for: home).outboxSessionIds() == [stored])
 
-        // The owner switched from Home to Lab: the Home outbox is held.
+        // The owner switched from Home to Lab: the Home outbox is in the Home folder.
         let online = OutboxTransport(online: true)
-        let lab = SessionListModel(transport: FakeSessionsTransport(rows: labRows), chatTransport: online, cache: cache)
-        lab.switchServer(carryingUnread: [], heldOutboxes: [stored])
-        #expect(lab.serverState().outboxIds.isEmpty, "Lab has no outbox of its own")
-        lab.receive(connected)
+        let sessions = SessionListModel(transport: FakeSessionsTransport(rows: labRows), chatTransport: online,
+                                        cache: caches.sessions)
+        caches.select(lab)
+        sessions.switchServer(carryingUnread: [])
+        #expect(sessions.serverState().outboxIds.isEmpty, "Lab has no outbox of its own")
+        sessions.receive(connected)
         try await Task.sleep(for: .milliseconds(150))
         #expect(online.submits.isEmpty, "a queued message never goes to another server")
-        #expect(cache.outboxSessionIds() == [stored])
+        #expect(caches.sessionStore(for: home).outboxSessionIds() == [stored])
 
         // Back on Home: the outbox sends on the next connect.
-        lab.switchServer(carryingUnread: [], heldOutboxes: [])
-        lab.receive(connected)
+        caches.select(home)
+        sessions.switchServer(carryingUnread: [])
+        sessions.receive(connected)
         try await waitUntil { online.submits == ["one"] }
     }
 
-    @Test func aRemovedServerDropsItsOutbox() async {
-        let cache = InMemorySessionCacheStore()
+    /// A new host on the same entry: the rows, the active id, the outbox and the new chat of the old host go.
+    @Test func aNewHostDropsTheRowsTheActiveIdTheOutboxAndTheNewChat() async {
+        let cache = InMemorySessionCacheStore(sessions: homeRows, activeSessionId: homeRows[0].id)
         let offline = OutboxTransport(online: false)
-        let chat = ChatViewModel(transport: offline, storedSessionId: homeRows[0].id, cache: cache, redrawInterval: .zero)
+        let chat = ChatViewModel(transport: offline, storedSessionId: homeRows[1].id, cache: cache, redrawInterval: .zero)
         await chat.send("one")?.value
+        cache.saveTranscript([ChatMessage(id: "q", role: .user, text: "new", date: .now, delivery: .queued)],
+                             sessionId: SessionCache.newChatId)
+        cache.saveOutbox(true, sessionId: SessionCache.newChatId)
         let sessions = SessionListModel(transport: FakeSessionsTransport(), chatTransport: offline, cache: cache)
-        sessions.dropOutboxes(sessions.serverState().outboxIds)
-        #expect(cache.outboxSessionIds().isEmpty)
+        sessions.switchServer(carryingUnread: [], newHost: true)
+        #expect(!sessions.hasLoaded)
+        #expect(cache.loadSessions().isEmpty)
+        #expect(cache.loadActiveSessionId() == nil)
+        #expect(cache.outboxSessionIds().isEmpty, "nothing sends to the new host")
+        #expect(!sessions.hasCachedNewChat)
+        #expect(cache.loadTranscript(sessionId: homeRows[1].id).map(\.text) == ["one"], "the queued text stays")
     }
 }
 
 @MainActor
 @Suite(.timeLimit(.minutes(1))) struct JobsServerSwitchTests {
     private let homeJobs = [CronJob(id: "j1", name: "Morning digest", scheduleDisplay: "Every day at 8:00 AM")]
+    private let home = UUID()
+    private let lab = UUID()
 
     @Test func aSwitchShowsTheLoadingRowsThenTheNewServerJobs() async {
         let transport = FakeCronTransport(jobs: homeJobs)
-        let cache = InMemoryCronJobCacheStore(jobs: homeJobs)
-        let jobs = JobsModel(transport: transport, cache: cache)
+        let caches = ServerCaches(inMemory: home, jobs: [home: InMemoryCronJobCacheStore(jobs: homeJobs)])
+        let jobs = JobsModel(transport: transport, cache: caches.jobs)
         #expect(jobs.state(query: "") == .rows)
+        caches.select(lab)
         jobs.switchServer()
-        #expect(jobs.state(query: "") == .loading)
-        // The new server has no jobs. The cache must not keep the jobs of the old server.
+        #expect(jobs.state(query: "") == .loading, "Lab has no cache yet")
         transport.jobs = []
         await jobs.refresh()
         #expect(jobs.state(query: "") == .empty)
-        #expect(cache.loadJobs() == [])
+        #expect(caches.cronStore(for: lab).loadJobs() == [])
+        #expect(caches.cronStore(for: home).loadJobs() == homeJobs, "the Home jobs stay in the Home folder")
+
+        // Issue #84: back on Home, the cached jobs show at once.
+        caches.select(home)
+        jobs.switchServer()
+        #expect(jobs.state(query: "") == .rows)
+        #expect(jobs.jobs == homeJobs)
     }
 }
 

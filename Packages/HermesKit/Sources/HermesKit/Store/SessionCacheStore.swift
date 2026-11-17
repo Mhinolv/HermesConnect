@@ -24,6 +24,9 @@ public protocol SessionCacheStore: Sendable {
     func outboxSessionIds() -> [String]
     /// Issue #39: marks or clears the outbox of one transcript key.
     func saveOutbox(_ hasQueued: Bool, sessionId: String)
+    /// Issue #84: the store of the server that is active now. A chat model keeps it, so a late save of a chat
+    /// of the old server never goes to the folder of the new server. A plain store gives itself.
+    func pinned() -> any SessionCacheStore
 }
 
 extension SessionCacheStore {
@@ -37,6 +40,7 @@ extension SessionCacheStore {
     /// Stores with no outbox index (older fakes) keep the queued messages in the transcript only.
     public func outboxSessionIds() -> [String] { [] }
     public func saveOutbox(_: Bool, sessionId _: String) {}
+    public func pinned() -> any SessionCacheStore { self }
 }
 
 public enum SessionCache {
@@ -54,8 +58,9 @@ public enum SessionCache {
     /// so a failed memo survives a quit. No stored id starts with `#`.
     public static let newChatId = "#new-chat"
 
-    /// Issue #83: the key that keeps the new chat of a server that is not active. It is never in the outbox,
-    /// so nothing sends from it. A switch back to the server moves it to `newChatId` again.
+    /// Issue #83: the key that kept the new chat of a server that was not active. It is never in the outbox,
+    /// so nothing sends from it. Issue #84: each server has its own folder with its own `newChatId`, so builds
+    /// from #84 do not park. The migration moves a parked new chat to the folder of its server.
     public static func parkedNewChatId(server: UUID) -> String {
         "\(newChatId)@\(server.uuidString)"
     }

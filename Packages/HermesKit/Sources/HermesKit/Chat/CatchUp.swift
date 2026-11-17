@@ -41,29 +41,103 @@ public enum CatchUp {
     }
 }
 
+/// Issue #84: the server of a notification.
+public struct NotificationServer: Sendable, Equatable {
+    public var id: UUID
+    /// The server name (`ServerProfile.name`).
+    public var name: String
+    /// True when the owner has two or more servers. Then the title and the sender show the server name.
+    public var showsName: Bool
+
+    public init(id: UUID, name: String, showsName: Bool) {
+        self.id = id
+        self.name = name
+        self.showsName = showsName
+    }
+
+    /// The server of `profile` in a list of `serverCount` servers.
+    public init(_ profile: ServerProfile, serverCount: Int) {
+        self.init(id: profile.id, name: profile.name, showsName: serverCount > 1)
+    }
+}
+
 /// One local notification for a session with a new reply (issue #15 design notes).
 public struct CatchUpNotification: Sendable, Equatable {
-    /// The stored id. The app sets it as the `threadIdentifier`, and a tap opens this session.
+    /// The stored id. A tap opens this session.
     public var sessionId: String
-    /// The session title, or "Untitled".
+    /// The session title, or "Untitled". Issue #84: "<server name>: <chat title>" with two or more servers.
     public var title: String
     /// "New message from Hermes", or the first 100 characters of the reply when the preview is on.
     public var body: String
+    /// Issue #84: the server of the session. Nil for a notification with no server (tests, older code).
+    public var serverID: UUID?
+    /// Issue #84: the sender name that Siri announces. "Hermes", or the server name with two or more servers.
+    public var senderName: String
 
     public static let defaultBody = "New message from Hermes"
     public static let previewLength = 100
+    public static let defaultSender = "Hermes"
 
-    public init(sessionId: String, title: String, body: String) {
+    public init(sessionId: String, title: String, body: String, serverID: UUID? = nil,
+                senderName: String = CatchUpNotification.defaultSender) {
         self.sessionId = sessionId
         self.title = title
         self.body = body
+        self.serverID = serverID
+        self.senderName = senderName
     }
 
     /// Message preview is off by default (owner decision 2026-11-16). Then the body has no message text.
-    public init(session: SessionListItem, reply: String, showsPreview: Bool) {
+    /// Issue #84: the server name comes first in the title, so VoiceOver reads it first.
+    public init(session: SessionListItem, reply: String, showsPreview: Bool, server: NotificationServer? = nil) {
         let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
         let body = showsPreview && !trimmed.isEmpty ? String(trimmed.prefix(Self.previewLength)) : Self.defaultBody
-        self.init(sessionId: session.id, title: session.displayTitle, body: body)
+        let named = server?.showsName == true ? server : nil
+        let title = named.map { "\($0.name): \(session.displayTitle)" } ?? session.displayTitle
+        self.init(sessionId: session.id, title: title, body: body, serverID: server?.id,
+                  senderName: named?.name ?? Self.defaultSender)
+    }
+
+    /// The thread of the notification: "<server id>/<session id>". With no server: the session id.
+    public var threadIdentifier: String {
+        serverID.map { "\($0.uuidString)/\(sessionId)" } ?? sessionId
+    }
+
+    /// One request per session and server: a newer reply replaces the older notification of the same session.
+    public var requestIdentifier: String { "reply-\(threadIdentifier)" }
+}
+
+/// Issue #84: what a tap on a notification does.
+public enum NotificationRoute: Sendable, Equatable {
+    /// The session is on the active server: open it.
+    case open(sessionId: String)
+    /// The session is on another server: switch to it (#83), then open the session.
+    case switchThenOpen(server: UUID, sessionId: String)
+    /// The server was removed: show the Chats list.
+    case showList
+
+    /// A notification with no server id (builds before #84) opens on the active server, as before.
+    public static func resolve(sessionId: String, serverID: UUID?, activeID: UUID?,
+                               servers: Set<UUID>) -> NotificationRoute {
+        guard let serverID, serverID != activeID else { return .open(sessionId: sessionId) }
+        return servers.contains(serverID) ? .switchThenOpen(server: serverID, sessionId: sessionId) : .showList
+    }
+}
+
+/// Issue #84: one connection at a time. Each background refresh checks the active server, then one other server,
+/// in turn.
+public enum BackgroundRotation {
+    /// The `UserDefaults` key of the server that the last run checked.
+    public static let lastServerKey = "backgroundRefreshLastServer"
+
+    /// The other server for this run: the next one after `last` in list order. The active server is never
+    /// the other server. Nil with one server.
+    public static func next(servers: [UUID], active: UUID?, last: UUID?) -> UUID? {
+        let others = servers.filter { $0 != active }
+        guard !others.isEmpty else { return nil }
+        guard let last, let index = servers.firstIndex(of: last) else { return others[0] }
+        let after = servers[(index + 1)...] + servers[..<index]
+        return after.first { $0 != active } ?? others[0]
     }
 }
 
@@ -121,7 +195,10 @@ public struct CatchUpRefresher: Sendable {
 
     /// Throws only when `session.list` fails. Then the cache does not change.
     /// A session whose history fails gets the blue dot but no notification.
-    public func run(showsPreview: Bool, openSessionId: String? = nil) async throws -> CatchUpResult {
+    /// Issue #84: `server` names the server in the notification. `setsBadge` false: the app sets the badge of
+    /// all servers itself.
+    public func run(showsPreview: Bool, openSessionId: String? = nil, server: NotificationServer? = nil,
+                    setsBadge: Bool = true) async throws -> CatchUpResult {
         let cached = cache.loadSessions()
         let fresh = try await sessions.fetchSessions()
         let changed = CatchUp.changedSessions(cached: cached, fresh: fresh).filter { $0 != openSessionId }
@@ -132,14 +209,15 @@ public struct CatchUpRefresher: Sendable {
                   let transcript = try? await chats.history(sessionId: live.liveId),
                   let reply = CatchUp.newReply(in: transcript, cached: cache.loadTranscript(sessionId: id))
             else { continue }
-            await notifier.post(CatchUpNotification(session: row, reply: reply, showsPreview: showsPreview))
+            await notifier.post(CatchUpNotification(session: row, reply: reply, showsPreview: showsPreview,
+                                                    server: server))
             notified.append(id)
         }
         let unread = Set(cached.filter(\.isUnread).map(\.id))
         let merged = CatchUp.markUnread(fresh, unread: unread, newContent: Set(changed), openSessionId: openSessionId)
         cache.saveSessions(merged)
         let count = merged.filter(\.isUnread).count
-        await notifier.setBadge(count)
+        if setsBadge { await notifier.setBadge(count) }
         return CatchUpResult(changed: changed, notified: notified, unreadCount: count)
     }
 }

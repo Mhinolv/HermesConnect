@@ -15,14 +15,19 @@ enum SlashSuggestions {
     }()
 
     /// The Release model: the chat link, and the catalog cache in Application Support, keyed by the server.
-    static func makeLive(link: LiveChatTransport, profile: @escaping @MainActor () -> ServerProfile?)
-        -> SlashSuggestionModel {
-        let cache: any SlashCatalogCacheStore = (try? FileSlashCatalogCacheStore.applicationSupport())
-            ?? InMemorySlashCatalogCacheStore()
+    static func makeLive(link: LiveChatTransport, cache: any SlashCatalogCacheStore = liveCache(),
+                         profile: @escaping @MainActor () -> ServerProfile?) -> SlashSuggestionModel {
         let model = SlashSuggestionModel(transport: link, cache: cache,
                                          serverKey: { profile().map(SlashCatalogServerKey.make) })
         model.start()
         return model
+    }
+}
+
+extension SlashSuggestions {
+    /// `HermesConnect/Cache/slash-commands.json`. Issue #84: "Remove Server" drops the catalog of that server.
+    static func liveCache() -> any SlashCatalogCacheStore {
+        (try? FileSlashCatalogCacheStore.applicationSupport()) ?? InMemorySlashCatalogCacheStore()
     }
 }
 

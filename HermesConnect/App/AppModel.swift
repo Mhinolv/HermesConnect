@@ -52,8 +52,9 @@ final class AppModel {
     private(set) var serverBook: ServerStateBook
     /// Issue #83: the app resets the lists here when the active server changes. It runs before the new connect.
     @ObservationIgnored var onActiveServerChange: (@MainActor (ServerChange) -> Void)?
-    /// Issue #83: the owner removed a server that was not active. Its outbox must never send.
-    @ObservationIgnored var onServerRemoved: (@MainActor (UUID, ServerStateBook.Entry) -> Void)?
+    /// Issue #84: the owner removed a server. The app deletes its cache folder and its notifications.
+    /// It runs after the switch to the next server.
+    @ObservationIgnored var onServerRemoved: (@MainActor (ServerProfile) -> Void)?
 
     @ObservationIgnored private let keyStore: any DeviceKeyStore
     @ObservationIgnored private let serverStore: any ServerListStore
@@ -176,7 +177,12 @@ final class AppModel {
         try list.add(profile)
         let old = self.profile?.id
         try commit(list)
-        if old != nil { resetConnection(ServerChange(from: old, to: profile.id)) }
+        if old != nil {
+            resetConnection(ServerChange(from: old, to: profile.id))
+        } else {
+            // Issue #84: the first server. Nothing to close, but the lists take its cache folder.
+            onActiveServerChange?(ServerChange(from: nil, to: profile.id))
+        }
     }
 
     /// Server detail "Done": save one server. Other servers do not change.
@@ -193,18 +199,15 @@ final class AppModel {
     /// the connection closes and the first other server becomes active. No server left: "Set Up Hermes".
     func removeServer(id: UUID) throws {
         let wasActive = profile?.id == id
-        let removed = serverBook.entry(for: id)
+        guard let removed = serverList.server(id: id) else { return }
         var list = serverList
         list.remove(id: id)
         try commit(list)
         var book = serverBook
         book.keep(only: Set(list.servers.map(\.id)))
         saveBook(book)
-        if wasActive {
-            resetConnection(ServerChange(from: id, to: list.active?.id))
-        } else {
-            onServerRemoved?(id, removed)
-        }
+        if wasActive { resetConnection(ServerChange(from: id, to: list.active?.id)) }
+        onServerRemoved?(removed)
     }
 
     // MARK: Switch (issue #83)
@@ -405,6 +408,39 @@ final class AppModel {
         var list = serverList
         list.modify(id: id, change)
         commitQuietly(list)
+    }
+
+    // MARK: Background refresh of another server (issue #84)
+
+    /// Connect to a server that is not active, run `body` with its Hermes endpoint, then close that link.
+    /// - The active server stays active. Its link closes first: one link at a time (owner decision on #66).
+    /// - A server with no pin, a changed host key, or any error is skipped. Nothing asks the owner in the background.
+    /// - A connect of the active server waits until this link is closed.
+    func withBackgroundLink(to id: UUID, _ body: @escaping @MainActor (GatewayEndpoint) async -> Bool) async -> Bool {
+        guard isSetUp, id != profile?.id, let server = serverList.server(id: id), server.hostKey != nil,
+              let deviceKey else { return false }
+        await disconnect()
+        let connector = self.connector
+        let serve = self.serve
+        let previous = pendingClose
+        let work = Task { @MainActor [weak self] () -> Bool in
+            await previous?.value
+            guard !Task.isCancelled,
+                  let result = try? await connector.connect(profile: server, key: deviceKey) else { return false }
+            var ok = false
+            let pinsPort = ServeBootstrap.pinsPort(gateVersion: result.gateVersion)
+            if !Task.isCancelled,
+               let running = try? await serve.start(on: result.session, reuse: nil,
+                                                    pinnedPort: pinsPort ? server.servePort : nil) {
+                self?.updateServer(id: id) { $0.servePort = pinsPort ? running.remotePort : nil }
+                ok = await body(running.endpoint)
+                await running.forward.close()
+            }
+            await result.session.close()
+            return ok
+        }
+        pendingClose = Task { _ = await work.value }
+        return await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
     }
 
     // MARK: Foreground reconcile (issue #15)

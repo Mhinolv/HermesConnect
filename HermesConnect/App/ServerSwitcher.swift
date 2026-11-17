@@ -1,47 +1,67 @@
 import HermesKit
 import SwiftUI
 import UIKit
+import UserNotifications
 
 /// Issue #83: connects the server switch of `AppModel` to the lists of the app. One server is connected at a time.
+/// Issue #84: each server has its own cache folder. A switch selects the folder of the new server, then the lists
+/// show its cache at once.
 @MainActor
 enum ServerSwitchGlue {
-    /// Launch: hold the outbox of the other servers, put back lost blue dots, and reset the lists on each switch.
-    static func attach(model: AppModel, sessions: SessionListModel, jobs: JobsModel) {
+    /// Launch: select the folder of the active server, put back lost blue dots, and follow each switch.
+    /// `onRemoved`: the app also drops the notifications and the slash catalog of a removed server.
+    static func attach(model: AppModel, sessions: SessionListModel, jobs: JobsModel, caches: ServerCaches,
+                       onRemoved: @escaping @MainActor (ServerProfile) -> Void = { _ in }) {
         let active = model.profile?.id
-        sessions.holdOutboxes(model.serverBook.outboxIds(except: active))
-        if !sessions.hasLoaded, let active { sessions.carryUnread(model.serverBook.entry(for: active).unreadIds) }
+        if caches.activeServer != active {
+            caches.select(active)
+            sessions.switchServer(carryingUnread: [])
+            jobs.switchServer()
+        }
+        if let active { sessions.carryUnread(model.serverBook.entry(for: active).unreadIds) }
         // The lists live as long as the app. They hold no reference to the model, so only the model is weak.
         model.onActiveServerChange = { [weak model] change in
             guard let model else { return }
-            apply(change, model: model, sessions: sessions, jobs: jobs)
+            apply(change, model: model, sessions: sessions, jobs: jobs, caches: caches)
         }
-        model.onServerRemoved = { [weak model] id, removed in
-            guard let model else { return }
-            sessions.dropOutboxes(removed.outboxIds)
-            sessions.removeParkedNewChat(SessionCache.parkedNewChatId(server: id))
-            sessions.holdOutboxes(model.serverBook.outboxIds(except: model.profile?.id))
+        model.onServerRemoved = { profile in
+            caches.remove(server: profile.id)
+            onRemoved(profile)
         }
     }
 
     /// The active server changed. `AppModel` calls it before the new connect starts.
-    static func apply(_ change: ServerChange, model: AppModel, sessions: SessionListModel, jobs: JobsModel) {
-        // The new chat with no server row of the old server is parked under its id (QA 90-1).
-        var parkId: String?
-        if let from = change.from {
-            let state = sessions.serverState(fallback: model.serverBook.entry(for: from))
-            if change.isSameServer || model.serverList.server(id: from) == nil {
-                // A new host on the same entry, or a removed server: its queued messages never go to another server.
-                sessions.dropOutboxes(state.outboxIds)
-            } else {
-                model.recordServerState(state, for: from)
-                parkId = SessionCache.parkedNewChatId(server: from)
-            }
+    static func apply(_ change: ServerChange, model: AppModel, sessions: SessionListModel, jobs: JobsModel,
+                      caches: ServerCaches) {
+        if let from = change.from, !change.isSameServer, model.serverList.server(id: from) != nil {
+            model.recordServerState(sessions.serverState(fallback: model.serverBook.entry(for: from)), for: from)
         }
-        let restoreId = change.isSameServer ? nil : change.to.map { SessionCache.parkedNewChatId(server: $0) }
+        caches.select(change.to)
         let carried = change.isSameServer ? [] : (change.to.map { model.serverBook.entry(for: $0).unreadIds } ?? [])
-        sessions.switchServer(carryingUnread: carried, heldOutboxes: model.serverBook.outboxIds(except: change.to),
-                              parkNewChatAs: parkId, restoreNewChatFrom: restoreId)
+        // A new host on the same entry: its rows, outbox and new chat belong to the old machine.
+        sessions.switchServer(carryingUnread: carried, newHost: change.isSameServer && change.to != nil)
         jobs.switchServer()
+    }
+}
+
+/// Issue #84: the cache folders at launch.
+@MainActor
+enum ServerCacheSetup {
+    /// Move the flat cache of an older build to the folder of the active server, delete the folders of removed
+    /// servers, then select the folder of the active server. It runs before the lists read the cache.
+    static func live(model: AppModel) -> ServerCaches {
+        guard let root = try? ServerCaches.defaultRoot() else { return ServerCaches(inMemory: model.profile?.id) }
+        prepare(root: root, model: model)
+        return ServerCaches(root: root, active: model.profile?.id)
+    }
+
+    static func prepare(root: URL, model: AppModel) {
+        // No server (not set up, or the list did not load): the files stay as they are.
+        guard let active = model.profile?.id else { return }
+        let ids = Set(model.servers.map(\.id))
+        let outboxes = model.serverBook.entries.mapValues(\.outboxIds)
+        ServerCacheMigration.run(root: root, active: active, servers: ids, outboxes: outboxes)
+        ServerCaches(root: root).removeFolders(except: ids)
     }
 }
 
@@ -189,6 +209,53 @@ enum ServerSwitchDemo: String {
             if let found = menuButton(in: sub, inBar: inBar) { return found }
         }
         return nil
+    }
+}
+#endif
+
+#if DEBUG
+/// Issue #84: the DEBUG screenshot of a notification from a server that is not active
+/// (`HERMES_DEMO=list HERMES_DEMO_SWITCH=dot HERMES_DEMO_BANNER=1`). The Simulator shows no real banner without
+/// the notification permission, so this view draws one with the title and body of the real request.
+struct NotificationBannerDemo: View {
+    static var isOn: Bool { ProcessInfo.processInfo.environment["HERMES_DEMO_BANNER"] == "1" }
+
+    /// "Lab" is not active. Its background refresh found a new reply.
+    static var request: UNNotificationRequest {
+        let note = CatchUpNotification(session: SessionListItem(id: "20261117_090000_lab001", title: "Build logs"),
+                                       reply: "", showsPreview: false,
+                                       server: NotificationServer(ServerSwitchDemo.lab, serverCount: 3))
+        return LocalNotificationPoster.request(for: note)
+    }
+
+    var body: some View {
+        let content = Self.request.content
+        HStack(alignment: .top, spacing: 10) {
+            // The app icon of a banner has a fixed size, also with large text.
+            Image(systemName: "bubble.left.and.bubble.right.fill")
+                .font(.system(size: 18))
+                .foregroundStyle(.white)
+                .frame(width: 38, height: 38)
+                .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(content.title)
+                        .font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 4)
+                    Text("now")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Text(content.body)
+                    .font(.subheadline)
+            }
+        }
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .shadow(color: .black.opacity(0.15), radius: 12, y: 4)
+        .padding(.horizontal, 10)
+        .accessibilityElement(children: .combine)
     }
 }
 #endif

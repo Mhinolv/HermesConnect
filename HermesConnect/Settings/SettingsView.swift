@@ -132,6 +132,7 @@ struct VoiceSettingsSection: View {
 /// Issue #15: Settings > Notifications. "Show Message Preview" is off by default (owner decision 2026-11-16).
 struct NotificationSettingsSection: View {
     @Environment(NotificationController.self) private var notifications: NotificationController?
+    @Environment(AppModel.self) private var model: AppModel?
     @Environment(\.openURL) private var openURL
 
     static let previewTitle = "Show Message Preview"
@@ -140,6 +141,13 @@ struct NotificationSettingsSection: View {
     static let siriFooter = "Siri can read and send Hermes messages while your iPhone is locked."
     static let footer = "A notification says \"New message from Hermes\". Turn on the preview to show "
         + "the first part of the reply."
+    /// Issue #84: one connection at a time, so a server that is not active checks in from a background refresh.
+    static let otherServersFooter = "Other servers check in when iOS runs a background refresh."
+
+    /// The footer. With two or more servers it also says when the other servers check in.
+    static func footer(serverCount: Int) -> String {
+        serverCount > 1 ? "\(footer) \(otherServersFooter)" : footer
+    }
 
     var body: some View {
         if let notifications {
@@ -156,7 +164,7 @@ struct NotificationSettingsSection: View {
             } header: {
                 Text("Notifications")
             } footer: {
-                Text(Self.footer)
+                Text(Self.footer(serverCount: model?.servers.count ?? 0))
             }
             .task { await notifications.refreshStatus() }
             // Issue #45: off by default. With it off, a locked iPhone makes Siri say "Unlock your iPhone to use Hermes."

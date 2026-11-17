@@ -7,6 +7,12 @@ public protocol CronJobCacheStore: Sendable {
     func saveJobs(_ jobs: [CronJob])
     func loadRuns(jobId: String) -> [CronRun]?
     func saveRuns(_ runs: [CronRun], jobId: String)
+    /// Issue #84: the store of the server that is active now (see `SessionCacheStore.pinned()`).
+    func pinned() -> any CronJobCacheStore
+}
+
+extension CronJobCacheStore {
+    public func pinned() -> any CronJobCacheStore { self }
 }
 
 /// The JSON body of `cron.json`. Every key can be missing, and a bad row is dropped, so older and newer
@@ -43,6 +49,7 @@ struct CronCacheBody: Codable, Equatable {
 }
 
 /// `cron.json` next to the session cache, with the same `ProtectedStorage` rules (issue #18).
+/// Issue #84: each server has its own file, in its cache folder.
 public final class FileCronJobCacheStore: CronJobCacheStore, @unchecked Sendable {
     public let directory: URL
     /// The run history of this many jobs stays in the file.
