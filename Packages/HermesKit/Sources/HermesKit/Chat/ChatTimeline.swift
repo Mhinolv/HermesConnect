@@ -15,6 +15,8 @@ public struct ChatRow: Sendable, Equatable, Identifiable {
         case audioUnavailable
         /// Issue #49 (QA #54): the speak call of a voice reply runs. The caption row has a spinner.
         case preparingAudio
+        /// Issue #39: the message waits in the outbox. Each queued bubble shows it, with `clock`.
+        case queued
 
         public var text: String {
             switch self {
@@ -26,6 +28,7 @@ public struct ChatRow: Sendable, Equatable, Identifiable {
             case .noSpeech: "No speech found."
             case .audioUnavailable: "Audio unavailable. Tap to retry."
             case .preparingAudio: "Preparing audio…"
+            case .queued: "Will send when connected"
             }
         }
 
@@ -54,7 +57,7 @@ public enum ChatTimeline {
 
     /// Builds the rows. `statusLine` goes under the last bubble.
     public static func rows(for messages: [ChatMessage], statusLine: String? = nil) -> [ChatRow] {
-        let lastOutgoing = messages.lastIndex { $0.role == .user && $0.delivery != .failed }
+        let lastOutgoing = messages.lastIndex { $0.role == .user && $0.delivery != .failed && $0.delivery != .queued }
         var rows: [ChatRow] = []
         rows.reserveCapacity(messages.count)
         for (index, message) in messages.enumerated() {
@@ -80,6 +83,7 @@ public enum ChatTimeline {
             if message.voice?.transcript == .empty { return .noSpeech }
             switch message.delivery {
             case .failed: return .notDelivered
+            case .queued: return .queued
             case .sending: return isLastOutgoing ? .sending : nil
             case .delivered: return isLastOutgoing ? .delivered : nil
             case nil: return nil
@@ -144,6 +148,8 @@ public enum ChatTimeline {
         if let voice = row.message.voice {
             parts.append("Voice memo, \(VoiceMemoFormat.spokenDuration(voice.duration))")
             switch voice.transcript {
+            // Issue #39: a queued memo is transcribed on connect. The footnote says so.
+            case .pending where row.message.delivery == .queued: break
             case .pending: parts.append("Transcribing")
             case .failed: parts.append("Couldn't transcribe")
             case .done, .empty: break

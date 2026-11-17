@@ -126,7 +126,7 @@ public enum ChatBubbleParts {
         case .pending, .attached: break
         }
         parts += ChatTimeline.reactionLabels(for: part.row)
-        if let footnote = part.row.footnote, footnote == .notDelivered { parts.append(footnote.text) }
+        if let footnote = part.row.footnote, footnote == .notDelivered || footnote == .queued { parts.append(footnote.text) }
         return parts.joined(separator: ", ")
     }
 

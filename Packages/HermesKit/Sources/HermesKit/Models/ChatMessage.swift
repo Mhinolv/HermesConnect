@@ -15,6 +15,8 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
         case delivered
         /// `prompt.submit` failed. The bubble shows "Not Delivered".
         case failed
+        /// Issue #39: the app was offline. The message waits in the outbox: "Will send when connected".
+        case queued
     }
 
     /// The state of an incoming reply.

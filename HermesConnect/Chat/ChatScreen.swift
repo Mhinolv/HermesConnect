@@ -380,6 +380,13 @@ enum ChatLaunch {
         let model = ChatViewModel(transport: transport, storedSessionId: DemoChatTransport.storedId,
                                   title: "Calendar and logs", messages: seeds, cache: cache)
         sessions.register(model, for: DemoChatTransport.storedId)
+        if scenario == .outboxSent {
+            // Issue #39: the link comes back. The outbox sends the queued messages in order.
+            Task {
+                try? await Task.sleep(for: .seconds(1))
+                model.sendQueued()
+            }
+        }
         if let prompt = scenario.autoPrompt {
             Task {
                 try? await Task.sleep(for: .seconds(1))

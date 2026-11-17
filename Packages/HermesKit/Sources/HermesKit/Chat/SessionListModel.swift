@@ -173,6 +173,7 @@ public final class SessionListModel {
         switch item {
         case .state(.connected):
             Task { await refresh() }
+            sendOutboxes()
         case .event(let event):
             switch event.kind {
             case .sessionsChanged:
@@ -184,6 +185,16 @@ public final class SessionListModel {
             }
         default:
             break
+        }
+    }
+
+    /// Issue #39: after a relaunch, the chats with messages in the outbox send them on connect, also the chats
+    /// that the owner does not open. A chat model that is open already sends its own on the same connect.
+    /// The new-chat slot is not here: launch opens it (`hasCachedNewChat`).
+    public func sendOutboxes() {
+        for id in cache.outboxSessionIds() where id != SessionCache.newChatId && existingChat(for: id) == nil {
+            let chat = chat(for: id)
+            Task { await chat.open() }
         }
     }
 

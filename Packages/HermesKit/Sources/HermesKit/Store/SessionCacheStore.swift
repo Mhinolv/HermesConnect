@@ -19,6 +19,11 @@ public protocol SessionCacheStore: Sendable {
     /// Issue #64: drops the transcript, the draft and the active id of a deleted session.
     /// The list row goes with the next `saveSessions`. The file format does not change.
     func removeSession(sessionId: String)
+    /// Issue #39: the transcript keys with messages in the outbox, oldest first. After a relaunch the app
+    /// sends them on connect, also for a chat that the owner does not open.
+    func outboxSessionIds() -> [String]
+    /// Issue #39: marks or clears the outbox of one transcript key.
+    func saveOutbox(_ hasQueued: Bool, sessionId: String)
 }
 
 extension SessionCacheStore {
@@ -26,7 +31,12 @@ extension SessionCacheStore {
         saveTranscript([], sessionId: sessionId)
         saveDraft("", sessionId: sessionId)
         if loadActiveSessionId() == sessionId { saveActiveSessionId(nil) }
+        saveOutbox(false, sessionId: sessionId)
     }
+
+    /// Stores with no outbox index (older fakes) keep the queued messages in the transcript only.
+    public func outboxSessionIds() -> [String] { [] }
+    public func saveOutbox(_: Bool, sessionId _: String) {}
 }
 
 public enum SessionCache {
@@ -37,7 +47,8 @@ public enum SessionCache {
     /// Version 3 (issue #11): agent acks and owner tapbacks.
     /// Version 4 (issue #49): the waveform of a voice reply.
     /// Version 5 (issue #12): the photos, files and location cards of sent messages (metadata and local path).
-    /// Version 6 (issue #17): the quote of a reply.
+    /// Version 6 (issues #39 and #17): messages in the outbox (`queued`), the outbox index in the state file,
+    /// and the quote of a reply. Both are optional keys, so one version covers both.
     public static let formatVersion = 6
     /// Issue #36: the transcript key of the new chat that has no server row yet. Its memos stay here,
     /// so a failed memo survives a quit. No stored id starts with `#`.
@@ -45,8 +56,10 @@ public enum SessionCache {
 
     /// The messages to keep: the last `limit` ones that have ended, plus every voice memo.
     /// The owner never loses a recording: a memo that was not delivered stays with "Try Again".
+    /// Issue #39: the outbox stays too. A message that the outbox sends right now does not: a quit then
+    /// must not send it twice.
     public static func cacheable(_ messages: [ChatMessage], limit: Int = transcriptLimit) -> [ChatMessage] {
-        Array(messages.filter { isEnded($0) || $0.voice != nil }.suffix(limit))
+        Array(messages.filter { isEnded($0) || $0.voice != nil || $0.delivery == .queued }.suffix(limit))
     }
 
     /// A delivered prompt, or a reply that ended. The server transcript has these messages.
@@ -78,24 +91,27 @@ struct CachedVoice: Codable, Equatable {
     var path: String
     var duration: TimeInterval
     var waveform: [Float]
-    /// "done", "empty" or "failed". A memo that was still in "Transcribing…" reads as "failed".
+    /// "done", "empty", "failed" or "pending" (version 6, a queued memo with no transcript yet).
+    /// A memo that was still in "Transcribing…" and is not queued reads as "failed".
     var transcript: String
 
-    init(_ memo: VoiceMemo) {
+    init(_ memo: VoiceMemo, queued: Bool = false) {
         path = CachedPath.encode(memo.fileURL)
         duration = memo.duration
         waveform = memo.waveform
         transcript = switch memo.transcript {
         case .done: "done"
         case .empty: "empty"
+        case .pending where queued: "pending"
         case .pending, .failed: "failed"
         }
     }
 
-    func memo(text: String) -> VoiceMemo {
+    func memo(text: String, queued: Bool = false) -> VoiceMemo {
         let state: VoiceTranscript = switch transcript {
         case "done" where !text.isEmpty: .done(text)
         case "empty": .empty
+        case "pending" where queued: .pending
         default: .failed
         }
         return VoiceMemo(fileURL: CachedPath.decode(path), duration: duration, waveform: waveform, transcript: state)
@@ -263,6 +279,9 @@ struct CachedMessage: Codable, Equatable {
     var attachments: [CachedAttachment]
     /// Version 6 (issue #17): the quote of a reply. Older files have no key: no quote.
     var quote: CachedQuote?
+    /// Version 6 (issue #39): the message waits in the outbox. `notDelivered` is also `true`, so an older
+    /// build shows "Not Delivered" and never sends it twice. Older files have no key: not queued.
+    var queued: Bool
 
     init(_ message: ChatMessage) {
         id = message.id
@@ -273,7 +292,9 @@ struct CachedMessage: Codable, Equatable {
         promptId = message.promptId
         interrupted = message.reply == .interrupted
         notDelivered = message.role == .user && message.delivery != .delivered
-        voice = message.voice.map(CachedVoice.init)
+        let isQueued = message.role == .user && message.delivery == .queued
+        queued = isQueued
+        voice = message.voice.map { CachedVoice($0, queued: isQueued) }
         speech = message.spokenReply.map(CachedSpeech.init)
         ack = message.agentAck?.rawValue
         tapback = message.tapback?.rawValue
@@ -284,12 +305,19 @@ struct CachedMessage: Codable, Equatable {
     var message: ChatMessage {
         let tapback = tapback.flatMap(Tapback.init(rawValue:))
         if role == "user" {
-            let memo = voice?.memo(text: text)
+            let memo = voice?.memo(text: text, queued: queued)
             // The eyes of a turn that ran at the last save: the turn state is not known now.
             let ack = ack.flatMap(AgentAck.init(rawValue:)).flatMap { $0 == .seen ? nil : $0 }
+            let delivery: ChatMessage.Delivery = queued ? .queued : notDelivered ? .failed : .delivered
+            // A queued message uploads its attachments again with the send.
+            let items = attachments.map(\.attachment).map { item in
+                var item = item
+                if queued, item.kind != .location { item.upload = .pending }
+                return item
+            }
             return ChatMessage(id: id, role: .user, text: memo.map { $0.transcript.text ?? "" } ?? text, date: date,
-                               delivery: notDelivered ? .failed : .delivered, userRowId: userRowId, voice: memo,
-                               attachments: attachments.map(\.attachment), agentAck: ack, tapback: tapback,
+                               delivery: delivery, userRowId: userRowId, voice: memo,
+                               attachments: items, agentAck: ack, tapback: tapback,
                                quote: quote?.quote)
         }
         return ChatMessage(id: id, role: .assistant, text: text, date: date,
@@ -299,7 +327,7 @@ struct CachedMessage: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, role, text, date, userRowId, promptId, interrupted, notDelivered, voice, speech, ack, tapback
-        case attachments, quote
+        case attachments, quote, queued
     }
 
     init(from decoder: any Decoder) throws {
@@ -322,6 +350,8 @@ struct CachedMessage: Codable, Equatable {
         attachments = ((try? container.decodeIfPresent([CachedAttachment].self, forKey: .attachments)) ?? nil) ?? []
         // Version 6. A broken quote drops only the quote: the message shows its reply text.
         quote = (try? container.decodeIfPresent(CachedQuote.self, forKey: .quote)) ?? nil
+        // Version 6. A broken value reads as not queued: "Not Delivered" with "Try Again", never a second send.
+        queued = ((try? container.decodeIfPresent(Bool.self, forKey: .queued)) ?? nil) ?? false
     }
 }
 
@@ -336,22 +366,26 @@ struct CacheFile<Body: Codable>: Codable {
     }
 }
 
-/// The small state file: the active session and the drafts.
+/// The small state file: the active session, the drafts and the outbox index.
 struct CacheState: Codable, Equatable {
     var activeSessionId: String?
     var drafts: [String: String]
+    /// Version 6 (issue #39): the transcript keys with queued messages, oldest first. Older files: none.
+    var outbox: [String]
 
-    init(activeSessionId: String? = nil, drafts: [String: String] = [:]) {
+    init(activeSessionId: String? = nil, drafts: [String: String] = [:], outbox: [String] = []) {
         self.activeSessionId = activeSessionId
         self.drafts = drafts
+        self.outbox = outbox
     }
 
-    private enum CodingKeys: String, CodingKey { case activeSessionId, drafts }
+    private enum CodingKeys: String, CodingKey { case activeSessionId, drafts, outbox }
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         activeSessionId = try container.decodeIfPresent(String.self, forKey: .activeSessionId)
         drafts = try container.decodeIfPresent([String: String].self, forKey: .drafts) ?? [:]
+        outbox = ((try? container.decodeIfPresent([String].self, forKey: .outbox)) ?? nil) ?? []
     }
 }
 
@@ -438,9 +472,24 @@ public final class FileSessionCacheStore: SessionCacheStore, @unchecked Sendable
             try? FileManager.default.removeItem(at: transcriptURL(sessionId: sessionId))
             var state = state()
             let active = state.activeSessionId == sessionId ? nil : state.activeSessionId
-            guard state.drafts[sessionId] != nil || active != state.activeSessionId else { return }
+            guard state.drafts[sessionId] != nil || active != state.activeSessionId || state.outbox.contains(sessionId)
+            else { return }
             state.drafts[sessionId] = nil
             state.activeSessionId = active
+            state.outbox.removeAll { $0 == sessionId }
+            write(state, to: stateURL)
+        }
+    }
+
+    public func outboxSessionIds() -> [String] {
+        lock.withLock { state().outbox }
+    }
+
+    public func saveOutbox(_ hasQueued: Bool, sessionId: String) {
+        lock.withLock {
+            var state = state()
+            guard state.outbox.contains(sessionId) != hasQueued else { return }
+            if hasQueued { state.outbox.append(sessionId) } else { state.outbox.removeAll { $0 == sessionId } }
             write(state, to: stateURL)
         }
     }
@@ -487,6 +536,7 @@ public final class InMemorySessionCacheStore: SessionCacheStore, @unchecked Send
     private var transcripts: [String: [ChatMessage]] = [:]
     private var drafts: [String: String] = [:]
     private var activeId: String?
+    private var outbox: [String] = []
 
     public init(sessions: [SessionListItem] = [], transcripts: [String: [ChatMessage]] = [:],
                 activeSessionId: String? = nil) {
@@ -521,6 +571,16 @@ public final class InMemorySessionCacheStore: SessionCacheStore, @unchecked Send
             transcripts[sessionId] = nil
             drafts[sessionId] = nil
             if activeId == sessionId { activeId = nil }
+            outbox.removeAll { $0 == sessionId }
+        }
+    }
+
+    public func outboxSessionIds() -> [String] { lock.withLock { outbox } }
+
+    public func saveOutbox(_ hasQueued: Bool, sessionId: String) {
+        lock.withLock {
+            guard outbox.contains(sessionId) != hasQueued else { return }
+            if hasQueued { outbox.append(sessionId) } else { outbox.removeAll { $0 == sessionId } }
         }
     }
 
