@@ -8,6 +8,8 @@ struct SettingsView: View {
     @State private var host = ""
     @State private var port = ServerProfile.defaultPort
     @State private var confirmReset = false
+    @State private var confirmForget = false
+    @State private var forgetFailed = false
     @State private var saveFailed = false
 
     var body: some View {
@@ -17,8 +19,31 @@ struct SettingsView: View {
                     ServerFieldRows(host: $host, port: $port)
                     NavigationLink("Public Key") { DeviceKeyView() }
                     NavigationLink("Install Steps") { InstallStepsView() }
+                    if let hostKey = model.profile?.hostKey {
+                        NavigationLink {
+                            HostKeyDetailView(key: hostKey)
+                        } label: {
+                            LabeledContent("Host Key", value: hostKey.shortFingerprint)
+                        }
+                        .accessibilityValue(hostKey.spokenFingerprint)
+                    } else {
+                        LabeledContent("Host Key", value: "Not trusted yet")
+                    }
                     Button("Reset Device Key…", role: .destructive) { confirmReset = true }
                         .foregroundStyle(.red)
+                    if model.profile?.hostKey != nil {
+                        Button("Forget Host Key…", role: .destructive) { confirmForget = true }
+                            .foregroundStyle(.red)
+                    }
+                }
+                Section {
+                    LabeledContent("Status", value: connectionText)
+                    Button("Connect") { Task { await model.connect() } }
+                        .disabled(model.connection == .connecting || !model.isSetUp)
+                } header: {
+                    Text("Connection")
+                } footer: {
+                    if let reason = connectionReason { Text(reason) }
                 }
                 Section {
                     Toggle(Authenticator.appLockToggleTitle, isOn: Binding(
@@ -44,11 +69,42 @@ struct SettingsView: View {
             } message: {
                 Text("The server will reject this iPhone until you install the new public key.")
             }
+            .confirmationDialog("Forget Host Key?", isPresented: $confirmForget, titleVisibility: .visible) {
+                Button("Forget", role: .destructive) {
+                    Task {
+                        do { try await model.forgetHostKey() } catch { forgetFailed = true }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Hermes will ask you to trust the server again on the next connect.")
+            }
             .alert("Could not save the server.", isPresented: $saveFailed) {}
+            .alert("Could not forget the host key.", isPresented: $forgetFailed) {}
+            .hostTrustPresenter(enabled: true)
         }
         .onAppear {
             host = model.profile?.host ?? ""
             port = model.profile?.port ?? ServerProfile.defaultPort
+        }
+    }
+
+    /// The Settings > Connection status. "Connected: PONG <version>" is the gate reply.
+    private var connectionText: String {
+        switch model.connection {
+        case .idle: "Not connected"
+        case .connecting: "Connecting…"
+        case .connected(let version): "Connected: PONG \(version)"
+        case .offline: "Offline"
+        case .hostKeyChanged: "Not connected"
+        }
+    }
+
+    private var connectionReason: String? {
+        switch model.connection {
+        case .offline(let error?): error.description
+        case .hostKeyChanged: "The server host key changed. Hermes did not connect."
+        default: nil
         }
     }
 

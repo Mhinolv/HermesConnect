@@ -24,7 +24,8 @@ private struct FailingKeyStore: DeviceKeyStore {
         let store = keyStore ?? KeychainDeviceKeyStore(secrets: InMemorySecretStore(), factory: SoftwareKeyFactory())
         let suite = defaults ?? UserDefaults(suiteName: "test-\(UUID().uuidString)")!
         return AppModel(keyStore: store, profileStore: InMemoryServerProfileStore(profile),
-                        defaults: suite, deviceName: "Test iPhone")
+                        defaults: suite, deviceName: "Test iPhone",
+                        transport: ScriptedSSHTransport(hostKey: .sample))
     }
 
     @Test func firstRunIsNotSetUp() {
@@ -146,5 +147,103 @@ private struct FailingKeyStore: DeviceKeyStore {
         }
         #expect(lines.count > 3)
         #expect(lines.joined() == key)
+    }
+}
+
+@MainActor
+@Suite struct ConnectionTests {
+    private struct Setup {
+        let model: AppModel
+        let transport: ScriptedSSHTransport
+        let profiles: InMemoryServerProfileStore
+    }
+
+    private func makeModel(pin: HostKey? = nil, serverKey: HostKey = .sample,
+                           failure: SSHConnectionError? = nil) async -> Setup {
+        let keyStore = KeychainDeviceKeyStore(secrets: InMemorySecretStore(), factory: SoftwareKeyFactory())
+        let profiles = InMemoryServerProfileStore(ServerProfile(host: "vps.example.com", hostKey: pin))
+        let transport = ScriptedSSHTransport(hostKey: serverKey, connectFailure: failure)
+        let model = AppModel(keyStore: keyStore, profileStore: profiles,
+                             defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!,
+                             deviceName: "Test iPhone", transport: transport)
+        await model.ensureKey()
+        return Setup(model: model, transport: transport, profiles: profiles)
+    }
+
+    @Test func firstConnectAsksForTrustAndSavesNothing() async throws {
+        let setup = await makeModel()
+        await setup.model.connect()
+        #expect(setup.model.pendingTrust == .sample)
+        #expect(setup.model.connection == .connecting)
+        #expect(setup.transport.record.authentications == 0)
+        #expect(try setup.profiles.load()?.hostKey == nil)
+    }
+
+    @Test func trustSavesTheFullKeyAndConnects() async throws {
+        let setup = await makeModel()
+        await setup.model.connect()
+        await setup.model.trustPendingHostKey()
+        #expect(setup.model.pendingTrust == nil)
+        #expect(try setup.profiles.load()?.hostKey == .sample)
+        #expect(setup.model.connection == .connected(gateVersion: "1"))
+        #expect(setup.transport.record.authentications == 1)
+        #expect(setup.transport.record.commands == [.ping])
+    }
+
+    @Test func cancelStopsTheConnectAndShowsOffline() async throws {
+        let setup = await makeModel()
+        await setup.model.connect()
+        setup.model.cancelTrust()
+        #expect(setup.model.pendingTrust == nil)
+        #expect(setup.model.connection == .offline(nil))
+        #expect(try setup.profiles.load()?.hostKey == nil)
+        #expect(setup.transport.record.authentications == 0)
+    }
+
+    @Test func changedKeyBlocksAndShowsTheErrorScreen() async throws {
+        let setup = await makeModel(pin: .sample, serverKey: .otherSample)
+        await setup.model.connect()
+        #expect(setup.model.connection == .hostKeyChanged(saved: .sample, received: .otherSample))
+        #expect(setup.model.showsHostKeyError)
+        #expect(setup.model.pendingTrust == nil)
+        #expect(setup.transport.record.authentications == 0)
+        #expect(try setup.profiles.load()?.hostKey == .sample)
+    }
+
+    @Test func forgetHostKeyAsksForTrustAgain() async throws {
+        let setup = await makeModel(pin: .sample, serverKey: .otherSample)
+        await setup.model.connect()
+        try await setup.model.forgetHostKey()
+        #expect(!setup.model.showsHostKeyError)
+        #expect(setup.model.connection == .idle)
+        #expect(try setup.profiles.load()?.hostKey == nil)
+        await setup.model.connect()
+        #expect(setup.model.pendingTrust == .otherSample)
+    }
+
+    @Test func networkFailureIsOffline() async {
+        let setup = await makeModel(pin: .sample, failure: .unreachable)
+        await setup.model.connect()
+        #expect(setup.model.connection == .offline(.unreachable))
+    }
+
+    @Test func newServerLosesThePin() async throws {
+        let setup = await makeModel(pin: .sample)
+        await setup.model.connect()
+        #expect(setup.model.connection == .connected(gateVersion: "1"))
+        var profile = try #require(setup.model.profile)
+        profile.displayName = "Box"
+        try setup.model.saveProfile(profile)
+        #expect(setup.model.profile?.hostKey == .sample)
+        profile.host = "other.example.com"
+        try setup.model.saveProfile(profile)
+        #expect(setup.model.profile?.hostKey == nil)
+        #expect(setup.model.connection == .idle)
+    }
+
+    @Test func trustInstructionsNameTheKeyFile() {
+        #expect(TrustServerSheet.hostKeyFile(for: .sample) == "ssh_host_ed25519_key.pub")
+        let ecdsa = HostKey(algorithm: "ecdsa-sha2-nistp256", blob: Data())
+        #expect(TrustServerSheet.hostKeyFile(for: ecdsa) == "ssh_host_ecdsa_key.pub")
     }
 }
