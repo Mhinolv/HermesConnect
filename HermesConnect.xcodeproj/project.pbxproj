@@ -18,6 +18,7 @@
 		18787829A672FAE5AA0FBC11 /* ChatScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A26C38F7103D242B9AFB6E1 /* ChatScreen.swift */; };
 		2123C91DA56892A01ABB28FA /* HermesKit in Frameworks */ = {isa = PBXBuildFile; productRef = ECEB44D1091478F728CDD903 /* HermesKit */; };
 		253E7CB64BA9A7C624A4BC93 /* HermesConnectApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1663E6E147C124EEADC03F1 /* HermesConnectApp.swift */; };
+		2AC3C42911AAE5136A85C622 /* voice-reply.ogg in Resources */ = {isa = PBXBuildFile; fileRef = 6FE198DB92F31E814C4C7ABD /* voice-reply.ogg */; };
 		2D5607FD1D43E7620BA61084 /* DemoChatTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3C4E1EC060A41E57D2B774C /* DemoChatTransport.swift */; };
 		43E9BA6A1999EA550F1BE33C /* AttachmentUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDDF85200B57F3AFCAB1552A /* AttachmentUITests.swift */; };
 		45DEF07013553955227D3948 /* CodeBlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAAB10B2220F96EC4E70544A /* CodeBlock.swift */; };
@@ -83,6 +84,7 @@
 		5E583F634243E84B759FCEC6 /* LocationSettingsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationSettingsSection.swift; sourceTree = "<group>"; };
 		61D93DB454F3B97CC6C5DDC5 /* AttachmentImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentImport.swift; sourceTree = "<group>"; };
 		6A3CF81303C78255758A5C52 /* HermesKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = HermesKit; path = Packages/HermesKit; sourceTree = SOURCE_ROOT; };
+		6FE198DB92F31E814C4C7ABD /* voice-reply.ogg */ = {isa = PBXFileReference; path = "voice-reply.ogg"; sourceTree = "<group>"; };
 		7043F7690A196EB557326890 /* SetupFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupFlowView.swift; sourceTree = "<group>"; };
 		71BE1F0BBF1E0DC6C9086E97 /* ChatViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewController.swift; sourceTree = "<group>"; };
 		76E748D4ED9CB565A2F48120 /* ConnectionStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStatusView.swift; sourceTree = "<group>"; };
@@ -140,12 +142,37 @@
 			path = Attachments;
 			sourceTree = "<group>";
 		};
+		3C8084DD18EC706452813AC0 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				9B57DA21D81F9BFEF9BC8B0C /* HermesKitTests */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		4153B1A96CE372D51FAA0233 /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				6FE198DB92F31E814C4C7ABD /* voice-reply.ogg */,
+			);
+			path = Fixtures;
+			sourceTree = "<group>";
+		};
 		43EADE2D276C37BEB76FF546 /* Packages */ = {
 			isa = PBXGroup;
 			children = (
 				6A3CF81303C78255758A5C52 /* HermesKit */,
+				4B9D553A4A08E5FD3A0D3B2C /* HermesKit */,
 			);
 			path = Packages;
+			sourceTree = "<group>";
+		};
+		4B9D553A4A08E5FD3A0D3B2C /* HermesKit */ = {
+			isa = PBXGroup;
+			children = (
+				3C8084DD18EC706452813AC0 /* Tests */,
+			);
+			path = HermesKit;
 			sourceTree = "<group>";
 		};
 		5CF6370A9106E7F964BC999C /* HermesConnect */ = {
@@ -219,6 +246,14 @@
 			path = Resources;
 			sourceTree = "<group>";
 		};
+		9B57DA21D81F9BFEF9BC8B0C /* HermesKitTests */ = {
+			isa = PBXGroup;
+			children = (
+				4153B1A96CE372D51FAA0233 /* Fixtures */,
+			);
+			path = HermesKitTests;
+			sourceTree = "<group>";
+		};
 		C33949AD1865506056454724 /* Chat */ = {
 			isa = PBXGroup;
 			children = (
@@ -253,6 +288,7 @@
 			buildConfigurationList = 956B4085EE2407B9650DE743 /* Build configuration list for PBXNativeTarget "HermesConnectTests" */;
 			buildPhases = (
 				DEF02CB5C8B6419216F95A64 /* Sources */,
+				92E9EEAB1E7E1E4CA2EC9CAC /* Resources */,
 			);
 			buildRules = (
 			);
@@ -328,6 +364,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		92E9EEAB1E7E1E4CA2EC9CAC /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2AC3C42911AAE5136A85C622 /* voice-reply.ogg in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		93BFA3F15DE93A921C762E51 /* Sources */ = {

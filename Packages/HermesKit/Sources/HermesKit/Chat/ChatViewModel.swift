@@ -360,6 +360,15 @@ public final class ChatViewModel {
         return speak(replyId: id, autoPlay: false)
     }
 
+    /// Issue #42: the ready audio of a reply did not play, for example an `.ogg` file that an older build saved.
+    /// The bubble shows "Audio unavailable. Tap to retry.", and a tap speaks the reply again.
+    public func speechDidNotPlay(id: String) {
+        guard thread.message(id: id)?.spokenReply?.audio != nil else { return }
+        thread.setSpokenReply(.failed, id: id)
+        redrawNow()
+        saveTranscript()
+    }
+
     /// "Reply failed. Tap to retry.": drop the failed reply and run the prompt again.
     /// A known prompt row is regenerated (`truncate_before_row_id`), so the transcript has no copy.
     @discardableResult
