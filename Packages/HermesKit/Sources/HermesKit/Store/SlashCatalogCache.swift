@@ -5,6 +5,12 @@ import Foundation
 public protocol SlashCatalogCacheStore: Sendable {
     func load(server: String) -> [SlashCatalogEntry]?
     func save(_ entries: [SlashCatalogEntry], server: String)
+    /// Issue #84: "Remove Server" drops the catalog of that server.
+    func remove(server: String)
+}
+
+extension SlashCatalogCacheStore {
+    public func remove(server _: String) {}
 }
 
 /// The key of a server in the cache: `user@host:port`, host in lower case. Issue #66 (more than one server)
@@ -56,7 +62,9 @@ struct SlashCatalogCacheBody: Codable, Equatable {
     }
 }
 
-/// `slash-commands.json` in the cache folder, next to `cron.json`, with the same `ProtectedStorage` rules.
+/// `slash-commands.json` in the cache folder, with the same `ProtectedStorage` rules.
+/// Issue #84: the file stays in `HermesConnect/Cache/`, not in a server folder. It is keyed by server already,
+/// and an older build still reads it.
 public final class FileSlashCatalogCacheStore: SlashCatalogCacheStore, @unchecked Sendable {
     public let directory: URL
     private let lock = NSLock()
@@ -83,6 +91,16 @@ public final class FileSlashCatalogCacheStore: SlashCatalogCacheStore, @unchecke
             var body = read()
             guard body.servers[server] != entries || body.order.last != server else { return }
             body.put(entries, server: server)
+            write(body)
+        }
+    }
+
+    public func remove(server: String) {
+        lock.withLock {
+            var body = read()
+            guard body.servers[server] != nil else { return }
+            body.servers[server] = nil
+            body.order.removeAll { $0 == server }
             write(body)
         }
     }
@@ -124,4 +142,5 @@ public final class InMemorySlashCatalogCacheStore: SlashCatalogCacheStore, @unch
 
     public func load(server: String) -> [SlashCatalogEntry]? { lock.withLock { servers[server] } }
     public func save(_ entries: [SlashCatalogEntry], server: String) { lock.withLock { servers[server] = entries } }
+    public func remove(server: String) { _ = lock.withLock { servers.removeValue(forKey: server) } }
 }

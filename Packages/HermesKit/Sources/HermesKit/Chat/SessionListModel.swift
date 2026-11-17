@@ -41,8 +41,6 @@ public final class SessionListModel {
     @ObservationIgnored private var generation = 0
     /// Issue #83: the unread ids of the server that is active again. The next load gives them the blue dot.
     @ObservationIgnored private var carriedUnread: Set<String> = []
-    /// Issue #83: the outbox sessions of the servers that are not active. A connect never sends them.
-    @ObservationIgnored public private(set) var heldOutboxIds: Set<String> = []
 
     /// `transport` and `chatTransport` are the same `LiveChatTransport` in the app. Tests give fakes.
     public init(transport: any SessionsTransport, chatTransport: any ChatTransport, cache: any SessionCacheStore,
@@ -159,10 +157,16 @@ public final class SessionListModel {
     /// Issue #15: one background catch-up (BGAppRefresh). It posts the notifications and sets the badge.
     /// Then the list shows the new rows and dots. Returns `nil` when `session.list` fails.
     @discardableResult
-    public func catchUp(showsPreview: Bool, notifier: any LocalNotifying) async -> CatchUpResult? {
+    /// Issue #84: `server` puts the server name in the title when the owner has two or more servers.
+    public func catchUp(showsPreview: Bool, notifier: any LocalNotifying, server: NotificationServer? = nil,
+                        setsBadge: Bool = true) async -> CatchUpResult? {
         cache.saveSessions(sessions)
-        let refresher = CatchUpRefresher(sessions: transport, chats: chatTransport, cache: cache, notifier: notifier)
-        guard let result = try? await refresher.run(showsPreview: showsPreview, openSessionId: openSessionId)
+        let current = generation
+        let refresher = CatchUpRefresher(sessions: transport, chats: chatTransport, cache: cache.pinned(),
+                                         notifier: notifier)
+        guard let result = try? await refresher.run(showsPreview: showsPreview, openSessionId: openSessionId,
+                                                    server: server, setsBadge: setsBadge),
+              current == generation
         else { return nil }
         sessions = cache.loadSessions()
         hasLoaded = true
@@ -191,7 +195,7 @@ public final class SessionListModel {
     /// The state of the active server for the server book: the unread rows and the outbox.
     /// Before the first load after a switch, the unread rows of `fallback` stay.
     public func serverState(fallback: ServerStateBook.Entry = .init()) -> ServerStateBook.Entry {
-        let outbox = cache.outboxSessionIds().filter { $0 != SessionCache.newChatId && !heldOutboxIds.contains($0) }
+        let outbox = cache.outboxSessionIds().filter { $0 != SessionCache.newChatId }
         guard hasLoaded else {
             return ServerStateBook.Entry(unreadIds: fallback.unreadIds, unreadChats: fallback.unreadChats,
                                          outboxIds: outbox)
@@ -200,63 +204,33 @@ public final class SessionListModel {
                                      outboxIds: outbox)
     }
 
-    /// The active server changed. The rows, the chat models and the active id belong to the old server.
-    /// - Every chat model stops, so none resumes or sends on the new server. Drafts and transcripts stay.
-    /// - The list shows the redacted rows until the new server answers. A late answer of the old server is dropped.
-    /// - `carryingUnread`: the blue dots of the new server from the last time it was active.
-    /// - `heldOutboxes`: the outbox sessions of the other servers. They wait for their own server.
-    /// - The new chat with no server row (`newChatId`) belongs to the old server. It moves to `parkNewChatAs`.
-    ///   With no key, it is removed: its queued messages never show or send on another server (QA 90-1).
-    /// - `restoreNewChatFrom`: the parked new chat of the new server comes back, with its outbox.
-    public func switchServer(carryingUnread: [String], heldOutboxes: Set<String>, parkNewChatAs parkId: String? = nil,
-                             restoreNewChatFrom restoreId: String? = nil) {
+    /// The active server changed. The app selected the cache folder of the new server first (issue #84).
+    /// - Every chat model stops, so none resumes or sends on the new server. Drafts and transcripts stay in the
+    ///   folder of their server.
+    /// - The list shows the cached rows of the new server at once. With no cache, it shows the redacted rows
+    ///   until the new server answers. A late answer of the old server is dropped.
+    /// - `carryingUnread`: the blue dots of the new server from the server book (switch away, background refresh).
+    /// - `newHost`: the same entry got a new host, port or user. Its rows, its active id, its outbox and its new
+    ///   chat belong to the old machine: they go. The queued text of a stored chat stays in its transcript.
+    public func switchServer(carryingUnread: [String], newHost: Bool = false) {
         generation += 1
         for chat in chats.values { chat.stopEvents() }
         chats = [:]
         openChatModel = nil
         refreshTask = nil
-        carriedUnread = Set(carryingUnread)
-        heldOutboxIds = heldOutboxes
-        sessions = []
-        hasLoaded = false
         archivedCount = 0
         archivedSessions = []
         hasLoadedArchived = false
-        // The cache has one folder for now (#84 makes one for each server). Its rows and its active id
-        // belong to the old server: a relaunch must not show them, and catch-up must not count them as new.
-        cache.saveSessions([])
-        cache.saveActiveSessionId(nil)
-        moveNewChat(from: SessionCache.newChatId, to: parkId)
-        if let restoreId { moveNewChat(from: restoreId, to: SessionCache.newChatId) }
-    }
-
-    /// Move the transcript and the draft of a new chat to another key. `nil` removes them.
-    /// Only `newChatId` is in the outbox: a parked new chat never sends.
-    private func moveNewChat(from source: String, to target: String?) {
-        let messages = cache.loadTranscript(sessionId: source)
-        let draft = cache.loadDraft(sessionId: source)
-        cache.removeSession(sessionId: source)
-        guard let target, !messages.isEmpty || !draft.isEmpty else { return }
-        cache.saveTranscript(messages, sessionId: target)
-        cache.saveDraft(draft, sessionId: target)
-        if target == SessionCache.newChatId, messages.contains(where: { $0.delivery == .queued }) {
-            cache.saveOutbox(true, sessionId: target)
+        if newHost {
+            cache.saveSessions([])
+            cache.saveActiveSessionId(nil)
+            for id in cache.outboxSessionIds() { cache.saveOutbox(false, sessionId: id) }
+            cache.removeSession(sessionId: SessionCache.newChatId)
         }
-    }
-
-    /// Issue #83: the owner removed a server that is not active. Its parked new chat goes too.
-    public func removeParkedNewChat(_ parkId: String) {
-        cache.removeSession(sessionId: parkId)
-    }
-
-    /// The outbox of a removed server never sends. Its queued messages stay in their transcripts.
-    public func dropOutboxes(_ ids: [String]) {
-        for id in ids { cache.saveOutbox(false, sessionId: id) }
-    }
-
-    /// Launch: hold the outbox of the other servers before the first connect.
-    public func holdOutboxes(_ ids: Set<String>) {
-        heldOutboxIds = ids
+        let cached = cache.loadSessions()
+        carriedUnread = Set(carryingUnread)
+        sessions = CatchUp.markUnread(cached, unread: carriedUnread, newContent: [], openSessionId: nil)
+        hasLoaded = !cached.isEmpty
     }
 
     /// Launch: the blue dots of the active server, when the cache lost them.
@@ -289,10 +263,9 @@ public final class SessionListModel {
     /// Issue #39: after a relaunch, the chats with messages in the outbox send them on connect, also the chats
     /// that the owner does not open. A chat model that is open already sends its own on the same connect.
     /// The new-chat slot is not here: launch opens it (`hasCachedNewChat`).
-    /// Issue #83: the outbox of a server that is not active stays in the cache until that server connects.
+    /// Issue #84: the cache is the folder of the active server, so the outbox of another server is not here.
     public func sendOutboxes() {
-        for id in cache.outboxSessionIds() where id != SessionCache.newChatId && !heldOutboxIds.contains(id)
-            && existingChat(for: id) == nil {
+        for id in cache.outboxSessionIds() where id != SessionCache.newChatId && existingChat(for: id) == nil {
             let chat = chat(for: id)
             Task { await chat.open() }
         }
@@ -469,7 +442,8 @@ public final class SessionListModel {
     public func chat(for id: String) -> ChatViewModel {
         if let chat = existingChat(for: id) { return chat }
         let title = session(id: id).map(\.displayTitle)
-        let chat = ChatViewModel(transport: chatTransport, storedSessionId: id, title: title, cache: cache,
+        // Issue #84: the chat keeps the folder of its server, also after a switch.
+        let chat = ChatViewModel(transport: chatTransport, storedSessionId: id, title: title, cache: cache.pinned(),
                                  transcription: transcription)
         chat.startEvents()
         chats[id] = chat
@@ -499,7 +473,7 @@ public final class SessionListModel {
         if let chat = chats[key] { return chat }
         chats.values.forEach { $0.yieldNewChat() }
         let keeps = !chats.values.contains { $0.keepsNewChat }
-        let chat = ChatViewModel(transport: chatTransport, cache: cache, keepsNewChat: keeps,
+        let chat = ChatViewModel(transport: chatTransport, cache: cache.pinned(), keepsNewChat: keeps,
                                  transcription: transcription)
         chat.startEvents()
         chats[key] = chat

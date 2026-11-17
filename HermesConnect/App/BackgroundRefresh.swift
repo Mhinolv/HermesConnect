@@ -49,34 +49,86 @@ enum BackgroundRefresh {
         }
     }
 
+    /// Issue #84: the other server gets a turn only when the active server took less than this.
+    static let otherServerStartLimit: Duration = .seconds(12)
+
     /// One run: connect if needed, wait for the chat socket, catch up, then disconnect again if the run
     /// made the connection and the app is still not active.
+    /// Issue #84: then, if time is left and the app is still not active, one other server, in turn. The active
+    /// link closes before that connect. Its notifications name the server, and its counts go to the server book.
     static func run(model: AppModel, link: LiveChatTransport, sessions: SessionListModel,
-                    notifications: NotificationController,
-                    isActive: @MainActor () -> Bool = { UIApplication.shared.applicationState == .active })
-        async -> Bool {
+                    notifications: NotificationController, caches: ServerCaches? = nil,
+                    defaults: UserDefaults = .standard, linkTimeout: Duration = BackgroundRefresh.linkTimeout,
+                    isActive: @MainActor () -> Bool = { UIApplication.shared.applicationState == .active },
+                    makeLink: @MainActor () -> LiveChatTransport = { LiveChatTransport() }) async -> Bool {
         guard model.isSetUp else { return false }
+        let clock = ContinuousClock()
+        let started = clock.now
         var madeConnection = false
+        let activeOK = await catchUpActive(model: model, link: link, sessions: sessions, notifications: notifications,
+                                           linkTimeout: linkTimeout, madeConnection: &madeConnection)
+        guard !isActive() else { return activeOK }
+        let last = defaults.string(forKey: BackgroundRotation.lastServerKey).flatMap(UUID.init(uuidString:))
+        if let caches, !Task.isCancelled, clock.now - started < otherServerStartLimit,
+           let other = BackgroundRotation.next(servers: model.servers.map(\.id), active: model.profile?.id, last: last) {
+            defaults.set(other.uuidString, forKey: BackgroundRotation.lastServerKey)
+            link.setEndpoint(nil)
+            _ = await catchUpOther(other, model: model, sessions: sessions, notifications: notifications,
+                                   caches: caches, linkTimeout: linkTimeout, makeLink: makeLink)
+        } else if madeConnection {
+            await model.disconnect()
+        }
+        return activeOK
+    }
+
+    private static func catchUpActive(model: AppModel, link: LiveChatTransport, sessions: SessionListModel,
+                                      notifications: NotificationController, linkTimeout: Duration,
+                                      madeConnection: inout Bool) async -> Bool {
         if case .connected = model.connection {} else {
             await model.connect()
             madeConnection = true
         }
-        defer {
-            if madeConnection, !isActive() { Task { await model.disconnect() } }
-        }
         guard case .connected = model.connection else { return false }
         // The root view can be missing in a background launch, so give the endpoint to the link here too.
         link.setEndpoint(model.hermesEndpoint)
-        guard await waitUntilReady(link) else { return false }
-        let result = await sessions.catchUp(showsPreview: notifications.showsPreview, notifier: notifications.poster)
+        guard await waitUntilReady(link, timeout: linkTimeout) else { return false }
+        let server = model.profile.map { NotificationServer($0, serverCount: model.servers.count) }
+        let result = await sessions.catchUp(showsPreview: notifications.showsPreview, notifier: notifications.poster,
+                                            server: server, setsBadge: false)
         // Issue #83: the app icon badge counts the unread sessions of all servers.
         if result != nil { notifications.setBadge(model.badgeCount(activeUnread: sessions.unreadCount)) }
         return result != nil
     }
 
-    private static func waitUntilReady(_ link: LiveChatTransport) async -> Bool {
+    /// Issue #84: one catch-up of a server that is not active, with its own link and its own cache folder.
+    static func catchUpOther(_ id: UUID, model: AppModel, sessions: SessionListModel,
+                             notifications: NotificationController, caches: ServerCaches,
+                             linkTimeout: Duration = BackgroundRefresh.linkTimeout,
+                             makeLink: @MainActor () -> LiveChatTransport) async -> Bool {
+        guard let profile = model.serverList.server(id: id) else { return false }
+        let server = NotificationServer(profile, serverCount: model.servers.count)
+        let cache = caches.sessionStore(for: id)
+        let link = makeLink()
+        let poster = notifications.poster
+        let showsPreview = notifications.showsPreview
+        return await model.withBackgroundLink(to: id) { endpoint in
+            link.setEndpoint(endpoint)
+            defer { link.setEndpoint(nil) }
+            guard await waitUntilReady(link, timeout: linkTimeout) else { return false }
+            let refresher = CatchUpRefresher(sessions: link, chats: link, cache: cache, notifier: poster)
+            guard (try? await refresher.run(showsPreview: showsPreview, server: server, setsBadge: false)) != nil
+            else { return false }
+            // The server menu and the app icon badge count the new replies of that server.
+            model.recordServerState(ServerStateBook.Entry(cachedRows: cache.loadSessions(),
+                                                          outbox: cache.outboxSessionIds()), for: id)
+            notifications.setBadge(model.badgeCount(activeUnread: sessions.unreadCount))
+            return true
+        }
+    }
+
+    private static func waitUntilReady(_ link: LiveChatTransport, timeout: Duration) async -> Bool {
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: linkTimeout)
+        let deadline = clock.now.advanced(by: timeout)
         while link.status != .ready {
             if Task.isCancelled || clock.now >= deadline || link.status == .failed { return false }
             try? await Task.sleep(for: .milliseconds(200))

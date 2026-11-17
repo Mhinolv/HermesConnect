@@ -53,7 +53,8 @@ public final class JobsModel {
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     /// Issue #83: counts server switches. An answer from the old server is dropped.
     @ObservationIgnored private var generation = 0
-    /// Issue #83: the cache holds the jobs of the old server. The next good load saves, also an equal list.
+    /// Issue #83: the cache held the jobs of the old server. Issue #84: each server has its own cache, so a
+    /// switch does not set it. The next good load saves, also an equal list.
     @ObservationIgnored private var cacheIsStale = false
 
     public init(transport: any CronTransport, cache: any CronJobCacheStore) {
@@ -105,14 +106,17 @@ public final class JobsModel {
         }
     }
 
-    /// Issue #83: the active server changed. The list shows the redacted rows until the new server answers.
+    /// Issue #83: the active server changed. With no cache, the list shows the redacted rows until the new
+    /// server answers.
+    /// Issue #84: the app selected the cache folder of the new server first. Its cached jobs show at once.
     public func switchServer() {
         generation += 1
         refreshTask = nil
-        jobs = []
-        hasLoaded = false
+        let cached = cache.loadJobs()
+        jobs = cached ?? []
+        hasLoaded = cached != nil
         errorMessage = nil
-        cacheIsStale = true
+        cacheIsStale = false
     }
 
     /// Refreshes on each connect, `cron.changed` and `sessions.changed` until the task ends.
@@ -142,7 +146,7 @@ public final class JobsModel {
 
     /// The run history of one job. Each call gives a new model with the cached runs.
     public func runs(for job: CronJob) -> CronRunsModel {
-        CronRunsModel(job: job, transport: transport, cache: cache)
+        CronRunsModel(job: job, transport: transport, cache: cache.pinned())
     }
 }
 

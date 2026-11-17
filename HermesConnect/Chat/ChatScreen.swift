@@ -352,11 +352,10 @@ enum ChatLaunch {
     }
 
     /// The Release session list and its cache in Application Support (issue #7).
-    static func makeSessions(link: LiveChatTransport) -> SessionListModel {
-        let cache: any SessionCacheStore = (try? FileSessionCacheStore.applicationSupport())
-            ?? InMemorySessionCacheStore()
-        return SessionListModel(transport: link, chatTransport: link, cache: cache,
-                                transcription: OnDeviceTranscription.shared.transcription)
+    /// Issue #84: `cache` is the folder of the active server (`ServerCaches.sessions`).
+    static func makeSessions(link: LiveChatTransport, cache: any SessionCacheStore) -> SessionListModel {
+        SessionListModel(transport: link, chatTransport: link, cache: cache,
+                         transcription: OnDeviceTranscription.shared.transcription)
     }
 
     /// The session list of a window with no app model (previews, tests). Nothing connects.

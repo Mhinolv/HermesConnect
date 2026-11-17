@@ -458,10 +458,9 @@ enum JobsText {
 
 extension ChatLaunch {
     /// Issue #73: the Release job list and its cache in Application Support.
-    static func makeJobs(link: LiveChatTransport) -> JobsModel {
-        let cache: any CronJobCacheStore = (try? FileCronJobCacheStore.applicationSupport())
-            ?? InMemoryCronJobCacheStore()
-        return JobsModel(transport: link, cache: cache)
+    /// Issue #84: `cache` is the folder of the active server (`ServerCaches.jobs`).
+    static func makeJobs(link: LiveChatTransport, cache: any CronJobCacheStore) -> JobsModel {
+        JobsModel(transport: link, cache: cache)
     }
 
     /// The job list of a window with no app model (previews, tests). Nothing connects.

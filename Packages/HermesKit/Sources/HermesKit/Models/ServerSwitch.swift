@@ -18,7 +18,7 @@ public struct ServerChange: Sendable, Equatable {
 
 /// Issue #83: what each server keeps while another server is active. One server is connected at a time, so
 /// the entry of a server that is not active stays as it was when the owner switched away.
-/// #84 moves the caches into a folder for each server and adds background updates.
+/// Issue #84: each server has its own cache folder. Background refresh updates the entry of a server that is not active.
 public struct ServerStateBook: Codable, Sendable, Equatable {
     public struct Entry: Codable, Sendable, Equatable {
         /// The stored ids with the blue dot: chats and cron runs. The app icon badge counts them.
@@ -46,6 +46,14 @@ public struct ServerStateBook: Codable, Sendable, Equatable {
         }
 
         var isEmpty: Bool { unreadIds.isEmpty && unreadChats == 0 && outboxIds.isEmpty }
+
+        /// Issue #84: the entry of a server that is not active, from its cache folder. Background refresh
+        /// updates it, so the menu and the app icon badge count the new replies of that server.
+        public init(cachedRows rows: [SessionListItem], outbox: [String]) {
+            self.init(unreadIds: rows.filter(\.isUnread).map(\.id),
+                      unreadChats: SessionListItem.chats(rows).filter(\.isUnread).count,
+                      outboxIds: outbox.filter { $0 != SessionCache.newChatId })
+        }
     }
 
     public private(set) var entries: [UUID: Entry]

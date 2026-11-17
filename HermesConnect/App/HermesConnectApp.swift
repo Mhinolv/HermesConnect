@@ -34,7 +34,8 @@ struct HermesConnectApp: App {
             demo.previewConnection(.connected(gateVersion: "demo"))
             // Issue #83: the server menu screenshots use 3 servers.
             let switchDemo = ServerSwitchDemo.current.map(ServerSwitchDemo.makeModel) ?? demo
-            ServerSwitchGlue.attach(model: switchDemo, sessions: demoSessions, jobs: demoJobs)
+            ServerSwitchGlue.attach(model: switchDemo, sessions: demoSessions, jobs: demoJobs,
+                                    caches: ServerCaches(inMemory: switchDemo.profile?.id))
             if ServerSwitchDemo.current == .menu { ServerSwitchDemo.openMenu() }
             model = switchDemo
             location = LocationController.preview(enabled: false)
@@ -46,26 +47,34 @@ struct HermesConnectApp: App {
         }
         #endif
         let live = AppModel.live()
+        // Issue #84: one cache folder for each server. The flat cache of older builds moves before any list reads it.
+        let caches = ServerCacheSetup.live(model: live)
         let link = ChatLaunch.makeLink(renew: { await live.renewHermesSession() })
         // Issue #68: the slash suggestions keep the catalog of the connected server.
-        SlashSuggestions.shared = SlashSuggestions.makeLive(link: link, profile: { live.profile })
+        let slashCache = SlashSuggestions.liveCache()
+        SlashSuggestions.shared = SlashSuggestions.makeLive(link: link, cache: slashCache, profile: { live.profile })
         model = live
         location = LocationController.live()
         self.link = link
-        let sessions = ChatLaunch.makeSessions(link: link)
+        let sessions = ChatLaunch.makeSessions(link: link, cache: caches.sessions)
         self.sessions = sessions
-        let jobs = ChatLaunch.makeJobs(link: link)
+        let jobs = ChatLaunch.makeJobs(link: link, cache: caches.jobs)
         self.jobs = jobs
-        // Issue #83: a switch resets the lists before the new connect. Outboxes stay with their server.
-        ServerSwitchGlue.attach(model: live, sessions: sessions, jobs: jobs)
         let notifications = NotificationController()
         self.notifications = notifications
+        // Issue #83: a switch resets the lists before the new connect. Issue #84: each server keeps its folder.
+        // "Remove Server" deletes its folder, its delivered notifications and its slash catalog.
+        ServerSwitchGlue.attach(model: live, sessions: sessions, jobs: jobs, caches: caches) { removed in
+            notifications.removeDelivered(server: removed.id)
+            slashCache.remove(server: SlashCatalogServerKey.make(removed))
+        }
         UNUserNotificationCenter.current().delegate = notifications
         // Issue #45: the Siri shortcuts run in this process, also in a launch in the background.
         SiriRuntime.service = SiriService(model: live, link: link, sessions: sessions, notifications: notifications)
         // Issue #15: register before the app finishes launching (BGTaskScheduler rule).
         BackgroundRefresh.register {
-            await BackgroundRefresh.run(model: live, link: link, sessions: sessions, notifications: notifications)
+            await BackgroundRefresh.run(model: live, link: link, sessions: sessions, notifications: notifications,
+                                        caches: caches)
         }
         usesAppLock = true
     }
@@ -84,6 +93,8 @@ struct HermesConnectApp: App {
                         .navigationBarTitleDisplayMode(.inline)
                 }
                 .environment(notifications)
+                // Issue #84: with `HERMES_DEMO_SWITCH`, three servers: the footer names the background refresh.
+                .environment(model)
             } else if let demo = ChatLaunch.demoScenario, demo.showsVoiceSettings {
                 // Issue #44: the DEBUG screenshot of Settings > Voice.
                 NavigationStack {
@@ -94,6 +105,9 @@ struct HermesConnectApp: App {
                     .navigationTitle("Settings")
                     .navigationBarTitleDisplayMode(.inline)
                 }
+            } else if NotificationBannerDemo.isOn {
+                // Issue #84: a notification from a server that is not active, over the Chats list.
+                scene.overlay(alignment: .top) { NotificationBannerDemo().padding(.top, 4) }
             } else {
                 scene
             }
@@ -166,6 +180,8 @@ struct RootView: View {
     @State private var launchDone = false
     /// Issue #16: the "Ask Hermes" shortcut puts its request here.
     var ask = AskHermesInbox.shared
+    /// Issue #84: a tapped notification of another server. The chat opens after the switch to that server.
+    @State private var routeAfterSwitch: NotifiedChat?
 
     var body: some View {
         TabView(selection: $tab) {
@@ -210,19 +226,9 @@ struct RootView: View {
         }
         .onChange(of: scenePhase) { _, phase in foregroundChange(phase) }
         // Issue #15: a tap on a notification opens that session. App Lock stays on top until unlock.
-        .onChange(of: notifications?.pendingSessionId) { _, id in
-            guard let id, model.isSetUp else { return }
-            notifications?.pendingSessionId = nil
-            launchDone = true
-            // Issue #73: a cron run opens read-only in the Jobs tab, never as a chat.
-            if let runPath = JobsRouting.path(forSession: id, sessions: sessions, jobs: jobs) {
-                tab = .jobs
-                jobsPath = runPath
-                return
-            }
-            tab = .chats
-            path = [.session(id)]
-        }
+        // Issue #84: a notification of another server switches to it after the unlock, then opens the chat.
+        .onChange(of: notifications?.pendingSessionId) { openNotification() }
+        .onChange(of: model.lock) { openNotification() }
         // Issue #16: "Ask Hermes" waits for setup and App Lock, then sends the text at once.
         .onChange(of: ask.pending, initial: true) { askHermes() }
         .onChange(of: model.lock) { askHermes() }
@@ -238,6 +244,11 @@ struct RootView: View {
             launchDone = true
             path.removeAll()
             jobsPath.removeAll()
+            // Issue #84: the switch came from a tap on a notification of this server.
+            if let route = routeAfterSwitch, route.server == new {
+                routeAfterSwitch = nil
+                openNotified(route.sessionId)
+            }
         }
         .serverSwitchFeedback(model)
         .onChange(of: showSettings) { _, shown in
@@ -303,6 +314,41 @@ extension RootView {
         }
     }
 
+    /// Issue #15 and #84: the route of a tapped notification (design notes, "Tap on a notification").
+    private func openNotification() {
+        guard let id = notifications?.pendingSessionId, model.isSetUp else { return }
+        let route = NotificationRoute.resolve(sessionId: id, serverID: notifications?.pendingServerId,
+                                              activeID: model.profile?.id, servers: Set(model.servers.map(\.id)))
+        // App Lock shows first. A switch connects to another server, so it waits for the unlock.
+        if case .switchThenOpen = route, !ChatLaunch.isDemo, model.lock.locks(at: .now) { return }
+        notifications?.pendingSessionId = nil
+        notifications?.pendingServerId = nil
+        launchDone = true
+        switch route {
+        case .open(let id):
+            openNotified(id)
+        case .switchThenOpen(let server, let id):
+            routeAfterSwitch = NotifiedChat(server: server, sessionId: id)
+            Task { await model.switchServer(to: server) }
+        case .showList:
+            // The server was removed: show the Chats list.
+            tab = .chats
+            path.removeAll()
+        }
+    }
+
+    /// Open the session of a notification on the active server.
+    private func openNotified(_ id: String) {
+        // Issue #73: a cron run opens read-only in the Jobs tab, never as a chat.
+        if let runPath = JobsRouting.path(forSession: id, sessions: sessions, jobs: jobs) {
+            tab = .jobs
+            jobsPath = runPath
+            return
+        }
+        tab = .chats
+        path = [.session(id)]
+    }
+
     /// Issue #16: run the "Ask Hermes" request that waits. App Lock covers the app until Face ID, so the
     /// text never goes before an unlock. No setup: show the setup screen and drop the text.
     private func askHermes() {
@@ -351,6 +397,12 @@ extension RootView {
             break
         }
     }
+}
+
+/// Issue #84: the chat of a tapped notification of another server.
+struct NotifiedChat: Equatable {
+    var server: UUID
+    var sessionId: String
 }
 
 struct RootView_Previews: PreviewProvider {
