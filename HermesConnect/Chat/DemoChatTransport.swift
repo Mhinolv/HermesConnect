@@ -98,6 +98,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case outbox
         /// Issue #39: the same messages after the reconnect: the outbox sends them in order.
         case outboxSent = "outbox-sent"
+        /// Issue #50: received audio files with transcript lines. `HERMES_DEMO_TRANSCRIPTS` picks the states.
+        case audioTranscripts = "audio-transcripts"
 
         static var current: Scenario? {
             ProcessInfo.processInfo.environment["HERMES_DEMO"].flatMap(Scenario.init(rawValue:))
@@ -113,7 +115,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                  .markdownBlocksTop, .catchUp, .catchUpPill,
                  .notificationSettings, .notificationsOff, .voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading,
                  .voiceSettingsReady, .voiceSettingsDamaged, .slashCommands, .listRename, .listDelete, .archived,
-                 .outbox, .outboxSent: nil
+                 .outbox, .outboxSent, .audioTranscripts: nil
             }
         }
 
@@ -466,6 +468,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                                                                  isError: true)))
         }
         if scenario == .receivedFiles || scenario == .receivedFilesPreview { messages += ReceivedFileDemo.messages(now: now) }
+        if scenario == .audioTranscripts { messages += AudioTranscriptDemo.messages(now: now) }
         if scenario.showsTapbacks { messages += Self.tapbackMessages(now: now) }
         if scenario.showsMarkdown {
             let late = now.addingTimeInterval(-60)
@@ -628,7 +631,8 @@ final class DemoVoiceRecorder: VoiceRecording {
 extension DemoChatTransport: ReceivedFileDownloading {
     func downloadReceivedFile(path: String, storedSessionId _: String?, maxBytes: Int?,
                               progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
-        try await ReceivedFileDemo.download(path: path, maxBytes: maxBytes, progress: progress)
+        if AudioTranscriptDemo.owns(path) { return try AudioTranscriptDemo.download(path: path) }
+        return try await ReceivedFileDemo.download(path: path, maxBytes: maxBytes, progress: progress)
     }
 }
 
