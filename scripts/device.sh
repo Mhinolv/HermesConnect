@@ -2,9 +2,10 @@
 # Build a signed Debug app and install it over the app on the paired iPhone.
 # It never uninstalls. A delete resets the permissions, the pinned host key and the device SSH key.
 # Usage: scripts/device.sh [device-udid-or-name]   (default: the first paired physical iPhone)
+# The state is "connected" on a cable and "available (paired)" over Wi-Fi. Both work.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-DEV=${1:-$(xcrun devicectl list devices 2>/dev/null | awk '/available \(paired\)/ && /physical/ {for(i=1;i<=NF;i++) if($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) {print $i; exit}}')}
+DEV=${1:-$(xcrun devicectl list devices 2>/dev/null | awk '/available \(paired\)| connected / && /physical/ {for(i=1;i<=NF;i++) if($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) {print $i; exit}}')}
 [[ -n "$DEV" ]] || { echo "!! no paired iPhone found (connect it, unlock it, trust this Mac)"; exit 2; }
 xcodebuild -project HermesConnect.xcodeproj -scheme HermesConnect -configuration Debug \
   -destination "id=$DEV" -derivedDataPath build/DeviceData -clonedSourcePackagesDirPath build/SourcePackages \
