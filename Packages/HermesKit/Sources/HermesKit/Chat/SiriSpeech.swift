@@ -369,6 +369,8 @@ public enum SiriAsk {
             return .unreachable
         }
         _ = await SiriTiming.finishes(within: SiriTiming.remaining(until: deadline)) { await task?.value }
+        // Issue #39: Siri does not use the outbox. It says "not reachable", so a new try sends the text once.
+        chat.failQueued(id: promptId)
         if chat.messages.first(where: { $0.id == promptId })?.delivery == .failed { return .unreachable }
         while true {
             switch replyState(of: promptId, in: chat.messages) {

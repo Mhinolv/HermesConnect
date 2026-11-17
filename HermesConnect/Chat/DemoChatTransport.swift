@@ -94,6 +94,10 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case listDelete = "list-delete"
         /// Issue #64: the Archived list.
         case archived
+        /// Issue #39: two messages in the outbox ("Will send when connected").
+        case outbox
+        /// Issue #39: the same messages after the reconnect: the outbox sends them in order.
+        case outboxSent = "outbox-sent"
 
         static var current: Scenario? {
             ProcessInfo.processInfo.environment["HERMES_DEMO"].flatMap(Scenario.init(rawValue:))
@@ -108,7 +112,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                  .attachments, .voiceReplies, .voiceRepliesPaused, .voiceReplyText, .tapbacks, .tapbacksPicker, .receivedFiles, .receivedFilesPreview, .markdownTable, .markdownTableTop, .markdownSheet, .markdownBlocks,
                  .markdownBlocksTop, .catchUp, .catchUpPill,
                  .notificationSettings, .notificationsOff, .voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading,
-                 .voiceSettingsReady, .voiceSettingsDamaged, .slashCommands, .listRename, .listDelete, .archived: nil
+                 .voiceSettingsReady, .voiceSettingsDamaged, .slashCommands, .listRename, .listDelete, .archived,
+                 .outbox, .outboxSent: nil
             }
         }
 
@@ -138,6 +143,9 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         var showsMarkdown: Bool {
             [.markdownTable, .markdownTableTop, .markdownSheet, .markdownBlocks, .markdownBlocksTop].contains(self)
         }
+
+        /// `true` for the outbox scenarios (issue #39).
+        var showsOutbox: Bool { self == .outbox || self == .outboxSent }
 
         /// `true` for the catch-up scenarios (issue #15).
         var catchesUp: Bool { self == .catchUp || self == .catchUpPill }
@@ -184,6 +192,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             rowId += 2
             return rowId
         }
+        // Issue #39: the outbox demo shows the send states only, with no reply.
+        guard !scenario.showsOutbox else { return row }
         let hold = scenario == .streaming
         Task.detached { [self] in await replay(Self.weatherReply, hold: hold) }
         return row
@@ -439,6 +449,14 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                                         promptId: "d7"))
         }
         if scenario == .attachments { messages += AttachmentDemo.messages(now: now) }
+        if scenario.showsOutbox {
+            // Issue #39: typed while offline, in this order.
+            let late = now.addingTimeInterval(-30)
+            messages.append(ChatMessage(id: "o1", role: .user, text: "Book a table for two at 7 tonight",
+                                        date: late, delivery: .queued))
+            messages.append(ChatMessage(id: "o2", role: .user, text: "And add it to my calendar",
+                                        date: late.addingTimeInterval(8), delivery: .queued))
+        }
         if scenario == .slashCommands {
             let late = now.addingTimeInterval(-60)
             messages.append(ChatMessage(id: "c1", role: .assistant, text: "", date: late, command: ChatCommandCard(
