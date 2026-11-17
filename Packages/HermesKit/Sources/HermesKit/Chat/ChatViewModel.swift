@@ -58,6 +58,8 @@ public final class ChatViewModel {
     @ObservationIgnored private let removeAudio: @Sendable (URL) -> Void
     /// Writes the audio of a voice reply to a file (issue #10). Tests use a fake.
     @ObservationIgnored private let saveSpeech: @Sendable (SpokenAudio) throws -> VoiceReplyAudio
+    /// Issue #44: the on-device recognizers and the server fallback for voice memos.
+    @ObservationIgnored private let transcription: VoiceTranscription
     /// Replies with a speak call that runs.
     @ObservationIgnored private var speaking: Set<String> = []
     /// Issue #36: this new chat keeps its memos under `SessionCache.newChatId` until its first prompt is
@@ -78,8 +80,10 @@ public final class ChatViewModel {
                 makeId: @escaping @Sendable () -> String = { UUID().uuidString },
                 loadAudio: @escaping @Sendable (URL) throws -> Data = { try Data(contentsOf: $0) },
                 removeAudio: @escaping @Sendable (URL) -> Void = { try? FileManager.default.removeItem(at: $0) },
-                saveSpeech: @escaping @Sendable (SpokenAudio) throws -> VoiceReplyAudio = { try VoiceReplyFiles.save($0) }) {
+                saveSpeech: @escaping @Sendable (SpokenAudio) throws -> VoiceReplyAudio = { try VoiceReplyFiles.save($0) },
+                transcription: VoiceTranscription = .server) {
         self.transport = transport
+        self.transcription = transcription
         self.saveSpeech = saveSpeech
         self.loadAudio = loadAudio
         self.removeAudio = removeAudio
@@ -320,6 +324,8 @@ public final class ChatViewModel {
     /// Sends a recorded voice memo (issue #9, docs/hermes-protocol.md 3.9). The bubble shows at once with
     /// "Transcribing…". Then the clip goes to `POST /api/audio/transcribe`, and the transcript goes out as
     /// `prompt.submit` with `voice_turn: true`. An empty transcript sends no turn. A failure keeps the memo.
+    /// Issue #44: with an on-device engine the iPhone makes the transcript, and the transcribe call runs
+    /// only when the on-device path fails.
     @discardableResult
     public func sendVoiceMemo(_ memo: VoiceMemo) -> Task<Void, Never> {
         let id = makeId()
@@ -397,12 +403,15 @@ public final class ChatViewModel {
         guard let url = thread.message(id: id)?.voice?.fileURL else { return }
         let transport = self.transport
         let loadAudio = self.loadAudio
+        let transcription = self.transcription
         let transcript: String
         do {
             // The clip and the transcript never go to a log.
             transcript = try await Task.detached {
-                let audio = try loadAudio(url)
-                return try await transport.transcribe(audio: audio, mimeType: VoiceMemoLimits.mimeType)
+                try await transcription.transcribe(fileURL: url) {
+                    let audio = try loadAudio(url)
+                    return try await transport.transcribe(audio: audio, mimeType: VoiceMemoLimits.mimeType)
+                }
             }.value
         } catch {
             thread.setTranscript(.failed, id: id)

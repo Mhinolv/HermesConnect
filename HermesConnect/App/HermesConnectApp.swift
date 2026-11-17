@@ -59,6 +59,16 @@ struct HermesConnectApp: App {
                         .navigationBarTitleDisplayMode(.inline)
                 }
                 .environment(notifications)
+            } else if let demo = ChatLaunch.demoScenario, demo.showsVoiceSettings {
+                // Issue #44: the DEBUG screenshot of Settings > Voice.
+                NavigationStack {
+                    Form {
+                        VoiceSettingsSection()
+                        TranscriptionSettingsSection(parakeet: TranscriptionSettingsDemo.store(for: demo))
+                    }
+                    .navigationTitle("Settings")
+                    .navigationBarTitleDisplayMode(.inline)
+                }
             } else {
                 scene
             }

@@ -225,7 +225,8 @@ enum ChatLaunch {
     static func makeSessions(link: LiveChatTransport) -> SessionListModel {
         let cache: any SessionCacheStore = (try? FileSessionCacheStore.applicationSupport())
             ?? InMemorySessionCacheStore()
-        return SessionListModel(transport: link, chatTransport: link, cache: cache)
+        return SessionListModel(transport: link, chatTransport: link, cache: cache,
+                                transcription: OnDeviceTranscription.shared.transcription)
     }
 
     /// The session list of a window with no app model (previews, tests). Nothing connects.

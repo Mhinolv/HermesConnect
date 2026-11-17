@@ -34,21 +34,28 @@
 		8A60629016D1FCF8D20E0455 /* InstallStepsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12037EC69A1B3FFA5178CD6D /* InstallStepsView.swift */; };
 		8CCAD742FBA2926FF1940B53 /* ChatVoiceCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FB38BCE9C434337D022CF42 /* ChatVoiceCell.swift */; };
 		93EB90973911FD40D69BBC64 /* LocationCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10EC6A9B6B3791BCF28648B0 /* LocationCard.swift */; };
+		99C84395276E4F0CB0A9CAB8 /* OnDeviceTranscription.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B1CAA8D26798943A05956AF /* OnDeviceTranscription.swift */; };
 		9D229E574930724052E1EE73 /* AttachmentImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61D93DB454F3B97CC6C5DDC5 /* AttachmentImport.swift */; };
 		A18520711874067C6CB2F686 /* AttachmentDemo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 251E221809E08D66325EFA17 /* AttachmentDemo.swift */; };
+		A23FE639D6C1099ED823E759 /* TranscriptionSettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0B3354AE09CC86FF1F546BC /* TranscriptionSettingsSection.swift */; };
 		A38CB3AF8652AF8F16EC8DB7 /* ConnectionStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76E748D4ED9CB565A2F48120 /* ConnectionStatusView.swift */; };
 		A675D39569C1E0604F673B25 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9975FCE49058019CADA6BA89 /* Assets.xcassets */; };
+		A71C36521DFAAEC6C670A5A8 /* TranscriptionSettingsDemo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E8938E86160BC92E880BF21 /* TranscriptionSettingsDemo.swift */; };
 		A725F31205078D24423F830F /* MessageKit in Frameworks */ = {isa = PBXBuildFile; productRef = CDED3844474FB97BAA703825 /* MessageKit */; };
 		AE56777FBDA0235B51FB078E /* AttachmentStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E77AC33AF86D6AFE86FDB669 /* AttachmentStripView.swift */; };
 		B433DA87A9B0ABD221346C7A /* LocalNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 446EDEE4C7998A61822DEA32 /* LocalNotifications.swift */; };
 		B72A042E912127198DCDA854 /* ProtectedStorageAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */; };
 		B97FEBCCFBBC2C3312E79743 /* AppLockCover.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5500FE30849A059FC03DF0 /* AppLockCover.swift */; };
 		C3C3F39DCFB1663A359F94F1 /* BackgroundRefresh.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B47554FAB736FCFE8A2DAA6 /* BackgroundRefresh.swift */; };
+		C6B734F18E6557D790DA9F3D /* TranscriptionAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA15C0B079AED4234D9DCCD4 /* TranscriptionAppTests.swift */; };
+		CAEDB91F6D9A79695A449F7B /* AppleSpeechTranscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A8F3C8E414D9F2A690260D6 /* AppleSpeechTranscriber.swift */; };
 		CFB55369F229DCF8B92BA398 /* ChatBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12550753F6EF1111C87EA8A8 /* ChatBubble.swift */; };
 		D079943BAE0C42A8E25FFAB2 /* DeviceKeyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEE713B92846B56241CD9612 /* DeviceKeyView.swift */; };
 		D4366E8BE2F65577400AC2B0 /* AttachmentBubbles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DEAF65581DD2EF4020516B9 /* AttachmentBubbles.swift */; };
 		DC807288C7246595D35CD72E /* LocationSettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E583F634243E84B759FCEC6 /* LocationSettingsSection.swift */; };
 		E230335998617506596F1F26 /* HermesConnectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80A034BAA06291CE4BB4106 /* HermesConnectTests.swift */; };
+		E376DFB2D8B799DD9B7BE470 /* ParakeetTranscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4059DBFD119A7D4C760969ED /* ParakeetTranscriber.swift */; };
+		E6670B3D907F4D7C4AA74920 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = 3224E0C5350265EDD7B81732 /* FluidAudio */; };
 		F3361E416896D9B2A169029A /* VoiceMemoUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A8691638CC5B4480E12DCC9 /* VoiceMemoUITests.swift */; };
 		F8C370EE75BF35431FC05547 /* HostKeyViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02FBF4D3E812F7C4916B38A0 /* HostKeyViews.swift */; };
 /* End PBXBuildFile section */
@@ -76,9 +83,11 @@
 		37EF80F3762ADA518CD0BE72 /* VoiceRecordingBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecordingBar.swift; sourceTree = "<group>"; };
 		3B47554FAB736FCFE8A2DAA6 /* BackgroundRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundRefresh.swift; sourceTree = "<group>"; };
 		3CD09535D569B73E633D952B /* HermesConnectTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HermesConnectTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		4059DBFD119A7D4C760969ED /* ParakeetTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParakeetTranscriber.swift; sourceTree = "<group>"; };
 		40916C67E6E9CDFF43F23AB8 /* LocationControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationControllerTests.swift; sourceTree = "<group>"; };
 		446EDEE4C7998A61822DEA32 /* LocalNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNotifications.swift; sourceTree = "<group>"; };
 		48519F8E1A8B7BA59F02B2E9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		4E8938E86160BC92E880BF21 /* TranscriptionSettingsDemo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionSettingsDemo.swift; sourceTree = "<group>"; };
 		530C63C0EB6BE42DA15604E8 /* HermesConnect.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = HermesConnect.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5573AB405E8B46FF30CD8C89 /* LocationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationController.swift; sourceTree = "<group>"; };
 		5C7D787891FBA8D58A12CDFC /* Authenticator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Authenticator.swift; sourceTree = "<group>"; };
@@ -87,6 +96,7 @@
 		5E583F634243E84B759FCEC6 /* LocationSettingsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationSettingsSection.swift; sourceTree = "<group>"; };
 		61D93DB454F3B97CC6C5DDC5 /* AttachmentImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentImport.swift; sourceTree = "<group>"; };
 		6A3CF81303C78255758A5C52 /* HermesKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = HermesKit; path = Packages/HermesKit; sourceTree = SOURCE_ROOT; };
+		6A8F3C8E414D9F2A690260D6 /* AppleSpeechTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSpeechTranscriber.swift; sourceTree = "<group>"; };
 		6EA999FDF121C5949048BC7C /* AskHermesIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskHermesIntent.swift; sourceTree = "<group>"; };
 		6FE198DB92F31E814C4C7ABD /* voice-reply.ogg */ = {isa = PBXFileReference; path = "voice-reply.ogg"; sourceTree = "<group>"; };
 		7043F7690A196EB557326890 /* SetupFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupFlowView.swift; sourceTree = "<group>"; };
@@ -95,6 +105,7 @@
 		7EBCCF57F6F99D73BDA35CD1 /* VoiceReplyUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceReplyUITests.swift; sourceTree = "<group>"; };
 		7FB38BCE9C434337D022CF42 /* ChatVoiceCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatVoiceCell.swift; sourceTree = "<group>"; };
 		83E296700CE9EBB2D816E590 /* SessionListTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListTests.swift; sourceTree = "<group>"; };
+		8B1CAA8D26798943A05956AF /* OnDeviceTranscription.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnDeviceTranscription.swift; sourceTree = "<group>"; };
 		9975FCE49058019CADA6BA89 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1663E6E147C124EEADC03F1 /* HermesConnectApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesConnectApp.swift; sourceTree = "<group>"; };
 		A6150F9285784508FB2F6A3E /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
@@ -106,9 +117,11 @@
 		C8A48996F2DE819FC34FF0CA /* CatchUpAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatchUpAppTests.swift; sourceTree = "<group>"; };
 		CEE713B92846B56241CD9612 /* DeviceKeyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceKeyView.swift; sourceTree = "<group>"; };
 		DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtectedStorageAppTests.swift; sourceTree = "<group>"; };
+		E0B3354AE09CC86FF1F546BC /* TranscriptionSettingsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionSettingsSection.swift; sourceTree = "<group>"; };
 		E77AC33AF86D6AFE86FDB669 /* AttachmentStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentStripView.swift; sourceTree = "<group>"; };
 		F0EA96A6753C403E6A93EDFD /* SessionListScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListScreen.swift; sourceTree = "<group>"; };
 		F3C4E1EC060A41E57D2B774C /* DemoChatTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoChatTransport.swift; sourceTree = "<group>"; };
+		FA15C0B079AED4234D9DCCD4 /* TranscriptionAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionAppTests.swift; sourceTree = "<group>"; };
 		FAAB10B2220F96EC4E70544A /* CodeBlock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeBlock.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -119,6 +132,7 @@
 			files = (
 				2123C91DA56892A01ABB28FA /* HermesKit in Frameworks */,
 				A725F31205078D24423F830F /* MessageKit in Frameworks */,
+				E6670B3D907F4D7C4AA74920 /* FluidAudio in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -173,6 +187,16 @@
 			path = Packages;
 			sourceTree = "<group>";
 		};
+		44D84C634BE48F2559466584 /* Transcription */ = {
+			isa = PBXGroup;
+			children = (
+				6A8F3C8E414D9F2A690260D6 /* AppleSpeechTranscriber.swift */,
+				8B1CAA8D26798943A05956AF /* OnDeviceTranscription.swift */,
+				4059DBFD119A7D4C760969ED /* ParakeetTranscriber.swift */,
+			);
+			path = Transcription;
+			sourceTree = "<group>";
+		};
 		4B9D553A4A08E5FD3A0D3B2C /* HermesKit */ = {
 			isa = PBXGroup;
 			children = (
@@ -203,6 +227,7 @@
 				40916C67E6E9CDFF43F23AB8 /* LocationControllerTests.swift */,
 				DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */,
 				83E296700CE9EBB2D816E590 /* SessionListTests.swift */,
+				FA15C0B079AED4234D9DCCD4 /* TranscriptionAppTests.swift */,
 				2A8691638CC5B4480E12DCC9 /* VoiceMemoUITests.swift */,
 				7EBCCF57F6F99D73BDA35CD1 /* VoiceReplyUITests.swift */,
 			);
@@ -233,6 +258,8 @@
 				12037EC69A1B3FFA5178CD6D /* InstallStepsView.swift */,
 				2D3CB166FF51053854FFDA4B /* SettingsView.swift */,
 				7043F7690A196EB557326890 /* SetupFlowView.swift */,
+				4E8938E86160BC92E880BF21 /* TranscriptionSettingsDemo.swift */,
+				E0B3354AE09CC86FF1F546BC /* TranscriptionSettingsSection.swift */,
 			);
 			path = Settings;
 			sourceTree = "<group>";
@@ -275,6 +302,7 @@
 				27E6BC84392DF022945BB39D /* VoiceRecorder.swift */,
 				37EF80F3762ADA518CD0BE72 /* VoiceRecordingBar.swift */,
 				1D586D46E916A28F7DC3E2A5 /* Attachments */,
+				44D84C634BE48F2559466584 /* Transcription */,
 			);
 			path = Chat;
 			sourceTree = "<group>";
@@ -327,6 +355,7 @@
 			packageProductDependencies = (
 				ECEB44D1091478F728CDD903 /* HermesKit */,
 				CDED3844474FB97BAA703825 /* MessageKit */,
+				3224E0C5350265EDD7B81732 /* FluidAudio */,
 			);
 			productName = HermesConnect;
 			productReference = 530C63C0EB6BE42DA15604E8 /* HermesConnect.app */;
@@ -361,6 +390,7 @@
 			mainGroup = 1A09C4C2F9F6D8EB5A107A64;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				207250D1831963C6379992DE /* XCRemoteSwiftPackageReference "FluidAudio" */,
 				62171B2D93EB3D85F49002F6 /* XCRemoteSwiftPackageReference "MessageKit" */,
 				7ABDF9B64D79086DC2B1AC80 /* XCLocalSwiftPackageReference "Packages/HermesKit" */,
 			);
@@ -401,6 +431,7 @@
 			files = (
 				B97FEBCCFBBC2C3312E79743 /* AppLockCover.swift in Sources */,
 				6C761422A2E25F72ECC40E0E /* AppModel.swift in Sources */,
+				CAEDB91F6D9A79695A449F7B /* AppleSpeechTranscriber.swift in Sources */,
 				01B54B7A5360786DFF684DFE /* AskHermesIntent.swift in Sources */,
 				D4366E8BE2F65577400AC2B0 /* AttachmentBubbles.swift in Sources */,
 				497DEE0C467C15EE7B62F601 /* AttachmentComposer.swift in Sources */,
@@ -425,9 +456,13 @@
 				93EB90973911FD40D69BBC64 /* LocationCard.swift in Sources */,
 				0C197036101D133537EA865D /* LocationController.swift in Sources */,
 				DC807288C7246595D35CD72E /* LocationSettingsSection.swift in Sources */,
+				99C84395276E4F0CB0A9CAB8 /* OnDeviceTranscription.swift in Sources */,
+				E376DFB2D8B799DD9B7BE470 /* ParakeetTranscriber.swift in Sources */,
 				0AA71132C6D0F9DF6AD60D27 /* SessionListScreen.swift in Sources */,
 				04DC34168B66E6DCE7820198 /* SettingsView.swift in Sources */,
 				5C009257C4A6066ED63FC699 /* SetupFlowView.swift in Sources */,
+				A71C36521DFAAEC6C670A5A8 /* TranscriptionSettingsDemo.swift in Sources */,
+				A23FE639D6C1099ED823E759 /* TranscriptionSettingsSection.swift in Sources */,
 				6788BF844A32EC9EE100DE6A /* VoiceRecorder.swift in Sources */,
 				75558AB7C9008A5CFE12F45B /* VoiceRecordingBar.swift in Sources */,
 			);
@@ -444,6 +479,7 @@
 				74C7DA0960EA120C51C2AF65 /* LocationControllerTests.swift in Sources */,
 				B72A042E912127198DCDA854 /* ProtectedStorageAppTests.swift in Sources */,
 				005CA6251E125BF95E1E03B3 /* SessionListTests.swift in Sources */,
+				C6B734F18E6557D790DA9F3D /* TranscriptionAppTests.swift in Sources */,
 				F3361E416896D9B2A169029A /* VoiceMemoUITests.swift in Sources */,
 				173CEA1C519578E124650A2A /* VoiceReplyUITests.swift in Sources */,
 			);
@@ -689,6 +725,14 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		207250D1831963C6379992DE /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio";
+			requirement = {
+				kind = exactVersion;
+				version = 0.18.3;
+			};
+		};
 		62171B2D93EB3D85F49002F6 /* XCRemoteSwiftPackageReference "MessageKit" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/MessageKit/MessageKit";
@@ -700,6 +744,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		3224E0C5350265EDD7B81732 /* FluidAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 207250D1831963C6379992DE /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			productName = FluidAudio;
+		};
 		CDED3844474FB97BAA703825 /* MessageKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 62171B2D93EB3D85F49002F6 /* XCRemoteSwiftPackageReference "MessageKit" */;

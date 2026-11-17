@@ -55,6 +55,7 @@ struct SettingsView: View {
                     if let reason = connectionReason { Text(reason) }
                 }
                 VoiceSettingsSection()
+                TranscriptionSettingsSection()
                 NotificationSettingsSection()
                 LocationSettingsSection()
                 PhotoSettingsSection()

@@ -55,6 +55,11 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         /// Issue #15: Settings > Notifications. `notifications-off` adds the "Notifications Off" row.
         case notificationSettings = "notifications"
         case notificationsOff = "notifications-off"
+        /// Issue #44: Settings > Voice with the transcription picker. The suffix sets the Parakeet row.
+        case voiceSettings = "voice-settings"
+        case voiceSettingsParakeet = "voice-settings-parakeet"
+        case voiceSettingsDownloading = "voice-settings-downloading"
+        case voiceSettingsReady = "voice-settings-ready"
 
         static var current: Scenario? {
             ProcessInfo.processInfo.environment["HERMES_DEMO"].flatMap(Scenario.init(rawValue:))
@@ -67,7 +72,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             case .failed: "Can you check the server logs?"
             case .live, .thread, .empty, .list, .listEmpty, .listLoading, .voice, .recording, .hold, .paused,
                  .attachments, .voiceReplies, .voiceRepliesPaused, .catchUp, .catchUpPill, .notificationSettings,
-                 .notificationsOff: nil
+                 .notificationsOff, .voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading,
+                 .voiceSettingsReady: nil
             }
         }
 
@@ -90,6 +96,9 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
 
         /// `true` for the Settings > Notifications scenarios (issue #15).
         var showsNotificationSettings: Bool { self == .notificationSettings || self == .notificationsOff }
+        var showsVoiceSettings: Bool {
+            [.voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading, .voiceSettingsReady].contains(self)
+        }
     }
 
     let scenario: Scenario
