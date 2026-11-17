@@ -587,6 +587,18 @@ final class ChatMarkdownView: UIView {
         guard index < storage.length else { return nil }
         return storage.attribute(ChatBubbleText.linkKey, at: index, effectiveRange: nil) as? URL
     }
+
+    /// Issue #17: `true` when the point is on the quote line of a reply (the whole line, plus 6 pt).
+    func isQuote(at point: CGPoint) -> Bool {
+        guard storage.length > 0 else { return false }
+        var range = NSRange()
+        guard storage.attribute(ChatQuoteText.tapKey, at: 0, effectiveRange: &range) != nil else { return false }
+        layoutText()
+        let glyphs = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let line = layoutManager.boundingRect(forGlyphRange: glyphs, in: container)
+        let location = CGPoint(x: point.x - textInsets.left, y: point.y - textInsets.top)
+        return location.y >= line.minY - 6 && location.y <= line.maxY + 6
+    }
 }
 
 /// Issue #56: the decorations behind the text of a `UITextView` (TextKit 1), for the full reply sheet.

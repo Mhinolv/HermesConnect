@@ -323,7 +323,7 @@ private final class FakeFileLoader: HTTPFileDownloading, @unchecked Sendable {
         #expect(loaded.map(\.id) == ["u1", "a1", "u2"])
         #expect(loaded.allSatisfy { $0.attachments.isEmpty })
         #expect(loaded[1].text == "Here MEDIA:/tmp/a.pdf")
-        // The saved file is rewritten in the current version (5 for issue #12, 6 since issue #39).
+        // The saved file is rewritten in the current version (5 for issue #12, 6 since issues #39 and #17).
         store.saveTranscript(loaded, sessionId: "k1")
         let raw = try String(contentsOf: url, encoding: .utf8)
         #expect(raw.contains("\"version\":\(SessionCache.formatVersion)"))

@@ -229,6 +229,12 @@ struct ChatThreadView: UIViewControllerRepresentable {
             }
             return controller
         }
+        if let demo = QuoteDemo.current {
+            // Issue #17: the quote screenshots.
+            let controller = ChatViewController(model: model)
+            controller.onFirstAppear = { demo.run(on: $0) }
+            return controller
+        }
         #endif
         return ChatViewController(model: model)
     }
@@ -370,7 +376,7 @@ enum ChatLaunch {
         let cache = InMemorySessionCacheStore(sessions: rows, activeSessionId: active)
         let sessions = SessionListModel(transport: transport, chatTransport: transport, cache: cache)
         guard !scenario.showsList, scenario != .empty else { return sessions }
-        let seeds = transport.seedMessages(now: scenario.catchesUp ? DemoChatTransport.seedDate : Date())
+        let seeds = QuoteDemo.messages(transport.seedMessages(now: scenario.catchesUp ? DemoChatTransport.seedDate : Date()))
         let model = ChatViewModel(transport: transport, storedSessionId: DemoChatTransport.storedId,
                                   title: "Calendar and logs", messages: seeds, cache: cache)
         sessions.register(model, for: DemoChatTransport.storedId)
