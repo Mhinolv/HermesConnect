@@ -58,7 +58,7 @@ The input is one JSON object:
 - `timestamp` is ISO 8601 with a time zone, or Unix seconds. A time more than 10 minutes in the future is refused.
 - `speed` (m/s, 0 or more) and `course` (0 to 360) are optional and can be `null`. Other fields are refused.
 
-The gate writes `~/.hermes/hermesconnect/location.json` (mode 0600) through an atomic rename. An older fix never replaces a newer fix. The `phone_location` plugin (issue #14) reads this file:
+The gate writes `~/.hermes/hermesconnect/location.json` (mode 0600) through an atomic rename. An older fix never replaces a newer fix. The `phone_location` plugin reads this file (see [phone_location plugin](#phone_location-plugin)):
 
 ```json
 {"accuracy_m": 12.5, "course": 90.0, "lat": 37.3349, "lon": -122.009, "received_at": "2026-11-16T12:00:03.120Z",
@@ -100,6 +100,31 @@ Run these commands from a computer that has a test copy of the phone key (`phone
 | Serve | `openssl rand -hex 32 \| tr -d '\n' \| ssh -i phone_key hermes@<host> serve` | `PORT <n>` |
 | Location | `echo '{"lat":1,"lon":2,"accuracy_m":5,"timestamp":"2026-11-16T12:00:00Z"}' \| ssh -i phone_key hermes@<host> location` | `OK` |
 
+## phone_location plugin
+
+`hermes-plugin/phone_location/` is a Hermes plugin with one tool, `phone_location`. The agent uses it for nearby places, travel and weather. The tool only reads `~/.hermes/hermesconnect/location.json`. It adds no command channel to the phone.
+
+| State of the phone fix | Result |
+|---|---|
+| 30 minutes old or less | The phone fix: `latitude`, `longitude`, `accuracy_m`, `located_at`, `minutes_ago`, `apple_maps`, `"source": "hermesconnect"`, `"stale": false`. |
+| Missing, not valid, or older than 30 minutes | The `findmy_location` result, with `"source": "findmy"` and a `phone_fix` reason. The tool calls the findmy plugin in the same process. |
+| Older than 30 minutes, and no Find My result | The old phone fix with `"stale": true` and a `note`. |
+| Missing, and no Find My result | An error that tells the owner to turn on location sharing in HermesConnect. |
+
+If the Find My result is older than an old phone fix, the tool returns the phone fix. The tool looks for the findmy plugin next to its own folder, then in `$HERMES_HOME/plugins/findmy`, then in `~/.hermes/plugins/findmy`.
+
+Install (do these steps on the server as `root`):
+
+1. Copy the plugin to the server: `scp -r server/hermes-plugin/phone_location root@<host>:/tmp/`.
+2. Install the folder: `install -d -o hermes -g hermes -m 0755 ~hermes/.hermes/plugins/phone_location`.
+3. Copy the files: `install -o hermes -g hermes -m 0644 /tmp/phone_location/* ~hermes/.hermes/plugins/phone_location/`.
+4. Turn on the plugin as the `hermes` user: `hermes plugins enable phone_location`.
+5. Make sure that it is on: `hermes plugins list` shows `phone_location`.
+6. Restart the Hermes gateway, for example `systemctl restart hermes-gateway-<id>`.
+7. Ask the agent "Where am I?". The reply must use the location from the phone or from Find My.
+
+The findmy plugin is optional. Without it, the tool uses the phone fix only. To remove the plugin, run `hermes plugins disable phone_location`, delete the folder, and restart the gateway.
+
 ## Tests
 
-`python3 -m unittest discover -s server/tests` runs the gate and install tests with a fake `hermes` binary. `scripts/test.sh` runs them first.
+`python3 -m unittest discover -s server/tests` runs the gate, install and `phone_location` tests with a fake `hermes` binary, a fake `tools.registry` and a fake findmy plugin. `scripts/test.sh` runs them first.
