@@ -15,6 +15,8 @@ struct HermesConnectApp: App {
     private let usesAppLock: Bool
 
     init() {
+        // QA 52-1: no model download unless the owner taps Download.
+        OnDeviceTranscription.lockModelNetwork()
         #if DEBUG
         if ChatLaunch.isDemo {
             sessions = ChatLaunch.makeDemoSessions()
@@ -59,6 +61,16 @@ struct HermesConnectApp: App {
                         .navigationBarTitleDisplayMode(.inline)
                 }
                 .environment(notifications)
+            } else if let demo = ChatLaunch.demoScenario, demo.showsVoiceSettings {
+                // Issue #44: the DEBUG screenshot of Settings > Voice.
+                NavigationStack {
+                    Form {
+                        VoiceSettingsSection()
+                        TranscriptionSettingsSection(parakeet: TranscriptionSettingsDemo.store(for: demo))
+                    }
+                    .navigationTitle("Settings")
+                    .navigationBarTitleDisplayMode(.inline)
+                }
             } else {
                 scene
             }
