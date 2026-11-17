@@ -25,6 +25,7 @@
 		25D72F7739FA7279C92797CF /* ReceivedFileDemo.swift in Sources */ = {isa = PBXBuildFile; fileRef = A637193173A2CF37B300BC09 /* ReceivedFileDemo.swift */; };
 		2AC3C42911AAE5136A85C622 /* voice-reply.ogg in Resources */ = {isa = PBXBuildFile; fileRef = 6FE198DB92F31E814C4C7ABD /* voice-reply.ogg */; };
 		2D5607FD1D43E7620BA61084 /* DemoChatTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3C4E1EC060A41E57D2B774C /* DemoChatTransport.swift */; };
+		2FDD94501C0F2A6FB5569A16 /* JobsDemo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50D1D3FA38000668A9E6D95A /* JobsDemo.swift */; };
 		43E9BA6A1999EA550F1BE33C /* AttachmentUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDDF85200B57F3AFCAB1552A /* AttachmentUITests.swift */; };
 		45DEF07013553955227D3948 /* CodeBlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAAB10B2220F96EC4E70544A /* CodeBlock.swift */; };
 		497DEE0C467C15EE7B62F601 /* AttachmentComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3943AD860F04AC733085D8A /* AttachmentComposer.swift */; };
@@ -38,8 +39,10 @@
 		6CF02420A5CB991263820DB5 /* ReceivedFileUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2FE4163F13B8D352C47868C /* ReceivedFileUITests.swift */; };
 		74C7DA0960EA120C51C2AF65 /* LocationControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40916C67E6E9CDFF43F23AB8 /* LocationControllerTests.swift */; };
 		75558AB7C9008A5CFE12F45B /* VoiceRecordingBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37EF80F3762ADA518CD0BE72 /* VoiceRecordingBar.swift */; };
+		78FCF0957FD462CDA9260EC1 /* JobsTabTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28B1C90A221FE6DC8C6F7FBB /* JobsTabTests.swift */; };
 		82E8F7FA7611089BA44CFB3A /* TapbackUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02B9B8909DFDB725CB523CF7 /* TapbackUITests.swift */; };
 		833F2559A6FF3CE743891584 /* SiriService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80CEC9955EB224CEF5BA7E56 /* SiriService.swift */; };
+		85A9EB010A1CF8A85520015D /* JobsScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75A6C8474B61B577423B40D2 /* JobsScreens.swift */; };
 		8A60629016D1FCF8D20E0455 /* InstallStepsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12037EC69A1B3FFA5178CD6D /* InstallStepsView.swift */; };
 		8CCAD742FBA2926FF1940B53 /* ChatVoiceCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FB38BCE9C434337D022CF42 /* ChatVoiceCell.swift */; };
 		93EB90973911FD40D69BBC64 /* LocationCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10EC6A9B6B3791BCF28648B0 /* LocationCard.swift */; };
@@ -94,6 +97,7 @@
 		23D8BC56827006B8AA57FFA8 /* ChatCommandCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatCommandCell.swift; sourceTree = "<group>"; };
 		251E221809E08D66325EFA17 /* AttachmentDemo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentDemo.swift; sourceTree = "<group>"; };
 		27E6BC84392DF022945BB39D /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
+		28B1C90A221FE6DC8C6F7FBB /* JobsTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobsTabTests.swift; sourceTree = "<group>"; };
 		2A8691638CC5B4480E12DCC9 /* VoiceMemoUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceMemoUITests.swift; sourceTree = "<group>"; };
 		2D3CB166FF51053854FFDA4B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		374BF43FD2955A3BD85FD6CE /* ChatLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatLayoutTests.swift; sourceTree = "<group>"; };
@@ -107,6 +111,7 @@
 		446EDEE4C7998A61822DEA32 /* LocalNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNotifications.swift; sourceTree = "<group>"; };
 		48519F8E1A8B7BA59F02B2E9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		4E8938E86160BC92E880BF21 /* TranscriptionSettingsDemo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionSettingsDemo.swift; sourceTree = "<group>"; };
+		50D1D3FA38000668A9E6D95A /* JobsDemo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobsDemo.swift; sourceTree = "<group>"; };
 		530C63C0EB6BE42DA15604E8 /* HermesConnect.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = HermesConnect.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		5573AB405E8B46FF30CD8C89 /* LocationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationController.swift; sourceTree = "<group>"; };
 		5C7D787891FBA8D58A12CDFC /* Authenticator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Authenticator.swift; sourceTree = "<group>"; };
@@ -120,6 +125,7 @@
 		6FE198DB92F31E814C4C7ABD /* voice-reply.ogg */ = {isa = PBXFileReference; path = "voice-reply.ogg"; sourceTree = "<group>"; };
 		7043F7690A196EB557326890 /* SetupFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupFlowView.swift; sourceTree = "<group>"; };
 		71BE1F0BBF1E0DC6C9086E97 /* ChatViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatViewController.swift; sourceTree = "<group>"; };
+		75A6C8474B61B577423B40D2 /* JobsScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobsScreens.swift; sourceTree = "<group>"; };
 		76E748D4ED9CB565A2F48120 /* ConnectionStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionStatusView.swift; sourceTree = "<group>"; };
 		7EBCCF57F6F99D73BDA35CD1 /* VoiceReplyUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceReplyUITests.swift; sourceTree = "<group>"; };
 		7FB38BCE9C434337D022CF42 /* ChatVoiceCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatVoiceCell.swift; sourceTree = "<group>"; };
@@ -237,11 +243,21 @@
 			children = (
 				662F3198087973F87050BE83 /* App */,
 				C33949AD1865506056454724 /* Chat */,
+				5D0872BAF10B57F24BA2736E /* Jobs */,
 				DFD04F490F9CB1ABC1B3329D /* Location */,
 				9663EE0B4267E839660C7A1F /* Resources */,
 				72403F17C3B8976E28361841 /* Settings */,
 			);
 			path = HermesConnect;
+			sourceTree = "<group>";
+		};
+		5D0872BAF10B57F24BA2736E /* Jobs */ = {
+			isa = PBXGroup;
+			children = (
+				50D1D3FA38000668A9E6D95A /* JobsDemo.swift */,
+				75A6C8474B61B577423B40D2 /* JobsScreens.swift */,
+			);
+			path = Jobs;
 			sourceTree = "<group>";
 		};
 		61FB2679F755DE99E3142CCA /* HermesConnectTests */ = {
@@ -253,6 +269,7 @@
 				3CC37AE546D860D850B01DF6 /* ChatKeyboardTests.swift */,
 				374BF43FD2955A3BD85FD6CE /* ChatLayoutTests.swift */,
 				C80A034BAA06291CE4BB4106 /* HermesConnectTests.swift */,
+				28B1C90A221FE6DC8C6F7FBB /* JobsTabTests.swift */,
 				40916C67E6E9CDFF43F23AB8 /* LocationControllerTests.swift */,
 				A3A9EE461B51E5FCABAF0376 /* MarkdownBlockUITests.swift */,
 				DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */,
@@ -491,6 +508,8 @@
 				253E7CB64BA9A7C624A4BC93 /* HermesConnectApp.swift in Sources */,
 				F8C370EE75BF35431FC05547 /* HostKeyViews.swift in Sources */,
 				8A60629016D1FCF8D20E0455 /* InstallStepsView.swift in Sources */,
+				2FDD94501C0F2A6FB5569A16 /* JobsDemo.swift in Sources */,
+				85A9EB010A1CF8A85520015D /* JobsScreens.swift in Sources */,
 				B433DA87A9B0ABD221346C7A /* LocalNotifications.swift in Sources */,
 				4DDC251C4FFE98D87E3C7E90 /* LocationAccessPrompt.swift in Sources */,
 				93EB90973911FD40D69BBC64 /* LocationCard.swift in Sources */,
@@ -523,6 +542,7 @@
 				6B3BAAF9D9A1330659C6C1D4 /* ChatKeyboardTests.swift in Sources */,
 				0106964C809B96A3721F8C1A /* ChatLayoutTests.swift in Sources */,
 				E230335998617506596F1F26 /* HermesConnectTests.swift in Sources */,
+				78FCF0957FD462CDA9260EC1 /* JobsTabTests.swift in Sources */,
 				74C7DA0960EA120C51C2AF65 /* LocationControllerTests.swift in Sources */,
 				52340B921FD5A48247DE47B4 /* MarkdownBlockUITests.swift in Sources */,
 				B72A042E912127198DCDA854 /* ProtectedStorageAppTests.swift in Sources */,

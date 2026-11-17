@@ -100,8 +100,11 @@ struct ChatNavigationTitle: View {
 /// `ChatViewController` in SwiftUI.
 struct ChatThreadView: UIViewControllerRepresentable {
     let model: ChatViewModel
+    /// Issue #73: the cron run screen. No composer and no tapbacks.
+    var readOnly = false
 
     func makeUIViewController(context _: Context) -> ChatViewController {
+        if readOnly { return ChatViewController(model: model, readOnly: true) }
         #if DEBUG
         if let scenario = DemoChatTransport.Scenario.current, scenario.recordsAtLaunch {
             let controller = ChatViewController(model: model, recorder: DemoVoiceRecorder(),
@@ -287,7 +290,9 @@ enum ChatLaunch {
         if isDemo { return demoLaunchRoute }
         #endif
         if sessions.hasCachedNewChat { return .new(SessionCache.newChatId) }
-        return sessions.cachedActiveSessionId.map(ChatRoute.session)
+        // Issue #73: a cron run is not a chat. An older build could save it as the active session.
+        guard let id = sessions.cachedActiveSessionId, sessions.session(id: id)?.isCronRun != true else { return nil }
+        return .session(id)
     }
 
     /// The search text of the DEBUG list demo (`HERMES_DEMO_SEARCH`). Empty in Release.
