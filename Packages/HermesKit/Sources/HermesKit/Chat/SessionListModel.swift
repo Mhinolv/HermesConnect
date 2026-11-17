@@ -20,14 +20,18 @@ public final class SessionListModel {
     @ObservationIgnored private let transport: any SessionsTransport
     @ObservationIgnored private let chatTransport: any ChatTransport
     @ObservationIgnored private let cache: any SessionCacheStore
+    /// Issue #44: each chat gets the voice memo transcription of Settings > Voice.
+    @ObservationIgnored private let transcription: VoiceTranscription
     @ObservationIgnored private var chats: [String: ChatViewModel] = [:]
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private weak var openChatModel: ChatViewModel?
 
     /// `transport` and `chatTransport` are the same `LiveChatTransport` in the app. Tests give fakes.
-    public init(transport: any SessionsTransport, chatTransport: any ChatTransport, cache: any SessionCacheStore) {
+    public init(transport: any SessionsTransport, chatTransport: any ChatTransport, cache: any SessionCacheStore,
+                transcription: VoiceTranscription = .server) {
         self.transport = transport
+        self.transcription = transcription
         self.chatTransport = chatTransport
         self.cache = cache
         let cached = cache.loadSessions()
@@ -162,7 +166,8 @@ public final class SessionListModel {
     public func chat(for id: String) -> ChatViewModel {
         if let chat = chats[id] ?? chats.values.first(where: { $0.storedSessionId == id }) { return chat }
         let title = session(id: id).map(\.displayTitle)
-        let chat = ChatViewModel(transport: chatTransport, storedSessionId: id, title: title, cache: cache)
+        let chat = ChatViewModel(transport: chatTransport, storedSessionId: id, title: title, cache: cache,
+                                 transcription: transcription)
         chat.startEvents()
         chats[id] = chat
         return chat
@@ -191,7 +196,8 @@ public final class SessionListModel {
         if let chat = chats[key] { return chat }
         chats.values.forEach { $0.yieldNewChat() }
         let keeps = !chats.values.contains { $0.keepsNewChat }
-        let chat = ChatViewModel(transport: chatTransport, cache: cache, keepsNewChat: keeps)
+        let chat = ChatViewModel(transport: chatTransport, cache: cache, keepsNewChat: keeps,
+                                 transcription: transcription)
         chat.startEvents()
         chats[key] = chat
         return chat
