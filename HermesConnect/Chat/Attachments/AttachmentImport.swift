@@ -86,7 +86,10 @@ enum AttachmentImport {
 
     @MainActor private static var cleared = false
 
+    /// `ProtectedStorage` rules (issue #18): the folder is excluded from backup, the files use
+    /// `completeUntilFirstUserAuthentication`.
     private static func folder(for id: String) throws -> URL {
+        try ProtectedStorage.prepare(directory: folder)
         let url = folder.appendingPathComponent(id, isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
@@ -94,7 +97,7 @@ enum AttachmentImport {
 
     private static func write(_ data: Data, id: String, name: String) throws -> URL {
         let url = try folder(for: id).appendingPathComponent(name)
-        try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try data.write(to: url, options: ProtectedStorage.writeOptions)
         return url
     }
 }
