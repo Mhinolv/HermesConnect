@@ -17,6 +17,10 @@ final class ChatViewController: MessagesViewController {
     private let micPressDelegate = MicPressDelegate()
     private var micPressStart: CGPoint = .zero
     private var voiceCalculator: ChatVoiceSizeCalculator?
+    /// Issue #67: the size of a command card.
+    private var commandCalculator: ChatVoiceSizeCalculator?
+    /// Issue #67: the last composer text that the model gave.
+    private var handledComposerFillId: String?
     /// Memos whose transcript shows all lines.
     private var expandedTranscripts: Set<String> = []
     /// DEBUG demo: runs once when the screen shows (recording bar screenshots).
@@ -84,6 +88,7 @@ final class ChatViewController: MessagesViewController {
         messagesCollectionView.messageCellDelegate = self
         messagesCollectionView.register(ChatTextCell.self)
         messagesCollectionView.register(ChatVoiceCell.self)
+        messagesCollectionView.register(ChatCommandCell.self)
         messagesCollectionView.keyboardDismissMode = .interactive
         scrollsToLastItemOnKeyboardBeginsEditing = true
         maintainPositionOnInputBarHeightChanged = true
@@ -107,6 +112,7 @@ final class ChatViewController: MessagesViewController {
         announcedReplyId = model.completedReplyId
         // A reply that got its audio before this screen opened does not play now.
         handledAutoPlayId = model.autoPlayReplyId
+        handledComposerFillId = model.composerFill?.id
         render()
         observeModel()
     }
@@ -157,6 +163,13 @@ final class ChatViewController: MessagesViewController {
             ChatVoiceLayout.bubbleSize(traits: self?.traitCollection ?? .current, maxWidth: maxWidth)
         }
         self.voiceCalculator = voiceCalculator
+        let commandCalculator = ChatVoiceSizeCalculator(layout: layout,
+                                                        copying: layout.attributedTextMessageSizeCalculator)
+        commandCalculator.bubbleSize = { [weak self] message, maxWidth in
+            guard let card = (message as? ChatBubble)?.row.message.command else { return .zero }
+            return ChatCommandCardLayout.size(card, traits: self?.traitCollection ?? .current, maxWidth: maxWidth)
+        }
+        self.commandCalculator = commandCalculator
     }
 
     private func configureComposer() {
@@ -647,12 +660,27 @@ final class ChatViewController: MessagesViewController {
             _ = model.completedReplyId
             _ = model.autoPlayReplyId
             _ = model.newMessageIds
+            _ = model.composerFill
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
+                self?.applyComposerFill()
                 self?.render()
                 self?.observeModel()
             }
         }
+    }
+
+    /// Issue #67: a `prefill` result replaces the composer text. The text of a failed command goes back into an
+    /// empty composer, so the owner can fix it.
+    private func applyComposerFill() {
+        guard let fill = model.composerFill, fill.id != handledComposerFillId else { return }
+        handledComposerFillId = fill.id
+        let textView = messageInputBar.inputTextView
+        if fill.reason == .restore, !textView.text.isEmpty { return }
+        textView.text = fill.text
+        composerText = fill.text
+        model.updateDraft(fill.text)
+        updateSendButton()
     }
 
     private func styledText(for message: ChatMessage) -> NSAttributedString {
@@ -1235,6 +1263,12 @@ extension ChatViewController: MessagesDataSource {
 
     func customCell(for message: MessageType, at indexPath: IndexPath,
                     in messagesCollectionView: MessagesCollectionView) -> UICollectionViewCell {
+        if let card = row(for: message)?.message.command {
+            let cell = messagesCollectionView.dequeueReusableCell(ChatCommandCell.self, for: indexPath)
+            cell.configure(with: message, at: indexPath, and: messagesCollectionView)
+            cell.configure(card: card, traits: traitCollection)
+            return cell
+        }
         let cell = messagesCollectionView.dequeueReusableCell(ChatVoiceCell.self, for: indexPath)
         cell.configure(with: message, at: indexPath, and: messagesCollectionView)
         guard let row = row(for: message), let info = transcript(for: row, message: message, at: indexPath) else {
@@ -1295,9 +1329,10 @@ extension ChatViewController: MessagesLayoutDelegate {
         return footnote + (transcript(for: row, message: message, at: indexPath)?.height ?? 0)
     }
 
-    func customCellSizeCalculator(for _: MessageType, at _: IndexPath,
+    func customCellSizeCalculator(for message: MessageType, at _: IndexPath,
                                   in _: MessagesCollectionView) -> CellSizeCalculator {
-        voiceCalculator ?? MessageSizeCalculator(layout: flowLayout)
+        if row(for: message)?.message.command != nil, let commandCalculator { return commandCalculator }
+        return voiceCalculator ?? MessageSizeCalculator(layout: flowLayout)
     }
 
     func cellBottomLabelHeight(for message: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> CGFloat {
@@ -1315,12 +1350,16 @@ extension ChatViewController: MessagesLayoutDelegate {
 
 extension ChatViewController: MessagesDisplayDelegate {
     func messageStyle(for message: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> MessageStyle {
+        if row(for: message)?.message.command != nil {
+            return .custom { $0.layer.cornerRadius = ChatCommandCardLayout.cornerRadius }
+        }
         guard let row = row(for: message), row.hasTail else { return .bubble }
         return .bubbleTail(row.message.role == .user ? .bottomRight : .bottomLeft, .curved)
     }
 
     func backgroundColor(for message: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> UIColor {
-        row(for: message)?.message.role == .user ? .systemBlue : .systemGray5
+        if row(for: message)?.message.command != nil { return .secondarySystemBackground }
+        return row(for: message)?.message.role == .user ? .systemBlue : .systemGray5
     }
 
     func configureAvatarView(_ avatarView: AvatarView, for _: MessageType, at _: IndexPath,
@@ -1385,8 +1424,10 @@ extension ChatViewController: InputBarAccessoryViewDelegate {
             model.stop()
             return
         }
-        guard model.send(text, attachments: attachments.pending) != nil else { return }
-        _ = attachments.takeAll()
+        // Issue #67: a slash command leaves the attachments in the composer. They go with the next message.
+        let isCommand = SlashCommand(text) != nil
+        guard model.send(text, attachments: isCommand ? [] : attachments.pending) != nil else { return }
+        if !isCommand { _ = attachments.takeAll() }
         inputBar.inputTextView.text = ""
         composerText = ""
         model.updateDraft("")

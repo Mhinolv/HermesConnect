@@ -17,6 +17,7 @@
 		117A8219415F89525F20D235 /* ChatViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71BE1F0BBF1E0DC6C9086E97 /* ChatViewController.swift */; };
 		15447B7300590146E9C01520 /* CatchUpAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8A48996F2DE819FC34FF0CA /* CatchUpAppTests.swift */; };
 		173CEA1C519578E124650A2A /* VoiceReplyUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EBCCF57F6F99D73BDA35CD1 /* VoiceReplyUITests.swift */; };
+		17E1339897DD2126DA36CB6A /* ChatCommandCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23D8BC56827006B8AA57FFA8 /* ChatCommandCell.swift */; };
 		18787829A672FAE5AA0FBC11 /* ChatScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A26C38F7103D242B9AFB6E1 /* ChatScreen.swift */; };
 		211CBBF5ADB2917454F96E2C /* ChatMarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC3CFB65E5C14E6CFD46E85F /* ChatMarkdownText.swift */; };
 		2123C91DA56892A01ABB28FA /* HermesKit in Frameworks */ = {isa = PBXBuildFile; productRef = ECEB44D1091478F728CDD903 /* HermesKit */; };
@@ -86,6 +87,7 @@
 		12037EC69A1B3FFA5178CD6D /* InstallStepsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstallStepsView.swift; sourceTree = "<group>"; };
 		12550753F6EF1111C87EA8A8 /* ChatBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatBubble.swift; sourceTree = "<group>"; };
 		1A26C38F7103D242B9AFB6E1 /* ChatScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatScreen.swift; sourceTree = "<group>"; };
+		23D8BC56827006B8AA57FFA8 /* ChatCommandCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatCommandCell.swift; sourceTree = "<group>"; };
 		251E221809E08D66325EFA17 /* AttachmentDemo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentDemo.swift; sourceTree = "<group>"; };
 		27E6BC84392DF022945BB39D /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
 		2A8691638CC5B4480E12DCC9 /* VoiceMemoUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceMemoUITests.swift; sourceTree = "<group>"; };
@@ -317,6 +319,7 @@
 			isa = PBXGroup;
 			children = (
 				12550753F6EF1111C87EA8A8 /* ChatBubble.swift */,
+				23D8BC56827006B8AA57FFA8 /* ChatCommandCell.swift */,
 				DC3CFB65E5C14E6CFD46E85F /* ChatMarkdownText.swift */,
 				1A26C38F7103D242B9AFB6E1 /* ChatScreen.swift */,
 				71BE1F0BBF1E0DC6C9086E97 /* ChatViewController.swift */,
@@ -467,6 +470,7 @@
 				112074308449AED528F9D35E /* Authenticator.swift in Sources */,
 				C3C3F39DCFB1663A359F94F1 /* BackgroundRefresh.swift in Sources */,
 				CFB55369F229DCF8B92BA398 /* ChatBubble.swift in Sources */,
+				17E1339897DD2126DA36CB6A /* ChatCommandCell.swift in Sources */,
 				211CBBF5ADB2917454F96E2C /* ChatMarkdownText.swift in Sources */,
 				18787829A672FAE5AA0FBC11 /* ChatScreen.swift in Sources */,
 				117A8219415F89525F20D235 /* ChatViewController.swift in Sources */,

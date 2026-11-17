@@ -49,11 +49,13 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
     public var agentAck: AgentAck?
     /// Issue #11: the owner's tapback. It stays on the phone.
     public var tapback: Tapback?
+    /// Issue #67: a local command card (`.assistant`, no `reply`). It never goes to Hermes or to the cache.
+    public var command: ChatCommandCard?
 
     public init(id: String, role: Role, text: String, date: Date, delivery: Delivery? = nil,
                 reply: Reply? = nil, userRowId: Int? = nil, promptId: String? = nil, voice: VoiceMemo? = nil,
                 attachments: [ChatAttachment] = [], spokenReply: SpokenReply? = nil,
-                agentAck: AgentAck? = nil, tapback: Tapback? = nil) {
+                agentAck: AgentAck? = nil, tapback: Tapback? = nil, command: ChatCommandCard? = nil) {
         self.id = id
         self.role = role
         self.text = text
@@ -67,6 +69,7 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
         self.spokenReply = spokenReply
         self.agentAck = agentAck
         self.tapback = tapback
+        self.command = command
     }
 
     public var isFailed: Bool {

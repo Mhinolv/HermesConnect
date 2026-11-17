@@ -108,12 +108,13 @@ private final class Counter: @unchecked Sendable {
         #expect(transport.submits == [.init(sessionId: "s1", text: "hello", retryBeforeRowId: nil)])
     }
 
-    @Test func slashTextIsSentAsItIsAndBlankTextIsNotSent() async {
+    /// Issue #67: a slash command runs as a command (`SlashCommandTests`), never as prompt text.
+    @Test func slashTextIsNotSentAsAPromptAndBlankTextIsNotSent() async {
         let transport = FakeChatTransport()
         let vm = model(transport)
         #expect(vm.send("  \n ") == nil)
         await vm.send("/model gpt")?.value
-        #expect(transport.submits.map(\.text) == ["/model gpt"])
+        #expect(transport.submits.isEmpty)
     }
 
     @Test func twoQuickSendsShareOneSessionCreate() async {
