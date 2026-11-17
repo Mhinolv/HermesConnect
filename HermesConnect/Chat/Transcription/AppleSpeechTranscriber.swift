@@ -27,25 +27,38 @@ struct AppleSpeechTranscriber: OnDeviceTranscriber {
     }
 
     func transcribe(fileURL: URL) async throws -> String {
+        try await transcribe(fileURL: fileURL, progress: { _ in })
+    }
+
+    /// Issue #50: the end time of each result over the length of the file gives the progress of a long file.
+    /// A cancelled task stops the analyzer.
+    func transcribe(fileURL: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> String {
         let transcriber = try await Self.makeTranscriber()
         guard await AssetInventory.status(forModules: [transcriber]) == .installed else {
             throw Failure.modelNotInstalled
         }
         let file = try AVAudioFile(forReading: fileURL)
+        let seconds = Double(file.length) / max(1, file.processingFormat.sampleRate)
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         async let text: String = transcriber.results.reduce(into: "") { text, result in
             text += String(result.text.characters)
+            if seconds > 0 { progress(min(1, max(0, result.range.end.seconds / seconds))) }
         }
-        do {
-            if let end = try await analyzer.analyzeSequence(from: file) {
-                try await analyzer.finalizeAndFinish(through: end)
-            } else {
+        try await withTaskCancellationHandler {
+            do {
+                if let end = try await analyzer.analyzeSequence(from: file) {
+                    try await analyzer.finalizeAndFinish(through: end)
+                } else {
+                    await analyzer.cancelAndFinishNow()
+                }
+            } catch {
                 await analyzer.cancelAndFinishNow()
+                throw error
             }
-        } catch {
-            await analyzer.cancelAndFinishNow()
-            throw error
+        } onCancel: {
+            Task { await analyzer.cancelAndFinishNow() }
         }
+        try Task.checkCancellation()
         return try await text
     }
 }

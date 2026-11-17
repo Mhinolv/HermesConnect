@@ -79,6 +79,10 @@ final class ChatViewController: MessagesViewController {
     private var buildingBubbles = false
     /// Issue #73: the cron run screen. No composer and no tapbacks. "Copy" stays.
     let readOnly: Bool
+    /// Issue #50: the on-device transcripts of received audio files. Tests and the DEBUG demo set a fake first.
+    lazy var audioTranscripts = ReceivedAudioTranscripts(files: model.receivedFiles,
+                                                         transcription: OnDeviceTranscription.shared.transcription,
+                                                         permission: SystemSpeechPermission())
     /// Issue #17: the quote box above the text view, the swipe to reply, and "Original message not loaded".
     let quoteView = QuoteComposerView()
     private let swipeReply = ChatSwipeReply()
@@ -112,6 +116,7 @@ final class ChatViewController: MessagesViewController {
         // Issue #60: 10 pt between the last bubble and the composer, keyboard up or down (iMessage).
         additionalBottomInset = ChatComposerLayout.threadGap
         configureLayout()
+        audioTranscripts.onChange = { [weak self] file in self?.audioTranscriptChanged(file) }
         if readOnly {
             // Issue #73: an empty input bar of no height, so the thread goes to the bottom of the screen.
             // MessageKit swaps the bar on the next main queue turn. Take the composer out now, so it never shows.
@@ -507,13 +512,19 @@ final class ChatViewController: MessagesViewController {
             text = waits ? nil : ChatVoiceLayout.transcriptText(for: voice, traits: traitCollection)
         } else if (message as? ChatBubble)?.part.content == .spokenReply, let spoken = row.message.spokenReply {
             text = ChatVoiceLayout.replyCaption(for: spoken, text: row.message.text, traits: traitCollection)
+        } else if let bubble = message as? ChatBubble, let file = bubble.part.receivedFile {
+            // Issue #50: the transcript line under a received audio bubble.
+            guard let state = audioTranscriptState(bubble, file: file) else { return nil }
+            text = ReceivedAudioTranscriptText.make(state, traits: traitCollection)
         } else {
             return nil
         }
         let maxWidth = calculator.messageContainerMaxWidth(for: message, at: indexPath)
         let width = ChatVoiceLayout.bubbleSize(traits: traitCollection, maxWidth: maxWidth).width
-        let lines = row.message.voice == nil ? ChatVoiceLayout.replyLines : ChatVoiceLayout.collapsedLines
-        let height = ChatVoiceLayout.transcriptHeight(text, width: width, expanded: expandedTranscripts.contains(row.id),
+        let isFile = (message as? ChatBubble)?.part.receivedFile != nil
+        let lines = row.message.voice == nil && !isFile ? ChatVoiceLayout.replyLines : ChatVoiceLayout.collapsedLines
+        let key = isFile ? message.messageId : row.id
+        let height = ChatVoiceLayout.transcriptHeight(text, width: width, expanded: expandedTranscripts.contains(key),
                                                       lines: lines)
         return (text, height, width)
     }
@@ -947,6 +958,13 @@ final class ChatViewController: MessagesViewController {
             cell.accessibilityLabel = ChatBubbleParts.receivedFileLabel(file, byteCount: model.receivedFiles.byteCount(for: file),
                                                                         row: row, state: stateText)
             cell.accessibilityHint = nil
+            // Issue #50: the transcript, and "Transcribe" or "Cancel Transcription".
+            if let bubble = bubble(at: indexPath), let transcript = audioTranscriptState(bubble, file: file) {
+                if let spoken = ReceivedAudioTranscriptText.spoken(transcript) {
+                    cell.accessibilityLabel = [cell.accessibilityLabel ?? "", spoken].joined(separator: ", ")
+                }
+                actions += audioTranscriptAccessibilityActions(for: file, state: transcript)
+            }
             for (name, action) in [("Open", ReceivedFileAction.open), ("Save to Files", .saveToFiles), ("Share", .share)] {
                 actions.append(UIAccessibilityCustomAction(name: name) { [weak self, weak cell] _ in
                     guard let self else { return false }
@@ -1046,6 +1064,7 @@ final class ChatViewController: MessagesViewController {
                         self?.perform(.copy, on: file, from: source)
                     })
                 }
+                actions += self.audioTranscriptMenu(for: file, bubble: self.bubble(at: indexPath))
             } else if let item = part.attachment {
                 actions.append(UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
                     if item.showsAsImage {
@@ -1400,12 +1419,17 @@ extension ChatViewController: MessagesDataSource {
         let cell = messagesCollectionView.dequeueReusableCell(ChatVoiceCell.self, for: indexPath)
         cell.configure(with: message, at: indexPath, and: messagesCollectionView)
         // Issue #12: a received audio file uses the #10 audio bubble, with no auto-play.
-        if let file = (message as? ChatBubble)?.part.receivedFile {
+        if let bubble = message as? ChatBubble, let file = bubble.part.receivedFile {
             let spoken = model.receivedFiles.audio(for: file)
             let url = spoken.audio?.fileURL
             let loaded = url != nil && player.playingURL == url
+            // Issue #50: the transcript line, or "Transcribe", under the bubble.
+            let info = transcript(for: bubble.row, message: message, at: indexPath)
             cell.configure(reply: spoken, playing: url.map(player.isPlaying) ?? false,
-                           time: loaded ? player.currentTime : 0, caption: nil, captionHeight: 0, traits: traitCollection)
+                           time: loaded ? player.currentTime : 0, caption: info?.text, captionHeight: info?.height ?? 0,
+                           traits: traitCollection)
+            let partId = message.messageId
+            cell.transcriptLabel.numberOfLines = expandedTranscripts.contains(partId) ? 0 : ChatVoiceLayout.collapsedLines
             cell.onPlay = { [weak self, weak cell] in
                 guard let self else { return }
                 self.perform(.open, on: file, from: cell ?? self.view)
@@ -1414,7 +1438,9 @@ extension ChatViewController: MessagesDataSource {
                 guard let self, !self.voice.isActive, let url else { return }
                 self.player.seek(url, to: time)
             }
-            cell.onTranscriptTap = nil
+            cell.onTranscriptTap = info?.text == nil ? nil : { [weak self] in
+                self?.tapAudioTranscript(file, partId: partId)
+            }
             return cell
         }
         guard let row = row(for: message), let info = transcript(for: row, message: message, at: indexPath) else {
@@ -1927,4 +1953,72 @@ extension ChatViewController {
 
     /// The bubbles of received files (tests).
     var receivedFileBubbles: [ChatBubble] { bubbles.filter { $0.part.receivedFile != nil } }
+}
+
+// MARK: - Audio file transcripts (issue #50)
+
+extension ChatViewController {
+    /// The transcript state of a received audio bubble. `nil` while the bubble is not an audio bubble yet
+    /// (download, or the audio length and levels), so no "Transcribe" shows before a run can start.
+    fileprivate func audioTranscriptState(_ bubble: ChatBubble, file: ReceivedFile) -> AudioFileTranscript? {
+        guard file.kind == .audio, bubble.received.fileURL != nil else { return nil }
+        let state = audioTranscripts.state(for: file)
+        if state == .none, model.receivedFiles.audio(for: file) == .preparing { return nil }
+        return state
+    }
+
+    /// A tap on the line under the bubble.
+    fileprivate func tapAudioTranscript(_ file: ReceivedFile, partId: String) {
+        switch audioTranscripts.state(for: file) {
+        case .none, .failed, .noPermission:
+            audioTranscripts.start(file)
+        case .transcribing:
+            audioTranscripts.cancel(file)
+        case .done:
+            if expandedTranscripts.remove(partId) == nil { expandedTranscripts.insert(partId) }
+            guard let index = bubbles.firstIndex(where: { $0.messageId == partId }) else { return }
+            UIView.performWithoutAnimation {
+                messagesCollectionView.reloadSections(IndexSet(integer: index))
+            }
+        case .empty, .unreadable:
+            break
+        }
+    }
+
+    /// The "Transcribe" or "Cancel Transcription" item of the long-press menu.
+    fileprivate func audioTranscriptMenu(for file: ReceivedFile, bubble: ChatBubble?) -> [UIMenuElement] {
+        guard let bubble, let state = audioTranscriptState(bubble, file: file) else { return [] }
+        if state.isTranscribing {
+            return [UIAction(title: "Cancel Transcription", image: UIImage(systemName: "xmark")) { [weak self] _ in
+                self?.audioTranscripts.cancel(file)
+            }]
+        }
+        guard state.canStart else { return [] }
+        return [UIAction(title: "Transcribe", image: UIImage(systemName: ReceivedAudioTranscriptText.symbolName)) {
+            [weak self] _ in
+            self?.audioTranscripts.start(file)
+        }]
+    }
+
+    fileprivate func audioTranscriptAccessibilityActions(for file: ReceivedFile,
+                                                         state: AudioFileTranscript) -> [UIAccessibilityCustomAction] {
+        if state.isTranscribing {
+            return [UIAccessibilityCustomAction(name: "Cancel Transcription") { [weak self] _ in
+                self?.audioTranscripts.cancel(file)
+                return true
+            }]
+        }
+        guard state.canStart else { return [] }
+        return [UIAccessibilityCustomAction(name: "Transcribe") { [weak self] _ in
+            self?.audioTranscripts.start(file)
+            return true
+        }]
+    }
+
+    /// A run ended with speech recognition off: the alert with "Open Settings" (like "Microphone Access Off").
+    fileprivate func audioTranscriptChanged(_ file: ReceivedFile) {
+        receivedFileChanged(file)
+        guard audioTranscripts.state(for: file) == .noPermission, presentedViewController == nil else { return }
+        present(ReceivedAudioTranscriptText.permissionAlert(), animated: true)
+    }
 }

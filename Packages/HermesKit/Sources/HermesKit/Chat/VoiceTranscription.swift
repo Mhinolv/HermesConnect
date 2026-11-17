@@ -34,6 +34,15 @@ public enum TranscriptionEngine: String, CaseIterable, Sendable {
 /// One on-device recognizer. It throws when it cannot run (no model, no permission, a decode error).
 public protocol OnDeviceTranscriber: Sendable {
     func transcribe(fileURL: URL) async throws -> String
+    /// Issue #50: the same, with the fraction of the audio done (0 to 1). A recognizer with no progress
+    /// reports nothing. Task cancellation stops it.
+    func transcribe(fileURL: URL, progress: @escaping @Sendable (Double) -> Void) async throws -> String
+}
+
+extension OnDeviceTranscriber {
+    public func transcribe(fileURL: URL, progress _: @escaping @Sendable (Double) -> Void) async throws -> String {
+        try await transcribe(fileURL: fileURL)
+    }
 }
 
 /// Picks the recognizer for a voice memo and falls back to the server (issue #44).
