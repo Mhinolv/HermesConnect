@@ -131,6 +131,82 @@ import Testing
         #expect(chats.submits.map(\.text) == ["Hi"])
     }
 
+    // MARK: Cron runs (issue #78)
+
+    /// An older build saved the cron run `cron_a1_1` as the active session. The newest chat is `k2`.
+    private func cronActiveSessions(mostRecent: String? = nil, chats: FakeChatTransport,
+                                    rows: [SessionListItem] = [SessionListItem(id: "cron_a1_1", source: "cron"),
+                                                               SessionListItem(id: "k2", title: "Plans")])
+        -> SessionListModel {
+        SessionListModel(transport: FakeSessionsTransport(mostRecent: mostRecent), chatTransport: chats,
+                         cache: InMemorySessionCacheStore(sessions: rows, activeSessionId: "cron_a1_1"))
+    }
+
+    @Test func theCachedActiveChatIsNeverACronRun() {
+        let chats = FakeChatTransport()
+        #expect(cronActiveSessions(chats: chats).cachedActiveChatId == nil)
+        // No row in the cache: the legacy run id tells.
+        let noRow = SessionListModel(transport: FakeSessionsTransport(), chatTransport: chats,
+                                     cache: InMemorySessionCacheStore(activeSessionId: "cron_a1_20261117_080000"))
+        #expect(noRow.cachedActiveChatId == nil)
+        let chat = SessionListModel(transport: FakeSessionsTransport(), chatTransport: chats,
+                                    cache: InMemorySessionCacheStore(sessions: [SessionListItem(id: "k1")],
+                                                                     activeSessionId: "k1"))
+        #expect(chat.cachedActiveChatId == "k1")
+        #expect(chat.cachedActiveSessionId == "k1")
+        let unknown = SessionListModel(transport: FakeSessionsTransport(), chatTransport: chats,
+                                       cache: InMemorySessionCacheStore(activeSessionId: "dead1"))
+        #expect(unknown.cachedActiveChatId == "dead1")
+    }
+
+    @Test func theMostRecentChatSkipsCronRunsAndPrefersTheServer() async {
+        let chats = FakeChatTransport()
+        #expect(await cronActiveSessions(mostRecent: "k9", chats: chats).mostRecentChatId() == "k9")
+        #expect(await cronActiveSessions(chats: chats).mostRecentChatId() == "k2")
+        let onlyCron = cronActiveSessions(chats: chats, rows: [SessionListItem(id: "cron_a1_1", source: "cron")])
+        #expect(await onlyCron.mostRecentChatId() == nil)
+    }
+
+    @Test func aCachedCronRunIsSkippedForTheNewestChat() async throws {
+        let chats = FakeChatTransport()
+        let sessions = cronActiveSessions(chats: chats)
+        var shown: [AskHermesRoute] = []
+        let task = await AskHermes.run(AskHermesRequest(message: "Hi"), sessions: sessions,
+                                       linkReady: { true }, show: { shown.append($0) })
+        await task?.value
+        #expect(shown == [.session("k2")])
+        #expect(chats.resumes == ["k2"])
+        #expect(chats.submits.map(\.text) == ["Hi"])
+        #expect(sessions.chat(for: "cron_a1_1").messages.isEmpty)
+    }
+
+    @Test func aCachedCronRunUsesTheMostRecentChatOfTheServerFirst() async throws {
+        let chats = FakeChatTransport()
+        let sessions = cronActiveSessions(mostRecent: "k9", chats: chats)
+        var shown: [AskHermesRoute] = []
+        let task = await AskHermes.run(AskHermesRequest(message: "Hi"), sessions: sessions,
+                                       linkReady: { true }, show: { shown.append($0) })
+        await task?.value
+        #expect(shown == [.session("k9")])
+        #expect(chats.resumes == ["k9"])
+    }
+
+    @Test func aCachedCronRunWithNoChatStartsANewChat() async throws {
+        let chats = FakeChatTransport()
+        let sessions = cronActiveSessions(chats: chats, rows: [SessionListItem(id: "cron_a1_1", source: "cron")])
+        var shown: [AskHermesRoute] = []
+        let task = await AskHermes.run(AskHermesRequest(message: "Hi"), sessions: sessions,
+                                       linkReady: { true }, show: { shown.append($0) })
+        await task?.value
+        guard case .newChat = shown.first, shown.count == 1 else {
+            Issue.record("expected one new chat, got \(shown)")
+            return
+        }
+        #expect(chats.resumes.isEmpty)
+        #expect(chats.starts.map(\.0) == [ChatSource.iOS])
+        #expect(chats.submits.map(\.text) == ["Hi"])
+    }
+
     @Test func offlineStillShowsTheTextAsNotDelivered() async throws {
         let chats = FakeChatTransport()
         chats.failStart = true

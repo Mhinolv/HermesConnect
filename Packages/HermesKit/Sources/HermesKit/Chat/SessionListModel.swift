@@ -63,6 +63,26 @@ public final class SessionListModel {
     /// The session that the owner opened last, from the cache. The app pushes it at once on launch.
     public var cachedActiveSessionId: String? { cache.loadActiveSessionId() }
 
+    /// Issue #78: the cached active session, or `nil` when it is a cron run. An older build could save one.
+    /// Launch, Ask Hermes and Siri use it, so nothing opens or sends into a cron run.
+    public var cachedActiveChatId: String? {
+        guard let id = cachedActiveSessionId, !isCronRun(id) else { return nil }
+        return id
+    }
+
+    /// Issue #78: the chat to send into when no cached chat is active. `session.most_recent` (never a cron
+    /// run), else the newest cached chat row. `nil`: start a new chat.
+    public func mostRecentChatId() async -> String? {
+        if let id = await mostRecentSessionId() { return id }
+        return chatRows.first?.id
+    }
+
+    /// A cron run row. With no row, the legacy run id `cron_<job id>_<time>` tells.
+    private func isCronRun(_ id: String) -> Bool {
+        guard let row = session(id: id) else { return id.hasPrefix("cron_") }
+        return row.isCronRun
+    }
+
     /// Issue #36: a new chat with no server row kept memos (for example a failed memo while offline).
     /// The app opens that chat at launch.
     public var hasCachedNewChat: Bool { !cache.loadTranscript(sessionId: SessionCache.newChatId).isEmpty }
