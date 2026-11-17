@@ -345,8 +345,8 @@ enum ChatLaunch {
         if isDemo { return demoLaunchRoute }
         #endif
         if sessions.hasCachedNewChat { return .new(SessionCache.newChatId) }
-        // Issue #73: a cron run is not a chat. An older build could save it as the active session.
-        guard let id = sessions.cachedActiveSessionId, sessions.session(id: id)?.isCronRun != true else { return nil }
+        // Issue #73, #78: a cron run is not a chat. An older build could save it as the active session.
+        guard let id = sessions.cachedActiveChatId else { return nil }
         return .session(id)
     }
 

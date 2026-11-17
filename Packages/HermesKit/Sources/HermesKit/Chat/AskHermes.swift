@@ -65,7 +65,9 @@ public enum AskHermes {
     /// Runs one request. The owner decision (2026-11-16) says the text goes at once, with no composer step.
     ///
     /// 1. The session that launch opens (#7): the cached active session. `show` pushes it at once.
-    /// 2. No cached session: wait for the link, then `session.most_recent`. No session: a new chat.
+    ///    Issue #78: a cached cron run does not count.
+    /// 2. No cached session: wait for the link, then `session.most_recent`, else the newest cached chat.
+    ///    No session: a new chat.
     /// 3. Wait for the link (`linkReady`), then send. A send with no link shows "Not Delivered" and "Try Again".
     ///
     /// Returns the send task, or `nil` when the request has no text.
@@ -74,7 +76,7 @@ public enum AskHermes {
                            linkReady: @MainActor () async -> Bool,
                            show: @MainActor (AskHermesRoute) -> Void) async -> Task<Void, Never>? {
         let chat: ChatViewModel
-        if let id = sessions.cachedActiveSessionId {
+        if let id = sessions.cachedActiveChatId {
             show(.session(id))
             chat = sessions.chat(for: id)
             guard let text = request.text else { return nil }
@@ -82,7 +84,7 @@ public enum AskHermes {
             return chat.send(text)
         }
         let ready = await linkReady()
-        let mostRecent = ready ? await sessions.mostRecentSessionId() : nil
+        let mostRecent = ready ? await sessions.mostRecentChatId() : nil
         if let id = mostRecent {
             show(.session(id))
             chat = sessions.chat(for: id)
