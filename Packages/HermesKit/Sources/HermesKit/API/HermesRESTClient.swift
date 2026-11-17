@@ -100,6 +100,28 @@ public struct SessionMessagesPage: Decodable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey { case sessionId = "session_id", messages, pagination }
 }
 
+/// `GET /api/health` result (`web_routers/status.py:119-130`). It is public: no token.
+public struct HermesHealth: Decodable, Sendable, Equatable {
+    public var ok: Bool?
+    public var version: String?
+}
+
+/// `GET /api/ssh/ownership` result (`web_routers/status.py:109-116`, docs/hermes-protocol.md 1.3 step 12).
+public struct SSHOwnershipProof: Decodable, Sendable, Equatable {
+    public var ok: Bool?
+    public var sshOwnerNonce: String?
+    public var protocolVersion: Int?
+    public var runtimeIntact: Bool?
+
+    /// `ok` is true, the nonce is 16 hex, the protocol is 1, and `runtimeIntact` is not false.
+    /// The gate keeps the nonce, so the app checks only its form.
+    public var isValid: Bool {
+        guard ok == true, protocolVersion == 1, runtimeIntact != false, let nonce = sshOwnerNonce,
+              nonce.count == 16, nonce.allSatisfy(\.isHexDigit) else { return false }
+        return true
+    }
+}
+
 /// REST calls on the same forwarded port, with header `X-Hermes-Session-Token`
 /// (docs/hermes-protocol.md 2.1, 3.5). Use it for paged lists and paged history.
 public struct HermesRESTClient: Sendable {
@@ -134,18 +156,36 @@ public struct HermesRESTClient: Sendable {
         ])
     }
 
-    func request(path: String, query: [URLQueryItem]) -> URLRequest {
+    /// `GET /api/health`, with no token. A 2xx answer means that the server runs.
+    public func health() async throws -> HermesHealth {
+        try await get("/api/health", query: [], authenticated: false)
+    }
+
+    /// `GET /api/status` with the token. The fallback health check (`backend-health.ts:79-104`).
+    public func status() async throws {
+        let _: JSONValue = try await get("/api/status", query: [])
+    }
+
+    /// `GET /api/ssh/ownership` with the token. 401, 403 and 404 mean a stale token.
+    public func sshOwnership() async throws -> SSHOwnershipProof {
+        try await get("/api/ssh/ownership", query: [])
+    }
+
+    func request(path: String, query: [URLQueryItem], authenticated: Bool = true) -> URLRequest {
         var components = URLComponents(url: endpoint.baseURL, resolvingAgainstBaseURL: false)!
         components.percentEncodedPath = path
         components.queryItems = query.isEmpty ? nil : query
         var request = URLRequest(url: components.url!)
-        request.setValue(endpoint.token, forHTTPHeaderField: "X-Hermes-Session-Token")
+        request.timeoutInterval = 15
+        if authenticated { request.setValue(endpoint.token, forHTTPHeaderField: "X-Hermes-Session-Token") }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         return request
     }
 
-    private func get<Output: Decodable>(_ path: String, query: [URLQueryItem]) async throws -> Output {
-        let (data, response) = try await loader.data(for: request(path: path, query: query))
+    private func get<Output: Decodable>(_ path: String, query: [URLQueryItem],
+                                        authenticated: Bool = true) async throws -> Output {
+        let (data, response) = try await loader.data(for: request(path: path, query: query,
+                                                                  authenticated: authenticated))
         guard let http = response as? HTTPURLResponse else { throw HermesAPIError.invalidResponse }
         switch http.statusCode {
         case 200..<300: break
@@ -158,5 +198,48 @@ public struct HermesRESTClient: Sendable {
         } catch {
             throw HermesAPIError.invalidResponse
         }
+    }
+}
+
+// MARK: - Test and preview loader
+
+/// A fake `HTTPDataLoading` for app tests and previews. It answers the #4 checks
+/// (`/api/health`, `/api/status`, `/api/ssh/ownership`) like a healthy Hermes. No network.
+public final class ScriptedHermesHTTP: HTTPDataLoading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _ownershipStatus = 200
+    private var _healthy = true
+    private var _paths: [String] = []
+
+    public init() {}
+
+    /// `false`: every request fails, as if Hermes does not answer.
+    public var healthy: Bool {
+        get { lock.withLock { _healthy } }
+        set { lock.withLock { _healthy = newValue } }
+    }
+
+    /// The status of `GET /api/ssh/ownership`. 401 simulates a stale token.
+    public var ownershipStatus: Int {
+        get { lock.withLock { _ownershipStatus } }
+        set { lock.withLock { _ownershipStatus = newValue } }
+    }
+
+    public var paths: [String] { lock.withLock { _paths } }
+
+    public func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        let path = request.url?.path ?? ""
+        let (healthy, ownership) = lock.withLock { () -> (Bool, Int) in
+            _paths.append(path)
+            return (_healthy, _ownershipStatus)
+        }
+        guard healthy, let url = request.url else { throw URLError(.cannotConnectToHost) }
+        let (status, body) = switch path {
+        case "/api/ssh/ownership":
+            (ownership, #"{"ok":true,"sshOwnerNonce":"0123456789abcdef","protocolVersion":1,"runtimeIntact":true}"#)
+        case "/api/health": (200, #"{"ok":true}"#)
+        default: (200, "{}")
+        }
+        return (Data(body.utf8), HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!)
     }
 }

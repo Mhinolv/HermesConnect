@@ -61,6 +61,7 @@ struct RootView: View {
                 }
             }
             .navigationTitle("Hermes")
+            .hermesStartAlert()
         }
         .sheet(isPresented: $showSetup) { SetupFlowView() }
         .sheet(isPresented: $showSettings) { SettingsView() }

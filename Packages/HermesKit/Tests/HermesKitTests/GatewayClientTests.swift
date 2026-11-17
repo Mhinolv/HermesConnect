@@ -85,7 +85,7 @@ private struct Harness {
         socket.serverClose(closeCode: closed.closeCode, httpStatus: closed.httpStatus)
         await #expect(throws: GatewayError.disconnected(reason)) { try await client.connect() }
         #expect(await client.state == .disconnected(reason))
-        #expect(reason.needsNewToken == (reason == .unauthorized))
+        #expect(reason.needsNewToken == (reason == .unauthorized || reason == .forbidden))
         #expect(!reason.shouldReconnect == (reason == .unauthorized || reason == .forbidden))
     }
 

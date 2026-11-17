@@ -108,12 +108,19 @@ private final class CitadelSession: SSHSession, @unchecked Sendable {
     static let maxReplyBytes = 4096
 
     private let client: SSHClient
+    private let forwards = OpenForwards()
 
     init(client: SSHClient) {
         self.client = client
     }
 
-    func execute(_ command: GateCommand) async throws -> String {
+    func execute(_ command: GateCommand, stdin: Data?) async throws -> String {
+        guard let stdin else { return try await execute(command) }
+        return try await execute(command, sending: stdin)
+    }
+
+    /// No stdin: the #3 path.
+    private func execute(_ command: GateCommand) async throws -> String {
         do {
             let buffer = try await client.executeCommand(command.rawValue, maxResponseSize: Self.maxReplyBytes)
             return String(buffer: buffer)
@@ -126,7 +133,94 @@ private final class CitadelSession: SSHSession, @unchecked Sendable {
         }
     }
 
+    /// Write `stdin` on the exec channel, then EOF. The bytes never go into the command line.
+    private func execute(_ command: GateCommand, sending stdin: Data) async throws -> String {
+        var stdout = ByteBuffer()
+        var stderr = ByteBuffer()
+        // The result of the read loop. `withExec` closes the channel at the end and throws
+        // `alreadyClosed` when the server closed it first, so the loop does not throw through it.
+        var outcome: Result<Void, SSHConnectionError>?
+        do {
+            try await client.withExec(command.rawValue) { inbound, outbound in
+                try await outbound.write(ByteBuffer(bytes: stdin))
+                try await Self.sendEOF(outbound)
+                do {
+                    for try await output in inbound {
+                        switch output {
+                        case .stdout(let chunk):
+                            guard stdout.readableBytes + chunk.readableBytes <= Self.maxReplyBytes else {
+                                throw SSHConnectionError.unexpectedReply
+                            }
+                            stdout.writeImmutableBuffer(chunk)
+                        case .stderr(let chunk):
+                            // Keep only the start: the gate code is on the first line.
+                            if stderr.readableBytes < Self.maxReplyBytes { stderr.writeImmutableBuffer(chunk) }
+                        }
+                    }
+                    outcome = .success(())
+                } catch let error as SSHClient.CommandFailed {
+                    let text = String(buffer: stderr)
+                    outcome = .failure(.gateError(text.hasPrefix("ERROR ")
+                        ? HostConnector.gateErrorCode(fromStderr: text) : "exit \(error.exitCode)"))
+                } catch let error as SSHConnectionError {
+                    outcome = .failure(error)
+                } catch {
+                    outcome = .failure(.unreachable)
+                }
+            }
+        } catch let error as SSHConnectionError {
+            throw error
+        } catch ChannelError.alreadyClosed where outcome != nil {
+            // The server closed the channel after its reply. That is the normal end.
+        } catch {
+            throw SSHConnectionError.unreachable
+        }
+        guard let outcome else { throw SSHConnectionError.unreachable }
+        try outcome.get()
+        let errorText = String(buffer: stderr)
+        if stdout.readableBytes == 0, errorText.hasPrefix("ERROR ") {
+            throw SSHConnectionError.gateError(HostConnector.gateErrorCode(fromStderr: errorText))
+        }
+        return String(buffer: stdout)
+    }
+
+    /// Citadel 0.12 has no public call to close stdin. `TTYStdinWriter` keeps its channel in an
+    /// internal property, so read it by reflection and half-close the channel. NIOSSH sends `SSH_MSG_CHANNEL_EOF`.
+    static func sendEOF(_ writer: TTYStdinWriter) async throws {
+        guard let channel = Mirror(reflecting: writer).descendant("channel") as? any Channel else {
+            throw SSHConnectionError.unexpectedReply
+        }
+        try await channel.close(mode: .output)
+    }
+
+    func openLoopbackForward(remotePort: Int) async throws -> any LoopbackForward {
+        guard (1...65535).contains(remotePort) else { throw SSHConnectionError.forwardFailed }
+        do {
+            let forward = try await CitadelLoopbackForward.open(client: client, remotePort: remotePort)
+            forwards.add(forward)
+            return forward
+        } catch {
+            throw SSHConnectionError.forwardFailed
+        }
+    }
+
     func close() async {
+        for forward in forwards.takeAll() { await forward.close() }
         try? await client.close()
+    }
+}
+
+/// The forwards of one session. `close()` stops them before the SSH connection closes.
+private final class OpenForwards: @unchecked Sendable {
+    private let lock = NSLock()
+    private var forwards: [CitadelLoopbackForward] = []
+
+    func add(_ forward: CitadelLoopbackForward) { lock.withLock { forwards.append(forward) } }
+
+    func takeAll() -> [CitadelLoopbackForward] {
+        lock.withLock {
+            defer { forwards.removeAll() }
+            return forwards
+        }
     }
 }
