@@ -60,7 +60,9 @@ final class SiriService: SiriServing {
     /// If iOS ends the time first, the #15 background refresh posts it later.
     private func followUp(_ pending: SiriAsk.Pending) {
         let application = UIApplication.shared
-        var taskId = UIBackgroundTaskIdentifier.invalid
+        let background = BackgroundTime()
+        // Schedule first: if iOS ends the app, the #15 refresh still posts the reply later.
+        BackgroundRefresh.schedule()
         let work = Task { @MainActor [self] in
             let sessions = self.sessions
             await SiriAsk.notifyWhenDone(pending, title: {
@@ -68,11 +70,13 @@ final class SiriService: SiriServing {
                     ?? pending.chat.title ?? "Hermes"
             }, showsPreview: notifications.showsPreview, notifier: notifications.poster)
             end()
-            if taskId != .invalid { application.endBackgroundTask(taskId) }
-            taskId = .invalid
+            background.finish(application)
         }
-        taskId = application.beginBackgroundTask(withName: "SiriFollowUp") { work.cancel() }
-        BackgroundRefresh.schedule()
+        background.id = application.beginBackgroundTask(withName: "SiriFollowUp") {
+            // Issue #71: iOS ends the app when a task is still open after this handler. End it here, not later.
+            work.cancel()
+            background.finish(application)
+        }
     }
 
     /// Connect if needed (pin, gate, Hermes), then wait for the chat socket. `false` at the time limit.
@@ -100,5 +104,17 @@ final class SiriService: SiriServing {
         guard runs == 0, madeConnection, !isAppActive() else { return }
         madeConnection = false
         Task { await model.disconnect() }
+    }
+}
+
+/// Issue #71: the background time of one Siri follow-up. `finish` ends it once.
+@MainActor
+private final class BackgroundTime {
+    var id = UIBackgroundTaskIdentifier.invalid
+
+    func finish(_ application: UIApplication) {
+        guard id != .invalid else { return }
+        application.endBackgroundTask(id)
+        id = .invalid
     }
 }

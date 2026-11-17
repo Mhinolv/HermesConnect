@@ -90,6 +90,14 @@ import Testing
         #expect(SiriSettings.usesSiriWhenLocked(defaults))
     }
 
+    /// Issue #71: each Siri run gives its dialog before the Siri limit, with time for a cold launch.
+    @Test func everySiriRunEndsBeforeTheSiriLimit() {
+        let budget = SiriTiming.siriLimit - SiriTiming.launchMargin
+        #expect(SiriTiming.askReply + SiriTiming.markRead < budget)
+        #expect(SiriTiming.readSync < budget)
+        #expect(SiriTiming.followUp > SiriTiming.siriLimit)
+    }
+
     @Test func raceReturnsFalseAtTheTimeout() async {
         let fast = await SiriTiming.finishes(within: .seconds(5)) {}
         #expect(fast)
@@ -316,6 +324,82 @@ private func ev(_ json: String) -> GatewayClientEvent {
         let outcome = await SiriAsk.run(text: "Hi", sessions: sessions, timeout: .seconds(5),
                                         poll: .milliseconds(5)) { _ in true }
         #expect(outcome == .replyFailed)
+    }
+
+    /// Issue #71: Siri ends a run after about 10 s ("Something went wrong"). The cold launch counts too.
+    /// With the default timing, a slow connect and a slow reply give "still working" in 8 s or less.
+    @Test func aSlowConnectAndASlowReplySayStillWorkingBeforeTheSiriLimit() async throws {
+        let chats = FakeChatTransport()
+        let sessions = SessionListModel(transport: FakeSessionsTransport(), chatTransport: chats,
+                                        cache: InMemorySessionCacheStore(activeSessionId: "k1"))
+        let clock = ContinuousClock()
+        let start = clock.now
+        let outcome = await SiriAsk.run(text: "Plan my week", sessions: sessions, poll: .milliseconds(5)) { _ in
+            try? await Task.sleep(for: .seconds(2))
+            return true
+        }
+        let elapsed = clock.now - start
+        #expect(elapsed < .seconds(8), "Siri gives up after about 10 s, and the launch counts too: \(elapsed)")
+        #expect(outcome.dialog == SiriDialog.stillWorking)
+        #expect(chats.submits.map(\.text) == ["Plan my week"])
+    }
+
+    /// Issue #71: a slow connect past the deadline gives "I can't reach Hermes" in time and sends nothing.
+    @Test func aConnectPastTheDeadlineSendsNothingLater() async throws {
+        let chats = FakeChatTransport()
+        let sessions = SessionListModel(transport: FakeSessionsTransport(), chatTransport: chats,
+                                        cache: InMemorySessionCacheStore(activeSessionId: "k1"))
+        let clock = ContinuousClock()
+        let start = clock.now
+        let outcome = await SiriAsk.run(text: "Hi", sessions: sessions, timeout: .milliseconds(200),
+                                        poll: .milliseconds(5)) { _ in
+            try? await Task.sleep(for: .milliseconds(600))
+            return true
+        }
+        #expect(clock.now - start < .seconds(1))
+        #expect(outcome == .unreachable)
+        try await Task.sleep(for: .milliseconds(800))
+        #expect(chats.submits.isEmpty)
+    }
+
+    /// Issue #71: when Siri cancels the run during the reply wait, the run ends at once with "still working".
+    /// The text went out once, so the follow-up can still post the reply.
+    @Test func aCancelledReplyWaitEndsAtOnceWithStillWorking() async throws {
+        let chats = FakeChatTransport()
+        let sessions = SessionListModel(transport: FakeSessionsTransport(), chatTransport: chats,
+                                        cache: InMemorySessionCacheStore(activeSessionId: "k1"))
+        let clock = ContinuousClock()
+        let run = Task { @MainActor in
+            await SiriAsk.run(text: "Plan", sessions: sessions, timeout: .seconds(5), poll: .milliseconds(5)) { _ in true }
+                .dialog
+        }
+        await waitForSubmit(chats)
+        try await Task.sleep(for: .milliseconds(50))
+        let start = clock.now
+        run.cancel()
+        let dialog = await run.value
+        #expect(clock.now - start < .seconds(1))
+        #expect(dialog == SiriDialog.stillWorking)
+        #expect(chats.submits.count == 1)
+    }
+
+    /// Issue #71: when Siri cancels the run before the send, nothing goes to Hermes. A new try sends it once.
+    @Test func aRunCancelledBeforeTheSendSendsNothing() async throws {
+        let chats = FakeChatTransport()
+        let sessions = SessionListModel(transport: FakeSessionsTransport(), chatTransport: chats,
+                                        cache: InMemorySessionCacheStore(activeSessionId: "k1"))
+        let run = Task { @MainActor in
+            await SiriAsk.run(text: "Hi", sessions: sessions, timeout: .seconds(5), poll: .milliseconds(5)) { _ in
+                try? await Task.sleep(for: .milliseconds(300))
+                return true
+            }.dialog
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        run.cancel()
+        let dialog = await run.value
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(dialog == SiriDialog.unreachable)
+        #expect(chats.submits.isEmpty)
     }
 
     @Test func noSessionStartsANewChat() async throws {
