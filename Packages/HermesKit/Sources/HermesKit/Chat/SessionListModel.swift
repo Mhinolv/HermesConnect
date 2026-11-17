@@ -205,7 +205,11 @@ public final class SessionListModel {
     /// - The list shows the redacted rows until the new server answers. A late answer of the old server is dropped.
     /// - `carryingUnread`: the blue dots of the new server from the last time it was active.
     /// - `heldOutboxes`: the outbox sessions of the other servers. They wait for their own server.
-    public func switchServer(carryingUnread: [String], heldOutboxes: Set<String>) {
+    /// - The new chat with no server row (`newChatId`) belongs to the old server. It moves to `parkNewChatAs`.
+    ///   With no key, it is removed: its queued messages never show or send on another server (QA 90-1).
+    /// - `restoreNewChatFrom`: the parked new chat of the new server comes back, with its outbox.
+    public func switchServer(carryingUnread: [String], heldOutboxes: Set<String>, parkNewChatAs parkId: String? = nil,
+                             restoreNewChatFrom restoreId: String? = nil) {
         generation += 1
         for chat in chats.values { chat.stopEvents() }
         chats = [:]
@@ -222,6 +226,27 @@ public final class SessionListModel {
         // belong to the old server: a relaunch must not show them, and catch-up must not count them as new.
         cache.saveSessions([])
         cache.saveActiveSessionId(nil)
+        moveNewChat(from: SessionCache.newChatId, to: parkId)
+        if let restoreId { moveNewChat(from: restoreId, to: SessionCache.newChatId) }
+    }
+
+    /// Move the transcript and the draft of a new chat to another key. `nil` removes them.
+    /// Only `newChatId` is in the outbox: a parked new chat never sends.
+    private func moveNewChat(from source: String, to target: String?) {
+        let messages = cache.loadTranscript(sessionId: source)
+        let draft = cache.loadDraft(sessionId: source)
+        cache.removeSession(sessionId: source)
+        guard let target, !messages.isEmpty || !draft.isEmpty else { return }
+        cache.saveTranscript(messages, sessionId: target)
+        cache.saveDraft(draft, sessionId: target)
+        if target == SessionCache.newChatId, messages.contains(where: { $0.delivery == .queued }) {
+            cache.saveOutbox(true, sessionId: target)
+        }
+    }
+
+    /// Issue #83: the owner removed a server that is not active. Its parked new chat goes too.
+    public func removeParkedNewChat(_ parkId: String) {
+        cache.removeSession(sessionId: parkId)
     }
 
     /// The outbox of a removed server never sends. Its queued messages stay in their transcripts.

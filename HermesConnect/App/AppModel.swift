@@ -53,7 +53,7 @@ final class AppModel {
     /// Issue #83: the app resets the lists here when the active server changes. It runs before the new connect.
     @ObservationIgnored var onActiveServerChange: (@MainActor (ServerChange) -> Void)?
     /// Issue #83: the owner removed a server that was not active. Its outbox must never send.
-    @ObservationIgnored var onServerRemoved: (@MainActor (ServerStateBook.Entry) -> Void)?
+    @ObservationIgnored var onServerRemoved: (@MainActor (UUID, ServerStateBook.Entry) -> Void)?
 
     @ObservationIgnored private let keyStore: any DeviceKeyStore
     @ObservationIgnored private let serverStore: any ServerListStore
@@ -203,7 +203,7 @@ final class AppModel {
         if wasActive {
             resetConnection(ServerChange(from: id, to: list.active?.id))
         } else {
-            onServerRemoved?(removed)
+            onServerRemoved?(id, removed)
         }
     }
 

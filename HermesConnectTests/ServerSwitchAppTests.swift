@@ -194,6 +194,42 @@ import Testing
         #expect(setup.model.serverMenu(activeChats: 0).title() == "Lab")
     }
 
+    /// QA 90-1 defect 1: the queued new chat of Home never shows or sends on Lab, and comes back on Home.
+    @Test func theNewChatSlotStaysWithItsServer() async throws {
+        let setup = await makeModel([home, lab])
+        let cache = InMemorySessionCacheStore()
+        cache.saveTranscript([ChatMessage(id: "q1", role: .user, text: "for Home", date: .now, delivery: .queued)],
+                             sessionId: SessionCache.newChatId)
+        cache.saveOutbox(true, sessionId: SessionCache.newChatId)
+        let sessions = SessionListModel(transport: OfflineChatTransport(), chatTransport: OfflineChatTransport(),
+                                        cache: cache)
+        ServerSwitchGlue.attach(model: setup.model, sessions: sessions, jobs: ChatLaunch.makeOfflineJobs())
+
+        await setup.model.switchServer(to: lab.id)
+        #expect(!sessions.hasCachedNewChat, "launch on Lab does not open the Home new chat")
+        #expect(cache.outboxSessionIds().isEmpty)
+        #expect(sessions.newChat(key: "lab").messages.isEmpty)
+
+        await setup.model.switchServer(to: home.id)
+        #expect(sessions.hasCachedNewChat)
+        #expect(cache.outboxSessionIds() == [SessionCache.newChatId])
+        #expect(sessions.newChat(key: "home").messages.map(\.text) == ["for Home"])
+    }
+
+    @Test func removeAServerDeletesItsParkedNewChat() async throws {
+        let setup = await makeModel([home, lab])
+        let cache = InMemorySessionCacheStore()
+        cache.saveTranscript([ChatMessage(id: "q1", role: .user, text: "for Home", date: .now, delivery: .queued)],
+                             sessionId: SessionCache.newChatId)
+        let sessions = SessionListModel(transport: OfflineChatTransport(), chatTransport: OfflineChatTransport(),
+                                        cache: cache)
+        ServerSwitchGlue.attach(model: setup.model, sessions: sessions, jobs: ChatLaunch.makeOfflineJobs())
+        await setup.model.switchServer(to: lab.id)
+        #expect(cache.transcriptIds == [SessionCache.parkedNewChatId(server: home.id)])
+        try setup.model.removeServer(id: home.id)
+        #expect(cache.transcriptIds.isEmpty)
+    }
+
     @Test func oneServerKeepsTheHermesTitle() async throws {
         let setup = await makeModel([home])
         #expect(!setup.model.serverMenu(activeChats: 3).showsMenu)

@@ -15,15 +15,18 @@ enum ServerSwitchGlue {
             guard let model else { return }
             apply(change, model: model, sessions: sessions, jobs: jobs)
         }
-        model.onServerRemoved = { [weak model] removed in
+        model.onServerRemoved = { [weak model] id, removed in
             guard let model else { return }
             sessions.dropOutboxes(removed.outboxIds)
+            sessions.removeParkedNewChat(SessionCache.parkedNewChatId(server: id))
             sessions.holdOutboxes(model.serverBook.outboxIds(except: model.profile?.id))
         }
     }
 
     /// The active server changed. `AppModel` calls it before the new connect starts.
     static func apply(_ change: ServerChange, model: AppModel, sessions: SessionListModel, jobs: JobsModel) {
+        // The new chat with no server row of the old server is parked under its id (QA 90-1).
+        var parkId: String?
         if let from = change.from {
             let state = sessions.serverState(fallback: model.serverBook.entry(for: from))
             if change.isSameServer || model.serverList.server(id: from) == nil {
@@ -31,10 +34,13 @@ enum ServerSwitchGlue {
                 sessions.dropOutboxes(state.outboxIds)
             } else {
                 model.recordServerState(state, for: from)
+                parkId = SessionCache.parkedNewChatId(server: from)
             }
         }
+        let restoreId = change.isSameServer ? nil : change.to.map { SessionCache.parkedNewChatId(server: $0) }
         let carried = change.isSameServer ? [] : (change.to.map { model.serverBook.entry(for: $0).unreadIds } ?? [])
-        sessions.switchServer(carryingUnread: carried, heldOutboxes: model.serverBook.outboxIds(except: change.to))
+        sessions.switchServer(carryingUnread: carried, heldOutboxes: model.serverBook.outboxIds(except: change.to),
+                              parkNewChatAs: parkId, restoreNewChatFrom: restoreId)
         jobs.switchServer()
     }
 }
