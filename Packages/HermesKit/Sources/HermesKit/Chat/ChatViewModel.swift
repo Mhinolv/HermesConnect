@@ -299,6 +299,15 @@ public final class ChatViewModel {
         return Task { await deliver(id: id, retryBeforeRowId: nil) }
     }
 
+    /// Issue #11: the owner's tapback. The same tapback again, or `nil`, removes it. It stays on the phone:
+    /// nothing goes to Hermes (D3). The cache keeps it.
+    public func react(_ tapback: Tapback?, id: String) {
+        let changed = if let tapback { thread.react(tapback, id: id) } else { thread.removeTapback(id: id) }
+        guard changed else { return }
+        redrawNow()
+        saveTranscript()
+    }
+
     /// "Delete" on a bubble that shows "Not Delivered". A memo also loses its audio file.
     public func delete(id: String) {
         if let url = thread.message(id: id)?.voice?.fileURL { removeAudio(url) }

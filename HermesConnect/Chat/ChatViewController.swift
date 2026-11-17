@@ -35,6 +35,15 @@ final class ChatViewController: MessagesViewController {
     private var composerText = ""
     /// Issue #8: the `plus` menu and the pending photos and files.
     private let attachments = AttachmentComposer()
+    /// Issue #11: the symbol that each badge showed last ("<message id>#ack"), for the `.replace` change.
+    private var shownBadges: [String: String] = [:]
+    /// Issue #11: the open tapback capsule (double-tap).
+    private(set) var tapbackPicker: TapbackPickerView?
+    private lazy var doubleTap: UITapGestureRecognizer = {
+        let gesture = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
+        gesture.numberOfTapsRequired = 2
+        return gesture
+    }()
 
     init(model: ChatViewModel, recorder: any VoiceRecording = AVVoiceRecorder(),
          voiceFolder: URL = VoiceMemoFiles.directory()) {
@@ -65,6 +74,7 @@ final class ChatViewController: MessagesViewController {
         configureVoice()
         restoreDraft()
         configureScrollButton()
+        configureTapbacks()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, _) in
             self.textSizeChanged()
         }
@@ -595,6 +605,7 @@ final class ChatViewController: MessagesViewController {
         super.scrollViewDidScroll(scrollView)
         // Only the owner's scroll changes the pin. Layout and inset changes do not.
         guard scrollView.isDragging || scrollView.isDecelerating else { return }
+        closeTapbackPicker()
         let pinned = ChatScroll.isNearBottom(offset: scrollView.contentOffset.y,
                                              contentHeight: scrollView.contentSize.height,
                                              viewHeight: scrollView.bounds.height,
@@ -626,6 +637,7 @@ final class ChatViewController: MessagesViewController {
         let cell = super.collectionView(collectionView, cellForItemAt: indexPath)
         guard let part = bubble(at: indexPath)?.part else { return cell }
         let row = part.row
+        showBadges(on: cell, row: row)
         cell.isAccessibilityElement = true
         cell.accessibilityLabel = ChatBubbleParts.accessibilityLabel(for: part)
         cell.accessibilityHint = switch row.footnote {
@@ -674,6 +686,7 @@ final class ChatViewController: MessagesViewController {
                 return true
             })
         }
+        if row.showsReactions { actions += tapbackActions(for: row) }
         cell.accessibilityCustomActions = actions
         return cell
     }
@@ -692,6 +705,8 @@ final class ChatViewController: MessagesViewController {
         let row = part.row
         return UIContextMenuConfiguration(identifier: indexPath as NSIndexPath, previewProvider: nil) { [weak self] _ in
             var actions: [UIMenuElement] = []
+            // Issue #11: the six tapbacks in one row above the other actions.
+            if Self.canReact(row.message), let self { actions.append(self.tapbackMenu(for: row)) }
             if let item = part.attachment {
                 actions.append(UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
                     if item.showsAsImage {
@@ -719,6 +734,127 @@ final class ChatViewController: MessagesViewController {
         let parameters = UIPreviewParameters()
         parameters.backgroundColor = .clear
         return UITargetedPreview(view: cell.messageContainerView, parameters: parameters)
+    }
+
+    // MARK: Tapbacks (issue #11)
+
+    private func configureTapbacks() {
+        messagesCollectionView.addGestureRecognizer(doubleTap)
+        // MessageKit's tap waits for the double-tap, so a double-tap does not also run the bubble tap.
+        for gesture in messagesCollectionView.gestureRecognizers ?? [] where gesture !== doubleTap {
+            if let tap = gesture as? UITapGestureRecognizer, tap.numberOfTapsRequired == 1 {
+                tap.require(toFail: doubleTap)
+            }
+        }
+    }
+
+    /// A bubble that still sends or streams takes no tapback.
+    static func canReact(_ message: ChatMessage) -> Bool {
+        message.delivery != .sending && message.reply != .streaming
+    }
+
+    private func showBadges(on cell: UICollectionViewCell, row: ChatRow) {
+        guard let cell = cell as? MessageContentCell else { return }
+        let badges = ReactionBadge.badges(for: row)
+        let existing = cell.contentView.subviews.contains { $0 is ReactionBadgeOverlay }
+        guard !badges.isEmpty || existing else { return }
+        let overlay = ReactionBadgeOverlay.of(cell, bubble: cell.messageContainerView)
+        let id = row.id
+        overlay.show(badges) { [shownBadges] badge in shownBadges["\(id)#\(badge.corner)"] }
+        for badge in badges { shownBadges["\(id)#\(badge.corner)"] = badge.symbolName }
+        if !badges.contains(where: { $0.corner == .topLeading }) { shownBadges["\(id)#\(ReactionBadge.Corner.topLeading)"] = nil }
+        if !badges.contains(where: { $0.corner == .topTrailing }) { shownBadges["\(id)#\(ReactionBadge.Corner.topTrailing)"] = nil }
+    }
+
+    /// A tap sets the tapback. The selected one removes it. Gives the `.selection` haptic.
+    func react(_ tapback: Tapback?, id: String) {
+        UISelectionFeedbackGenerator().selectionChanged()
+        model.react(tapback, id: id)
+    }
+
+    private func tapbackMenu(for row: ChatRow) -> UIMenu {
+        let id = row.id
+        let actions = Tapback.allCases.map { tapback in
+            let selected = row.message.tapback == tapback
+            let action = UIAction(title: selected ? "Remove \(tapback.title)" : tapback.title,
+                                  image: UIImage(systemName: tapback.symbolName)) { [weak self] _ in
+                self?.react(tapback, id: id)
+            }
+            action.state = selected ? .on : .off
+            return action
+        }
+        let menu = UIMenu(title: "", options: .displayInline, children: actions)
+        menu.preferredElementSize = .small
+        return menu
+    }
+
+    /// VoiceOver: "React Heart" … "React Question", plus "Remove Reaction".
+    private func tapbackActions(for row: ChatRow) -> [UIAccessibilityCustomAction] {
+        guard Self.canReact(row.message) else { return [] }
+        let id = row.id
+        var actions = Tapback.allCases.map { tapback in
+            UIAccessibilityCustomAction(name: "React \(tapback.title)") { [weak self] _ in
+                self?.react(tapback == row.message.tapback ? nil : tapback, id: id)
+                return true
+            }
+        }
+        if row.message.tapback != nil {
+            actions.append(UIAccessibilityCustomAction(name: "Remove Reaction") { [weak self] _ in
+                self?.react(nil, id: id)
+                return true
+            })
+        }
+        return actions
+    }
+
+    @objc private func doubleTapped(_ gesture: UITapGestureRecognizer) {
+        let point = gesture.location(in: messagesCollectionView)
+        guard let indexPath = messagesCollectionView.indexPathForItem(at: point),
+              let cell = messagesCollectionView.cellForItem(at: indexPath) as? MessageContentCell,
+              cell.messageContainerView.frame.contains(gesture.location(in: cell.contentView)) else { return }
+        showTapbackPicker(at: indexPath)
+    }
+
+    /// Shows the glass capsule above the bubble at `indexPath` (double-tap, and the DEBUG demo).
+    func showTapbackPicker(at indexPath: IndexPath) {
+        guard let row = bubble(at: indexPath)?.row, Self.canReact(row.message),
+              let cell = messagesCollectionView.cellForItem(at: indexPath) as? MessageContentCell else { return }
+        closeTapbackPicker()
+        // The model is newer than the drawn rows when a redraw waits.
+        let selected = model.messages.first { $0.id == row.id }?.tapback
+        let picker = TapbackPickerView(frame: view.bounds, selected: selected)
+        let bubbleFrame = cell.messageContainerView.convert(cell.messageContainerView.bounds, to: view)
+        // The visible thread: under the navigation bar, above the composer.
+        let collection = messagesCollectionView
+        let visible = collection.convert(collection.bounds.inset(by: collection.adjustedContentInset), to: view)
+        picker.capsule.frame = TapbackCapsuleView.frame(size: picker.capsule.frame.size, above: bubbleFrame,
+                                                        outgoing: row.message.role == .user, in: visible)
+        let id = row.id
+        picker.capsule.onSelect = { [weak self] tapback in
+            self?.react(tapback, id: id)
+            self?.closeTapbackPicker()
+        }
+        picker.onDismiss = { [weak self] in self?.closeTapbackPicker() }
+        view.addSubview(picker)
+        tapbackPicker = picker
+        UIAccessibility.post(notification: .screenChanged, argument: picker.capsule)
+    }
+
+    /// Shows the capsule on the first bubble of a message (DEBUG demo, tests).
+    func showTapbackPicker(messageId: String) {
+        guard let section = bubbles.firstIndex(where: { $0.row.id == messageId }) else { return }
+        let indexPath = IndexPath(item: 0, section: section)
+        // The bubble must show. A scroll away from the end unpins the thread.
+        pinnedToBottom = false
+        messagesCollectionView.scrollToItem(at: indexPath, at: .centeredVertically, animated: false)
+        messagesCollectionView.layoutIfNeeded()
+        updateScrollButton()
+        showTapbackPicker(at: indexPath)
+    }
+
+    func closeTapbackPicker() {
+        tapbackPicker?.removeFromSuperview()
+        tapbackPicker = nil
     }
 
     private func sendFailureActions(for row: ChatRow) -> [UIAction] {
@@ -905,7 +1041,11 @@ extension ChatViewController: MessagesLayoutDelegate {
         row(for: message)?.statusLine == nil ? 0 : ChatLabelStyle.height(.caption1, traitCollection, padding: 12)
     }
 
-    func messageTopLabelHeight(for _: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> CGFloat { 0 }
+    /// Issue #11: room above a bubble with a badge, so the badge does not cover the bubble above it.
+    func messageTopLabelHeight(for message: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> CGFloat {
+        guard let row = row(for: message), !ReactionBadge.badges(for: row).isEmpty else { return 0 }
+        return ReactionBadge.overhang
+    }
 }
 
 // MARK: - MessageKit display

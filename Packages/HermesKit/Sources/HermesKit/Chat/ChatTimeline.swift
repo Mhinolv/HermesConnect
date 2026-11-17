@@ -39,6 +39,8 @@ public struct ChatRow: Sendable, Equatable, Identifiable {
     public var footnote: Footnote?
     /// The tool or status line of the running turn, under the last bubble.
     public var statusLine: String?
+    /// Issue #11: only the first bubble of a message shows its agent ack and tapback.
+    public var showsReactions = true
 
     public var id: String { message.id }
 }
@@ -105,6 +107,15 @@ public enum ChatTimeline {
         return "\(day) \(time)"
     }
 
+    /// Issue #11: "Hermes reacted thumbs up", "You reacted heart". Empty on the later bubbles of a message.
+    public static func reactionLabels(for row: ChatRow) -> [String] {
+        guard row.showsReactions else { return [] }
+        var labels: [String] = []
+        if let ack = row.message.agentAck { labels.append("Hermes reacted \(ack.spokenName)") }
+        if let tapback = row.message.tapback { labels.append("You reacted \(tapback.title.lowercased())") }
+        return labels
+    }
+
     /// The VoiceOver label of a bubble: "You, <text>, 9:41 AM" or "Hermes, <text>, 9:41 AM".
     public static func accessibilityLabel(for row: ChatRow, calendar: Calendar = .current,
                                           locale: Locale = .current) -> String {
@@ -121,6 +132,7 @@ public enum ChatTimeline {
             }
         }
         if !row.message.text.isEmpty { parts.append(row.message.text) }
+        parts += reactionLabels(for: row)
         parts.append(time)
         if let footnote = row.footnote, footnote != .sending, footnote != .delivered { parts.append(footnote.text) }
         return parts.joined(separator: ", ")

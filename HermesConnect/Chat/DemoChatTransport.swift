@@ -38,6 +38,10 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case voiceReplies = "voice-replies"
         /// Issue #10: the same thread with the first voice reply paused part way.
         case voiceRepliesPaused = "voice-replies-paused"
+        /// Issue #11: each agent ack, owner tapbacks, and one bubble with both.
+        case tapbacks
+        /// Issue #11: the same thread with the tapback capsule open on a reply.
+        case tapbacksPicker = "tapbacks-picker"
 
         static var current: Scenario? {
             ProcessInfo.processInfo.environment["HERMES_DEMO"].flatMap(Scenario.init(rawValue:))
@@ -49,7 +53,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             case .streaming: "What's the weather in Austin this weekend?"
             case .failed: "Can you check the server logs?"
             case .live, .thread, .empty, .list, .listEmpty, .listLoading, .voice, .recording, .hold, .paused,
-                 .attachments, .voiceReplies, .voiceRepliesPaused: nil
+                 .attachments, .voiceReplies, .voiceRepliesPaused, .tapbacks, .tapbacksPicker: nil
             }
         }
 
@@ -66,6 +70,9 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
 
         /// `true` for the voice reply scenarios (issue #10).
         var showsVoiceReplies: Bool { self == .voiceReplies || self == .voiceRepliesPaused }
+
+        /// `true` for the tapback scenarios (issue #11).
+        var showsTapbacks: Bool { self == .tapbacks || self == .tapbacksPicker }
     }
 
     let scenario: Scenario
@@ -311,7 +318,37 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                                         promptId: "d7"))
         }
         if scenario == .attachments { messages += AttachmentDemo.messages(now: now) }
+        if scenario.showsTapbacks { messages += Self.tapbackMessages(now: now) }
         return messages
+    }
+
+    /// Issue #11: the reply that the picker scenario opens the capsule on.
+    static let tapbackPickerId = "t6"
+
+    /// Issue #11: thumbs up, heart (thanks), no ack (slash command), thumbs down and eyes, plus owner tapbacks.
+    static func tapbackMessages(now: Date) -> [ChatMessage] {
+        let late = now.addingTimeInterval(-4 * 60)
+        func prompt(_ id: String, _ text: String, _ seconds: Double, ack: AgentAck?,
+                    tapback: Tapback? = nil) -> ChatMessage {
+            ChatMessage(id: id, role: .user, text: text, date: late.addingTimeInterval(seconds), delivery: .delivered,
+                        userRowId: 300 + Int(seconds), agentAck: ack, tapback: tapback)
+        }
+        func reply(_ id: String, _ text: String, _ seconds: Double, to promptId: String,
+                   reply: ChatMessage.Reply = .complete, tapback: Tapback? = nil) -> ChatMessage {
+            ChatMessage(id: id, role: .assistant, text: text, date: late.addingTimeInterval(seconds), reply: reply,
+                        promptId: promptId, tapback: tapback)
+        }
+        return [
+            prompt("t1", "Book the 7:40 train to Dallas", 0, ack: .done, tapback: .exclamation),
+            reply("t2", "Booked. Seat 14C, arrives 11:05 AM.", 10, to: "t1", tapback: .heart),
+            prompt("t3", "Thanks!", 20, ack: .thanks),
+            reply("t4", "Any time.", 25, to: "t3"),
+            prompt("t5", "/usage", 40, ack: nil),
+            reply("t6", "312k tokens today, 41% of the daily budget.", 42, to: "t5", tapback: .haha),
+            prompt("t7", "Restart the backup job", 60, ack: .failed),
+            reply("t8", "The backup host did not answer.", 70, to: "t7", reply: .failed(message: nil)),
+            prompt("t9", "Check the disk on the server", 90, ack: .seen),
+        ]
     }
 
     /// Issue #10: three voice turns. The replies have audio that is ready, "Preparing audio…" and failed.

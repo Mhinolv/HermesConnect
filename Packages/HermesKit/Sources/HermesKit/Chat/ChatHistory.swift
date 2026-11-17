@@ -66,6 +66,13 @@ public enum ChatHistory {
                 continue
             }
         }
+        // Issue #11: the server has no reactions. A bubble keeps the agent ack and tapback that it has on the phone.
+        let shown = Dictionary(current.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for index in result.indices {
+            guard let message = shown[result[index].id] else { continue }
+            result[index].agentAck = message.agentAck
+            result[index].tapback = message.tapback
+        }
         return result
     }
 

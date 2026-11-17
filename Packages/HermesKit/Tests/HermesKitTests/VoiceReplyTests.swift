@@ -536,7 +536,7 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         #expect(loaded[4].spokenReply == .failed)
 
         let raw = try String(contentsOf: cache.transcriptURL(sessionId: "k"), encoding: .utf8)
-        #expect(raw.contains(#""version":2"#))
+        #expect(raw.contains(#""version":\#(SessionCache.formatVersion)"#))
         #expect(!raw.contains(NSHomeDirectory()))
     }
 

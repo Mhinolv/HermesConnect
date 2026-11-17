@@ -102,6 +102,16 @@ struct ChatThreadView: UIViewControllerRepresentable {
             }
             return controller
         }
+        if DemoChatTransport.Scenario.current == .tapbacksPicker {
+            let controller = ChatViewController(model: model)
+            controller.onFirstAppear = { controller in
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(600))
+                    controller.showTapbackPicker(messageId: DemoChatTransport.tapbackPickerId)
+                }
+            }
+            return controller
+        }
         #endif
         return ChatViewController(model: model)
     }
