@@ -133,14 +133,9 @@ struct RootView: View {
                     path.removeAll()
                 }
                 // Issue #15: the open session loses its blue dot and gets no new one.
-                .onAppear {
-                    guard let id = chat.storedSessionId else { return }
-                    sessions.openSessionId = id
-                    sessions.markRead(id)
-                }
-                .onDisappear {
-                    if sessions.openSessionId == chat.storedSessionId { sessions.openSessionId = nil }
-                }
+                // The list follows the chat, so a New Chat counts once it gets its id (QA #38 defect 2).
+                .onAppear { sessions.openChat(chat) }
+                .onDisappear { sessions.closeChat(chat) }
             }
             .hermesStartAlert()
         }

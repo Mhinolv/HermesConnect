@@ -191,13 +191,46 @@ private func row(_ id: String, _ count: Int?, title: String? = nil, unread: Bool
         let cache = InMemorySessionCacheStore(sessions: [row("k1", 2), row("k2", 2)])
         let transport = FakeSessionsTransport(rows: [row("k1", 4), row("k2", 5)])
         let list = SessionListModel(transport: transport, chatTransport: FakeChatTransport(), cache: cache)
-        list.openSessionId = "k2"
+        list.openChat(list.chat(for: "k2"))
         await list.refresh()
         #expect(list.sessions.map(\.isUnread) == [true, false])
         #expect(list.unreadCount == 1)
         list.markRead("k1")
         #expect(list.unreadCount == 0)
         #expect(cache.loadSessions().map(\.isUnread) == [false, false])
+    }
+
+    /// QA #38 defect 2: a New Chat gets its stored id after the screen opened. Its new row gets no dot.
+    @Test func openNewChatGetsNoDotWhenItsRowAppears() async throws {
+        let cache = InMemorySessionCacheStore(sessions: [row("k0", 2)])
+        let transport = FakeSessionsTransport(rows: [row("k0", 2)])
+        let list = SessionListModel(transport: transport, chatTransport: FakeChatTransport(), cache: cache)
+        let chat = list.newChat(key: "route-1")
+        list.openChat(chat)
+        #expect(list.openSessionId == nil)
+        await chat.send("Plan my week")?.value
+        let newId = "20261116_101500_ab12cd"
+        #expect(list.openSessionId == newId)
+        transport.rows = [row(newId, 2), row("k0", 2)]
+        await list.refresh()
+        #expect(list.unreadCount == 0)
+
+        // Closed: a later reply in that session gets the dot.
+        list.closeChat(chat)
+        #expect(list.openSessionId == nil)
+        transport.rows = [row(newId, 4), row("k0", 2)]
+        await list.refresh()
+        #expect(list.session(id: newId)?.isUnread == true)
+    }
+
+    @Test func openChatClearsItsDot() {
+        let cache = InMemorySessionCacheStore(sessions: [row("k1", 2, unread: true)])
+        let list = SessionListModel(transport: FakeSessionsTransport(), chatTransport: FakeChatTransport(), cache: cache)
+        list.openChat(list.chat(for: "k1"))
+        #expect(list.unreadCount == 0)
+        // Closing another chat keeps this one open.
+        list.closeChat(list.newChat(key: "other"))
+        #expect(list.openSessionId == "k1")
     }
 
     @Test func listCatchUpUpdatesTheRowsOnScreen() async throws {
@@ -254,6 +287,53 @@ private func row(_ id: String, _ count: Int?, title: String? = nil, unread: Bool
         // A cache shows: "Updating…", never the full-screen loader.
         #expect(!chat.isLoadingHistory)
         #expect(chat.newMessageIds.count == 1)
+    }
+
+    /// QA #38 defect 1: the server lost the row (4007) during a catch-up. The chat stays open with its
+    /// messages, and a new session takes the place of the lost one.
+    @Test func lostSessionOnCatchUpStartsANewSessionAndKeepsTheThread() async throws {
+        let transport = FakeChatTransport()
+        transport.transcript = [TranscriptMessage(role: "user", text: "Hi", rowId: 2),
+                                TranscriptMessage(role: "assistant", text: "Hello", rowId: 3)]
+        let cache = InMemorySessionCacheStore(sessions: [row("k1", 2)], activeSessionId: "k1")
+        let list = SessionListModel(transport: FakeSessionsTransport(rows: [row("k1", 2)]),
+                                    chatTransport: transport, cache: cache)
+        let chat = list.chat(for: "k1")
+        await chat.open()
+        cache.saveDraft("Draft text", sessionId: "k1")
+
+        transport.resumeError = GatewayError.rpc(code: 4007, message: "session not found")
+        chat.receive(.state(.connected(GatewayReady(replayEpoch: "0123456789abcdef0123456789abcdef"))))
+        try await waitFor { transport.starts.count == 1 }
+        let newId = "20261116_101500_ab12cd"
+        try await waitFor { chat.storedSessionId == newId && !cache.loadTranscript(sessionId: newId).isEmpty }
+        #expect(!chat.isSessionGone)
+        #expect(chat.messages.map(\.text) == ["Hi", "Hello"])
+        #expect(chat.storedSessionId == newId)
+        #expect(cache.loadTranscript(sessionId: newId).map(\.text) == ["Hi", "Hello"])
+        #expect(chat.draft == "Draft text")
+        // The row stays, and the same chat model answers for both ids.
+        #expect(list.sessions.map(\.id) == ["k1"])
+        #expect(list.chat(for: "k1") === chat)
+        #expect(list.chat(for: newId) === chat)
+        // The next send uses the new live session. No second resume of the lost id.
+        await chat.send("Still there?")?.value
+        #expect(transport.submits.last?.sessionId == "s1")
+        #expect(transport.resumes == ["k1", "k1"])
+    }
+
+    /// A launch with a cached transcript and a lost row: the cache shows, and a new session starts.
+    @Test func lostSessionWithACachedTranscriptStaysOpen() async throws {
+        let transport = FakeChatTransport()
+        transport.resumeError = GatewayError.rpc(code: 4007, message: "session not found")
+        let cached = [ChatMessage(id: "c1", role: .user, text: "Hi", date: .distantPast, delivery: .delivered,
+                                  userRowId: 2)]
+        let chat = ChatViewModel(transport: transport, storedSessionId: "k1",
+                                 cache: InMemorySessionCacheStore(transcripts: ["k1": cached]))
+        await chat.open()
+        #expect(!chat.isSessionGone)
+        #expect(chat.messages == cached)
+        #expect(transport.starts.count == 1)
     }
 
     @Test func aChatThatNeverOpenedDoesNotResumeOnConnect() async throws {

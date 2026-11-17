@@ -188,6 +188,10 @@ public final class ChatViewModel {
                 redrawNow()
             }
             saveTranscript()
+        } catch where Self.isSessionNotFound(error) && !thread.messages.isEmpty {
+            // QA #38 defect 1: the server lost a row that has messages on the screen. Keep them and
+            // start a new session in its place. The chat stays open.
+            await replaceLostSession()
         } catch where Self.isSessionNotFound(error) {
             // A dead id (for example a New Chat that never got a prompt): never resume it again.
             needsOpen = false
@@ -196,6 +200,26 @@ public final class ChatViewModel {
             }
             isSessionGone = true
         } catch {
+            needsOpen = true
+        }
+    }
+
+    /// `session.create` in place of a stored session that the server lost (4007). The thread, the cache and
+    /// the draft move to the new stored id. If the create fails, the next connect tries the open again.
+    private func replaceLostSession() async {
+        let lost = storedSessionId
+        let draft = self.draft
+        session = nil
+        sessionIsStale = false
+        storedSessionId = nil
+        do {
+            _ = try await currentSession()
+            needsOpen = false
+            log.notice("session not found: started a new session")
+            saveTranscript()
+            if !draft.isEmpty { updateDraft(draft) }
+        } catch {
+            if storedSessionId == nil { storedSessionId = lost }
             needsOpen = true
         }
     }
