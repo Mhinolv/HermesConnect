@@ -343,6 +343,32 @@ private struct Harness {
         #expect(result.messages.last?.reasoning == "r")
     }
 
+    /// Issue #7: `session.most_recent` and the list rows for the session list.
+    @Test func mostRecentAndListItemsDecode() async throws {
+        let harness = try await Harness.connect()
+        async let recent = harness.client.fetchMostRecentSessionId()
+        let request = try await harness.socket.waitForRequest("session.most_recent")
+        #expect(request["params"] == [:])
+        harness.socket.reply(to: request, result: #"{"session_id":"20261116_101500_ab12cd","title":"Trip","started_at":1763290000,"source":"ios"}"#)
+        #expect(try await recent == "20261116_101500_ab12cd")
+
+        async let none = harness.client.fetchMostRecentSessionId()
+        harness.socket.reply(to: try await harness.socket.waitForRequest("session.most_recent", count: 2),
+                             result: #"{"session_id":null,"title":null,"started_at":null,"source":null}"#)
+        #expect(try await none == nil)
+
+        async let list = harness.client.fetchSessions()
+        harness.socket.reply(to: try await harness.socket.waitForRequest("session.list"), result: """
+        {"sessions":[{"id":"k2","title":"","preview":"Daily digest","started_at":1763290100,"source":"cron"},        {"id":"k1","title":"Trip","preview":"Book it","started_at":1763290000,"message_count":4,"source":"ios"}]}
+        """)
+        let items = try await list
+        #expect(items.map(\.id) == ["k2", "k1"])
+        #expect(items[0].displayTitle == "Untitled")
+        #expect(items[0].sourceBadge == SessionListItem.SourceBadge(symbol: "clock", text: "Cron"))
+        #expect(items[1].sourceBadge == nil)
+        #expect(items[1].startedAt == Date(timeIntervalSince1970: 1763290000))
+    }
+
     @Test func eventsSinceDecodesReplayedEvents() async throws {
         let harness = try await Harness.connect()
         async let replay = harness.client.eventsSince(sessionId: "s1", lastSeen: 11)

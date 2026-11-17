@@ -5,7 +5,7 @@ import HermesKit
 /// DEBUG only: a "Demo conversation" that replays fixture gateway events, so the chat screen
 /// runs on the Simulator with no server. Start it with the launch environment `HERMES_DEMO=<scenario>`.
 /// Release builds do not contain this file.
-final class DemoChatTransport: ChatTransport, @unchecked Sendable {
+final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Sendable {
     enum Scenario: String {
         /// Seeded thread. Each send streams a scripted reply.
         case live
@@ -17,6 +17,13 @@ final class DemoChatTransport: ChatTransport, @unchecked Sendable {
         case failed
         /// No messages. The composer has focus.
         case empty
+        /// Issue #7: the session list with a cron row, an iMessage row and an unread row. No chat is pushed.
+        /// `HERMES_DEMO_SEARCH=<text>` puts the text in the search field.
+        case list
+        /// The session list with no sessions ("No Chats").
+        case listEmpty = "list-empty"
+        /// The session list before the first answer, with no cache (placeholder rows).
+        case listLoading = "list-loading"
 
         static var current: Scenario? {
             ProcessInfo.processInfo.environment["HERMES_DEMO"].flatMap(Scenario.init(rawValue:))
@@ -27,29 +34,37 @@ final class DemoChatTransport: ChatTransport, @unchecked Sendable {
             switch self {
             case .streaming: "What's the weather in Austin this weekend?"
             case .failed: "Can you check the server logs?"
-            case .live, .thread, .empty: nil
+            case .live, .thread, .empty, .list, .listEmpty, .listLoading: nil
             }
+        }
+
+        /// The list scenarios show the session list. The others push the demo chat at launch.
+        var showsList: Bool { self == .list || self == .listEmpty || self == .listLoading }
+
+        /// The text in the search field of the list (`HERMES_DEMO_SEARCH`).
+        static var search: String? {
+            ProcessInfo.processInfo.environment["HERMES_DEMO_SEARCH"]
         }
     }
 
     let scenario: Scenario
-    let events: AsyncStream<GatewayClientEvent>
-    private let input: AsyncStream<GatewayClientEvent>.Continuation
+    private let broadcast = GatewayEventBroadcast()
+    var events: AsyncStream<GatewayClientEvent> { broadcast.subscribe() }
     private let lock = NSLock()
     private var seq = 0
     private var rowId = 200
     private var stopped = false
 
     static let sessionId = "d3m0c4t5"
+    static let storedId = "20261116_094100_demo01"
 
     init(scenario: Scenario) {
         self.scenario = scenario
-        (events, input) = AsyncStream.makeStream(of: GatewayClientEvent.self)
     }
 
     func startSession(source _: String, idempotencyKey _: String) async throws -> ChatSessionRef {
         try await Task.sleep(for: .milliseconds(150))
-        return ChatSessionRef(liveId: Self.sessionId, storedId: "20261116_094100_demo01")
+        return ChatSessionRef(liveId: Self.sessionId, storedId: Self.storedId)
     }
 
     struct DemoFailure: Error {}
@@ -76,6 +91,51 @@ final class DemoChatTransport: ChatTransport, @unchecked Sendable {
         return true
     }
 
+    /// The demo has no server transcript. The seeded messages stay as they are.
+    func history(sessionId _: String) async throws -> [TranscriptMessage] {
+        throw DemoFailure()
+    }
+
+    // MARK: Session list
+
+    func fetchSessions() async throws -> [SessionListItem] {
+        if scenario == .listLoading {
+            try await Task.sleep(for: .seconds(3600))
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        return scenario == .listEmpty ? [] : Self.sessionRows()
+    }
+
+    func fetchMostRecentSessionId() async throws -> String? {
+        scenario.showsList ? nil : Self.storedId
+    }
+
+    /// The fixture list: the demo chat, a cron run (unread), an iMessage session and older chats.
+    static func sessionRows(now: Date = Date()) -> [SessionListItem] {
+        let calendar = Calendar.current
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: now) ?? now
+        let lastWeek = calendar.date(byAdding: .day, value: -4, to: now) ?? now
+        let older = calendar.date(byAdding: .day, value: -24, to: now) ?? now
+        return [
+            SessionListItem(id: storedId, title: "Calendar and logs",
+                            preview: "Run this on the server: journalctl --user -u hermes-gateway -f",
+                            startedAt: now.addingTimeInterval(-6 * 60), messageCount: 6, source: ChatSource.iOS),
+            SessionListItem(id: "cron_digest_1763280000", title: "Morning digest",
+                            preview: "3 new issues, 2 merged PRs and a calendar change for Thursday.",
+                            startedAt: now.addingTimeInterval(-3 * 3600), messageCount: 2, source: "cron",
+                            isUnread: true),
+            SessionListItem(id: "20261115_181200_photon", title: "Dinner plans",
+                            preview: "Booked a table for two at 7:30 PM. The confirmation is in your email.",
+                            startedAt: yesterday, messageCount: 8, source: "photon"),
+            SessionListItem(id: "20261112_090000_trip01", title: "Trip to Denver",
+                            preview: "The flight lands at 11:05 AM. I added the hotel to your calendar.",
+                            startedAt: lastWeek, messageCount: 14, source: ChatSource.iOS),
+            SessionListItem(id: "20261023_140000_old001", title: nil,
+                            preview: "Here is the summary of the PDF that you sent.",
+                            startedAt: older, messageCount: 3, source: "desktop"),
+        ]
+    }
+
     // MARK: Replay
 
     private var isStopped: Bool { lock.withLock { stopped } }
@@ -87,7 +147,7 @@ final class DemoChatTransport: ChatTransport, @unchecked Sendable {
         }
         let json = #"{"type":"\#(type)","session_id":"\#(Self.sessionId)","seq":\#(next),"payload":\#(payload)}"#
         guard let event = try? JSONDecoder().decode(GatewayEvent.self, from: Data(json.utf8)) else { return }
-        input.yield(.event(event))
+        broadcast.yield(.event(event))
     }
 
     private static func quoted(_ text: String) -> String {

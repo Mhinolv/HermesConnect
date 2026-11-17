@@ -188,6 +188,17 @@ public struct SessionListResult: Decodable, Sendable, Equatable {
     public var sessions: [SessionListRow]
 }
 
+/// `session.most_recent` result (`methods_session.py:563-578`). `sessionId` is the STORED id, or `nil`
+/// when the server has no session yet.
+public struct SessionMostRecentResult: Decodable, Sendable, Equatable {
+    public var sessionId: String?
+    public var title: String?
+    public var startedAt: Double?
+    public var source: String?
+
+    private enum CodingKeys: String, CodingKey { case sessionId = "session_id", title, startedAt = "started_at", source }
+}
+
 /// `session.history` result (`contracts/sessions.py:496-498`).
 public struct SessionHistoryResult: Decodable, Sendable, Equatable {
     public var count: Int
