@@ -207,6 +207,8 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
         /// Fake gate `serve` results.
         public var spawns = 0
         public var reuses = 0
+        /// Issue #83: the order of connects and closes: "connect", "close forward", "close session".
+        public var steps: [String] = []
     }
 
     private let lock = NSLock()
@@ -290,6 +292,7 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
                         checkHostKey: @escaping @Sendable (HostKey) throws -> Void) async throws -> any SSHSession {
         let hostKey = lock.withLock { () -> HostKey in
             _record.connectAttempts += 1
+            _record.steps.append("connect")
             return _hostKey
         }
         if connectFailure == .unreachable { throw SSHConnectionError.unreachable }
@@ -337,11 +340,17 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
     }
 
     fileprivate func didClose() {
-        lock.withLock { _record.closedSessions += 1 }
+        lock.withLock {
+            _record.closedSessions += 1
+            _record.steps.append("close session")
+        }
     }
 
     fileprivate func didCloseForward() {
-        lock.withLock { _record.closedForwards += 1 }
+        lock.withLock {
+            _record.closedForwards += 1
+            _record.steps.append("close forward")
+        }
     }
 
     private struct Session: SSHSession {

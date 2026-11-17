@@ -25,7 +25,8 @@ struct JobsTab: View {
     var body: some View {
         NavigationStack(path: $path) {
             JobsListScreen(model: model, link: link, query: JobsDemo.search,
-                           unreadJobIds: model.unreadJobIds(sessions.unreadCronRuns), onSettings: onSettings)
+                           unreadJobIds: model.unreadJobIds(sessions.unreadCronRuns),
+                           activeUnreadChats: sessions.chatsUnreadCount, onSettings: onSettings)
                 .navigationDestination(for: JobsRoute.self) { route in
                     switch route {
                     case .job(let job):
@@ -47,14 +48,17 @@ struct JobsListScreen: View {
     var link: LiveChatTransport?
     /// Jobs with an unread run get the blue dot.
     var unreadJobIds: Set<String> = []
+    /// Issue #83: the unread chats of the active server, for the server menu.
+    var activeUnreadChats = 0
     var onSettings: () -> Void = {}
     @State private var query: String
 
     init(model: JobsModel, link: LiveChatTransport? = nil, query: String = "", unreadJobIds: Set<String> = [],
-         onSettings: @escaping () -> Void = {}) {
+         activeUnreadChats: Int = 0, onSettings: @escaping () -> Void = {}) {
         self.model = model
         self.link = link
         self.unreadJobIds = unreadJobIds
+        self.activeUnreadChats = activeUnreadChats
         self.onSettings = onSettings
         _query = State(initialValue: query)
     }
@@ -98,7 +102,10 @@ struct JobsListScreen: View {
         .navigationTitle("Jobs")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .principal) { ChatNavigationTitle(title: "Jobs", link: link) }
+            // Issue #83: with two or more servers, the title is the server menu.
+            ToolbarItem(placement: .principal) {
+                ServerTitle(title: "Jobs", link: link, activeUnreadChats: activeUnreadChats, onManage: onSettings)
+            }
             ToolbarItem(placement: .topBarLeading) {
                 Button("Settings", systemImage: "gearshape", action: onSettings)
             }

@@ -96,7 +96,10 @@ struct SessionListScreen: View {
         .navigationTitle("Hermes")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .principal) { ChatNavigationTitle(title: "Hermes", link: link) }
+            // Issue #83: with two or more servers, the title is the server menu.
+            ToolbarItem(placement: .principal) {
+                ServerTitle(title: "Hermes", link: link, activeUnreadChats: model.chatsUnreadCount, onManage: onSettings)
+            }
             ToolbarItem(placement: .topBarLeading) {
                 Button("Settings", systemImage: "gearshape", action: onSettings)
             }

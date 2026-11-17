@@ -48,6 +48,12 @@ final class AppModel {
     /// The local loopback URL and the token of the running Hermes. #6 and #15 give it to the #5 clients.
     /// Nil when Hermes is not ready.
     private(set) var hermesEndpoint: GatewayEndpoint?
+    /// Issue #83: the unread rows and the outbox of the servers that are not active.
+    private(set) var serverBook: ServerStateBook
+    /// Issue #83: the app resets the lists here when the active server changes. It runs before the new connect.
+    @ObservationIgnored var onActiveServerChange: (@MainActor (ServerChange) -> Void)?
+    /// Issue #83: the owner removed a server that was not active. Its outbox must never send.
+    @ObservationIgnored var onServerRemoved: (@MainActor (UUID, ServerStateBook.Entry) -> Void)?
 
     @ObservationIgnored private let keyStore: any DeviceKeyStore
     @ObservationIgnored private let serverStore: any ServerListStore
@@ -60,9 +66,14 @@ final class AppModel {
     @ObservationIgnored private var serveToken: SessionToken?
     /// Counts connect attempts. A result from an old attempt is dropped (the server changed, or a disconnect ran).
     @ObservationIgnored private var attempt = 0
+    /// Issue #83: the close of the old server link. The next connect waits for it, so two links never overlap.
+    @ObservationIgnored private var pendingClose: Task<Void, Never>?
+    /// Issue #83: counts switches. Only the last of fast switches connects.
+    @ObservationIgnored private var switchCount = 0
     @ObservationIgnored let deviceName: String
 
     static let appLockDefaultsKey = "appLockEnabled"
+    static let serverBookDefaultsKey = "serverStateBook"
 
     init(keyStore: any DeviceKeyStore, serverStore: any ServerListStore,
          defaults: UserDefaults = .standard, deviceName: String, transport: any SSHTransport,
@@ -76,7 +87,12 @@ final class AppModel {
         let enabled = defaults.object(forKey: Self.appLockDefaultsKey) as? Bool ?? true
         lock = AppLockPolicy(isEnabled: enabled)
         // Issue #66: the first load migrates the old single profile, with its pin, to the list.
-        serverList = (try? serverStore.load()) ?? ServerList()
+        let list = (try? serverStore.load()) ?? ServerList()
+        serverList = list
+        var book = defaults.data(forKey: Self.serverBookDefaultsKey)
+            .flatMap { try? JSONDecoder().decode(ServerStateBook.self, from: $0) } ?? ServerStateBook()
+        book.keep(only: Set(list.servers.map(\.id)))
+        serverBook = book
         if let key = try? keyStore.loadKey() {
             deviceKey = key
             keyState = .ready
@@ -158,9 +174,9 @@ final class AppModel {
     func addServer(_ profile: ServerProfile) throws {
         var list = serverList
         try list.add(profile)
-        let hadServer = self.profile != nil
+        let old = self.profile?.id
         try commit(list)
-        if hadServer { resetConnection() }
+        if old != nil { resetConnection(ServerChange(from: old, to: profile.id)) }
     }
 
     /// Server detail "Done": save one server. Other servers do not change.
@@ -168,17 +184,69 @@ final class AppModel {
         var list = serverList
         let change = try list.update(profile)
         try commit(list)
-        if change == .newServer, profile.id == self.profile?.id { resetConnection() }
+        if change == .newServer, profile.id == self.profile?.id {
+            resetConnection(ServerChange(from: profile.id, to: profile.id))
+        }
     }
 
     /// "Remove Server": forget the server and its pin. The device key stays. If it was the active server,
     /// the connection closes and the first other server becomes active. No server left: "Set Up Hermes".
     func removeServer(id: UUID) throws {
         let wasActive = profile?.id == id
+        let removed = serverBook.entry(for: id)
         var list = serverList
         list.remove(id: id)
         try commit(list)
-        if wasActive { resetConnection() }
+        var book = serverBook
+        book.keep(only: Set(list.servers.map(\.id)))
+        saveBook(book)
+        if wasActive {
+            resetConnection(ServerChange(from: id, to: list.active?.id))
+        } else {
+            onServerRemoved?(id, removed)
+        }
+    }
+
+    // MARK: Switch (issue #83)
+
+    /// The owner picked a server in the title menu. Save the active id, close the old link fully, then connect
+    /// the new server. Fast switches end on the last choice: an earlier switch does not connect.
+    func switchServer(to id: UUID) async {
+        guard id != profile?.id, serverList.server(id: id) != nil else { return }
+        let old = profile?.id
+        var list = serverList
+        list.activate(id: id)
+        commitQuietly(list)
+        resetConnection(ServerChange(from: old, to: id))
+        switchCount += 1
+        let mine = switchCount
+        await pendingClose?.value
+        guard mine == switchCount, profile?.id == id else { return }
+        await connect()
+    }
+
+    /// Keep the state of a server that is not active now. The app calls it on a switch.
+    func recordServerState(_ state: ServerStateBook.Entry, for id: UUID) {
+        guard serverList.server(id: id) != nil else { return }
+        var book = serverBook
+        guard book.record(state, for: id) else { return }
+        saveBook(book)
+    }
+
+    /// The server menu of the Chats and Jobs titles. `activeChats`: the live unread chats of the active server.
+    func serverMenu(activeChats: Int) -> ServerMenu {
+        ServerMenu(list: serverList, book: serverBook, activeChats: activeChats)
+    }
+
+    /// The app icon badge: the unread sessions of all servers.
+    func badgeCount(activeUnread: Int) -> Int {
+        serverBook.badgeCount(activeID: profile?.id, activeCount: activeUnread)
+    }
+
+    private func saveBook(_ book: ServerStateBook) {
+        guard book != serverBook else { return }
+        serverBook = book
+        defaults.set(try? JSONEncoder().encode(book), forKey: Self.serverBookDefaultsKey)
     }
 
     /// True when a saved server other than `excluding` has the same host, port and user.
@@ -201,9 +269,11 @@ final class AppModel {
 
     /// The active server changed, or its host, port or user changed. Close the old connection.
     /// The token belongs to the old server. Settings connects again when it closes.
-    private func resetConnection() {
+    /// Issue #83: the app resets its lists first. The next connect waits until the old link is closed.
+    private func resetConnection(_ change: ServerChange) {
         pendingTrust = nil
         showsHostKeyError = false
+        showsHermesStartError = false
         connection = .idle
         attempt += 1
         serveToken = nil
@@ -211,7 +281,10 @@ final class AppModel {
         session = nil
         hermes = nil
         hermesEndpoint = nil
-        Task {
+        onActiveServerChange?(change)
+        let previous = pendingClose
+        pendingClose = Task {
+            await previous?.value
             await old.1?.forward.close()
             await old.0?.close()
         }
@@ -222,10 +295,11 @@ final class AppModel {
     /// Connect with the pinned host key, run the gate `ping`, then start or reuse Hermes (issue #4).
     /// No pin: show the trust sheet. A changed key: show the error screen. The app never authenticates in those cases.
     func connect() async {
-        guard let profile, let deviceKey, connection != .connecting, connection != .startingHermes,
-              pendingTrust == nil else { return }
-        let serverID = profile.id
+        guard isSetUp, !isConnecting, pendingTrust == nil else { return }
         await closeSession()
+        // Issue #83: the active server can change while the old link closes. Read it after the close.
+        guard let profile, let deviceKey, !isConnecting, pendingTrust == nil else { return }
+        let serverID = profile.id
         attempt += 1
         let current = attempt
         connection = .connecting
@@ -381,7 +455,11 @@ final class AppModel {
         await closeSession()
     }
 
+    private var isConnecting: Bool { connection == .connecting || connection == .startingHermes }
+
     private func closeSession() async {
+        // Issue #83: the link of the old server closes fully before a new connect starts.
+        await pendingClose?.value
         hermesEndpoint = nil
         if let hermes {
             self.hermes = nil

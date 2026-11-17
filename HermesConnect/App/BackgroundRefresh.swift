@@ -69,6 +69,8 @@ enum BackgroundRefresh {
         link.setEndpoint(model.hermesEndpoint)
         guard await waitUntilReady(link) else { return false }
         let result = await sessions.catchUp(showsPreview: notifications.showsPreview, notifier: notifications.poster)
+        // Issue #83: the app icon badge counts the unread sessions of all servers.
+        if result != nil { notifications.setBadge(model.badgeCount(activeUnread: sessions.unreadCount)) }
         return result != nil
     }
 

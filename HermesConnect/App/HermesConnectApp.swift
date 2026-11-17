@@ -21,14 +21,22 @@ struct HermesConnectApp: App {
         OnDeviceTranscription.lockModelNetwork()
         #if DEBUG
         if ChatLaunch.isDemo {
-            sessions = ChatLaunch.makeDemoSessions()
-            jobs = JobsDemo.makeJobs() ?? ChatLaunch.makeOfflineJobs()
+            // Issue #83: right after a switch the list has no rows yet (redacted rows, "Connecting…").
+            let demoSessions = ServerSwitchDemo.current == .connecting ? ChatLaunch.makeOfflineSessions()
+                : ChatLaunch.makeDemoSessions()
+            let demoJobs = JobsDemo.makeJobs() ?? ChatLaunch.makeOfflineJobs()
+            sessions = demoSessions
+            jobs = demoJobs
             link = nil
             // The DEBUG demo conversation: no server, no App Lock, so screenshots show the chat.
             // Issue #66: the Servers screenshots use 3 servers.
             let demo = ServersDemo.current.map(ServersDemo.makeModel) ?? AppModel.preview(setUp: true, hostKey: .sample)
             demo.previewConnection(.connected(gateVersion: "demo"))
-            model = demo
+            // Issue #83: the server menu screenshots use 3 servers.
+            let switchDemo = ServerSwitchDemo.current.map(ServerSwitchDemo.makeModel) ?? demo
+            ServerSwitchGlue.attach(model: switchDemo, sessions: demoSessions, jobs: demoJobs)
+            if ServerSwitchDemo.current == .menu { ServerSwitchDemo.openMenu() }
+            model = switchDemo
             location = LocationController.preview(enabled: false)
             let off = ChatLaunch.demoScenario == .notificationsOff
             notifications = NotificationController(center: DemoNotificationCenter(status: off ? .denied : .authorized),
@@ -46,7 +54,10 @@ struct HermesConnectApp: App {
         self.link = link
         let sessions = ChatLaunch.makeSessions(link: link)
         self.sessions = sessions
-        jobs = ChatLaunch.makeJobs(link: link)
+        let jobs = ChatLaunch.makeJobs(link: link)
+        self.jobs = jobs
+        // Issue #83: a switch resets the lists before the new connect. Outboxes stay with their server.
+        ServerSwitchGlue.attach(model: live, sessions: sessions, jobs: jobs)
         let notifications = NotificationController()
         self.notifications = notifications
         UNUserNotificationCenter.current().delegate = notifications
@@ -216,9 +227,19 @@ struct RootView: View {
         .onChange(of: ask.pending, initial: true) { askHermes() }
         .onChange(of: model.lock) { askHermes() }
         .onChange(of: scenePhase) { askHermes() }
-        .onChange(of: sessions.unreadCount, initial: true) { _, count in
+        // Issue #83: the app icon badge counts the unread sessions of all servers.
+        .onChange(of: model.badgeCount(activeUnread: sessions.unreadCount), initial: true) { _, count in
             if !ChatLaunch.isDemo { notifications?.setBadge(count) }
         }
+        // Issue #83: a switch closes the open chat (its draft stays) and shows the root of both tabs.
+        .onChange(of: model.profile?.id) { old, new in
+            // The first setup (no old server) keeps the launch push of the last chat.
+            guard let old, let new, old != new else { return }
+            launchDone = true
+            path.removeAll()
+            jobsPath.removeAll()
+        }
+        .serverSwitchFeedback(model)
         .onChange(of: showSettings) { _, shown in
             // A new server or a forgotten host key leaves the status idle. Connect when Settings closes.
             if !shown, model.isSetUp, model.connection == .idle { Task { await model.connect() } }

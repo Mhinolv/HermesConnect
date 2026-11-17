@@ -89,7 +89,7 @@ struct ChatNavigationTitle: View {
             } else {
                 titleText
             }
-            status
+            ChatTitleStatus(link: link, updating: updating)
         }
         .accessibilityElement(children: .contain)
     }
@@ -99,8 +99,16 @@ struct ChatNavigationTitle: View {
             .font(.headline)
             .lineLimit(1)
     }
+}
 
-    @ViewBuilder private var status: some View {
+/// The status line under a title: the chat link state, else the #3 connection status.
+/// Issue #83: the server menu title of the Chats and Jobs lists uses it too.
+struct ChatTitleStatus: View {
+    @Environment(AppModel.self) private var app
+    var link: LiveChatTransport?
+    var updating = false
+
+    var body: some View {
         switch ChatLaunch.subtitle(link: link?.status, connection: app.connection, updating: updating) {
         case .updating:
             HStack(spacing: 4) {

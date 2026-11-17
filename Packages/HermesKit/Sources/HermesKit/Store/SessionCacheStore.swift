@@ -54,6 +54,12 @@ public enum SessionCache {
     /// so a failed memo survives a quit. No stored id starts with `#`.
     public static let newChatId = "#new-chat"
 
+    /// Issue #83: the key that keeps the new chat of a server that is not active. It is never in the outbox,
+    /// so nothing sends from it. A switch back to the server moves it to `newChatId` again.
+    public static func parkedNewChatId(server: UUID) -> String {
+        "\(newChatId)@\(server.uuidString)"
+    }
+
     /// The messages to keep: the last `limit` ones that have ended, plus every voice memo.
     /// The owner never loses a recording: a memo that was not delivered stays with "Try Again".
     /// Issue #39: the outbox stays too. A message that the outbox sends right now does not: a quit then
