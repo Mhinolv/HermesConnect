@@ -5,17 +5,24 @@ import UIKit
 import UniformTypeIdentifiers
 
 /// Turns picked photos, camera shots and files into `ChatAttachment`s (issue #8).
-/// Each item gets a private copy in the temporary folder. Never log a name or the bytes.
+/// Each item gets a private copy in Application Support. Never log a name or the bytes.
 enum AttachmentImport {
     enum Failure: Error, Equatable {
         case tooLarge
         case unreadable
     }
 
-    /// The folder of the private copies. The system can clear it, and the app clears it at launch.
+    /// The folder of the private copies: Application Support/HermesConnect/Attachments.
+    /// Issue #12: the cache keeps the sent bubbles, so the copies stay until `keepDays` pass.
     static var folder: URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent("Attachments", isDirectory: true)
+        let base = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                 appropriateFor: nil, create: true))
+            ?? FileManager.default.temporaryDirectory
+        return base.appendingPathComponent("HermesConnect/Attachments", isDirectory: true)
     }
+
+    /// A sent photo shows in the cached thread for this many days. After that its bubble shows the gray box.
+    static let keepDays = 30
 
     /// Settings > Photos > "Include Photo Location". Off by default.
     static var includesPhotoLocation: Bool {
@@ -76,12 +83,20 @@ enum AttachmentImport {
         try? FileManager.default.removeItem(at: item.fileURL.deletingLastPathComponent())
     }
 
-    /// Clears the copies of an earlier launch, once per launch, before the first composer shows.
-    /// The cache keeps text only, so no message of this launch uses them.
-    @MainActor static func clearEarlierLaunches() {
+    /// Once per launch, before the first composer shows: removes the copies older than `keepDays`, and the
+    /// temporary folder of builds before issue #12.
+    @MainActor static func clearEarlierLaunches(now: Date = Date()) {
         guard !cleared else { return }
         cleared = true
-        try? FileManager.default.removeItem(at: folder)
+        let manager = FileManager.default
+        try? manager.removeItem(at: manager.temporaryDirectory.appendingPathComponent("Attachments", isDirectory: true))
+        let limit = now.addingTimeInterval(-Double(keepDays) * 24 * 3600)
+        let items = (try? manager.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey]))
+            ?? []
+        for item in items {
+            let date = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let date, date < limit { try? manager.removeItem(at: item) }
+        }
     }
 
     @MainActor private static var cleared = false

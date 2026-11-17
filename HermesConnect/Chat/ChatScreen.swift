@@ -150,6 +150,17 @@ struct ChatThreadView: UIViewControllerRepresentable {
             controller.onFirstAppear = { _ = $0.messageInputBar.inputTextView.becomeFirstResponder() }
             return controller
         }
+        if DemoChatTransport.Scenario.current == .receivedFiles {
+            // The ring and the error show with no tap: start those 2 downloads.
+            for file in ReceivedFileDemo.startedFiles { model.receivedFiles.load(file) }
+        }
+        if DemoChatTransport.Scenario.current == .receivedFilesPreview {
+            let controller = ChatViewController(model: model)
+            controller.onFirstAppear = { controller in
+                controller.perform(.open, on: ReceivedFileDemo.previewFile, from: controller.view)
+            }
+            return controller
+        }
         if DemoChatTransport.Scenario.current == .tapbacksPicker {
             let controller = ChatViewController(model: model)
             controller.onFirstAppear = { controller in

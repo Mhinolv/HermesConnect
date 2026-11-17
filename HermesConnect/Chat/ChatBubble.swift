@@ -17,6 +17,8 @@ struct ChatBubble: MessageType {
     let text: NSAttributedString
     /// The photo of a photo part, if it is decoded.
     var thumbnail: UIImage?
+    /// Issue #12: the download state of a received file part.
+    var received: ReceivedFileState = .idle
 
     var row: ChatRow { part.row }
     var sender: SenderType { row.message.role == .user ? ChatSender.owner : ChatSender.hermes }
@@ -25,6 +27,14 @@ struct ChatBubble: MessageType {
     /// A voice memo and the audio of a voice reply (issue #10) draw in `ChatVoiceCell` (issue #9). Issue #8: a photo or location part draws as a photo.
     var kind: MessageKind {
         if row.message.voice != nil || part.content == .spokenReply { return .custom(nil) }
+        // Issue #12: a received image is a photo bubble. Received audio uses the #10 audio bubble (custom cell).
+        if let file = part.receivedFile {
+            switch file.kind {
+            case .image: return .photo(ReceivedPhotoItem(file: file, fileURL: received.fileURL, image: thumbnail))
+            case .audio where received.fileURL != nil: return .custom(nil)
+            case .audio, .file: return .attributedText(text)
+            }
+        }
         if let item = part.attachment, item.showsAsImage {
             return .photo(AttachmentPhotoItem(attachment: item, image: thumbnail))
         }

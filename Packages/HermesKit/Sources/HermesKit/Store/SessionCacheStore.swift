@@ -25,7 +25,8 @@ public enum SessionCache {
     /// Version 2 (issue #10): voice memos, memos that were not delivered, and the audio of voice replies.
     /// Version 3 (issue #11): agent acks and owner tapbacks.
     /// Version 4 (issue #49): the waveform of a voice reply.
-    public static let formatVersion = 4
+    /// Version 5 (issue #12): the photos, files and location cards of sent messages (metadata and local path).
+    public static let formatVersion = 5
     /// Issue #36: the transcript key of the new chat that has no server row yet. Its memos stay here,
     /// so a failed memo survives a quit. No stored id starts with `#`.
     public static let newChatId = "#new-chat"
@@ -132,6 +133,71 @@ struct CachedSpeech: Codable, Equatable {
     }
 }
 
+/// One attachment of a sent message (format version 5, issue #12). The bytes stay in their local file.
+/// A file that the system cleared shows the gray placeholder (photo) or the cell with no preview (file).
+struct CachedAttachment: Codable, Equatable {
+    var id: String
+    /// "photo", "file", "pdf" or "location".
+    var kind: String
+    var name: String
+    var byteCount: Int
+    var path: String
+    var mimeType: String
+    var pixelWidth: Int?
+    var pixelHeight: Int?
+    var pageCount: Int?
+    var refText: String?
+
+    init(_ item: ChatAttachment) {
+        id = item.id
+        kind = switch item.kind {
+        case .photo: "photo"
+        case .file: "file"
+        case .pdf: "pdf"
+        case .location: "location"
+        }
+        name = item.name
+        byteCount = item.byteCount
+        path = CachedPath.encode(item.fileURL)
+        mimeType = item.mimeType
+        pixelWidth = item.pixelWidth
+        pixelHeight = item.pixelHeight
+        pageCount = item.pageCount
+        refText = item.refText
+    }
+
+    /// A cached item was sent: it shows with no upload state.
+    var attachment: ChatAttachment {
+        let kind: ChatAttachment.Kind = switch self.kind {
+        case "photo": .photo
+        case "pdf": .pdf
+        case "location": .location
+        default: .file
+        }
+        return ChatAttachment(id: id, kind: kind, name: name, byteCount: byteCount, fileURL: CachedPath.decode(path),
+                              mimeType: mimeType, pixelWidth: pixelWidth, pixelHeight: pixelHeight,
+                              pageCount: pageCount, upload: .attached, refText: refText)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, name, byteCount, path, mimeType, pixelWidth, pixelHeight, pageCount, refText
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        kind = try container.decodeIfPresent(String.self, forKey: .kind) ?? "file"
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? "File"
+        byteCount = try container.decodeIfPresent(Int.self, forKey: .byteCount) ?? 0
+        path = try container.decodeIfPresent(String.self, forKey: .path) ?? "/dev/null"
+        mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType) ?? ""
+        pixelWidth = try container.decodeIfPresent(Int.self, forKey: .pixelWidth)
+        pixelHeight = try container.decodeIfPresent(Int.self, forKey: .pixelHeight)
+        pageCount = try container.decodeIfPresent(Int.self, forKey: .pageCount)
+        refText = try container.decodeIfPresent(String.self, forKey: .refText)
+    }
+}
+
 /// One cached message. The file format: change it only with tolerant decoding.
 struct CachedMessage: Codable, Equatable {
     var id: String
@@ -149,6 +215,8 @@ struct CachedMessage: Codable, Equatable {
     var ack: String?
     /// Version 3: the raw value of `Tapback`. Older files have no key.
     var tapback: String?
+    /// Version 5 (issue #12): the attachments of a sent message. Older files have no key: none.
+    var attachments: [CachedAttachment]
 
     init(_ message: ChatMessage) {
         id = message.id
@@ -163,6 +231,7 @@ struct CachedMessage: Codable, Equatable {
         speech = message.spokenReply.map(CachedSpeech.init)
         ack = message.agentAck?.rawValue
         tapback = message.tapback?.rawValue
+        attachments = message.attachments.map(CachedAttachment.init)
     }
 
     var message: ChatMessage {
@@ -173,7 +242,7 @@ struct CachedMessage: Codable, Equatable {
             let ack = ack.flatMap(AgentAck.init(rawValue:)).flatMap { $0 == .seen ? nil : $0 }
             return ChatMessage(id: id, role: .user, text: memo.map { $0.transcript.text ?? "" } ?? text, date: date,
                                delivery: notDelivered ? .failed : .delivered, userRowId: userRowId, voice: memo,
-                               agentAck: ack, tapback: tapback)
+                               attachments: attachments.map(\.attachment), agentAck: ack, tapback: tapback)
         }
         return ChatMessage(id: id, role: .assistant, text: text, date: date,
                            reply: interrupted ? .interrupted : .complete, promptId: promptId,
@@ -182,6 +251,7 @@ struct CachedMessage: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, role, text, date, userRowId, promptId, interrupted, notDelivered, voice, speech, ack, tapback
+        case attachments
     }
 
     init(from decoder: any Decoder) throws {
@@ -200,6 +270,8 @@ struct CachedMessage: Codable, Equatable {
         // A broken or unknown reaction drops only the reaction.
         ack = (try? container.decodeIfPresent(String.self, forKey: .ack)) ?? nil
         tapback = (try? container.decodeIfPresent(String.self, forKey: .tapback)) ?? nil
+        // Version 5. A broken list drops only the attachments: the message shows its text.
+        attachments = ((try? container.decodeIfPresent([CachedAttachment].self, forKey: .attachments)) ?? nil) ?? []
     }
 }
 

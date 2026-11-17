@@ -40,6 +40,13 @@ public enum ChatHistory {
                 if let shown, !shown.attachments.isEmpty {
                     prompt.text = shown.text
                     prompt.attachments = shown.attachments
+                } else if voice == nil {
+                    // Issue #12: no local items (another device, or a cleared cache). The refs show as file cells.
+                    let refs = AttachmentRefs.split(text)
+                    if !refs.paths.isEmpty {
+                        prompt.text = refs.text
+                        prompt.attachments = AttachmentRefs.attachments(for: refs.paths, rowId: id)
+                    }
                 }
                 result.append(prompt)
                 promptId = id
