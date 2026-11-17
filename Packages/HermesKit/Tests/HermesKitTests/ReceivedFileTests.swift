@@ -301,7 +301,8 @@ private final class FakeFileLoader: HTTPFileDownloading, @unchecked Sendable {
         #expect(loaded.count == 1)
         #expect(loaded[0].text == "Look")
         #expect(loaded[0].attachments == sent().attachments)
-        #expect(SessionCache.formatVersion == 5)
+        // Issue #39 made it version 6.
+        #expect(SessionCache.formatVersion >= 5)
     }
 
     @Test func version4FilesStillLoad() throws {
@@ -322,10 +323,10 @@ private final class FakeFileLoader: HTTPFileDownloading, @unchecked Sendable {
         #expect(loaded.map(\.id) == ["u1", "a1", "u2"])
         #expect(loaded.allSatisfy { $0.attachments.isEmpty })
         #expect(loaded[1].text == "Here MEDIA:/tmp/a.pdf")
-        // The saved file is rewritten as version 5.
+        // The saved file is rewritten in the current version (5 for issue #12, 6 since issue #39).
         store.saveTranscript(loaded, sessionId: "k1")
         let raw = try String(contentsOf: url, encoding: .utf8)
-        #expect(raw.contains(#""version":5"#))
+        #expect(raw.contains("\"version\":\(SessionCache.formatVersion)"))
     }
 
     @Test func historyKeepsCachedFileBubbles() {

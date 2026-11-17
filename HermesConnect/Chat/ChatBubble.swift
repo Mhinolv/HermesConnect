@@ -158,15 +158,24 @@ enum ChatCaptionRow {
     /// The retry row is a tap target, so it is at least 44 pt high.
     static let minimumTapHeight: CGFloat = 44
 
+    /// The SF Symbol at the start of the row. Issue #39: `clock` for a message in the outbox.
+    static func symbolName(_ footnote: ChatRow.Footnote) -> String? {
+        switch footnote {
+        case .audioUnavailable: "arrow.clockwise"
+        case .queued: "clock"
+        default: nil
+        }
+    }
+
     /// The text of the row: an icon or the spinner space, then the footnote text.
     static func text(_ footnote: ChatRow.Footnote, font: UIFont) -> NSAttributedString {
         let color: UIColor = footnote.isError ? .systemRed : .secondaryLabel
         let row = NSMutableAttributedString()
         let attachment = NSTextAttachment()
         let side = iconSide(font)
-        if footnote == .audioUnavailable {
+        if let name = symbolName(footnote) {
             let symbol = UIImage.SymbolConfiguration(font: font).applying(UIImage.SymbolConfiguration(weight: .semibold))
-            attachment.image = UIImage(systemName: "arrow.clockwise", withConfiguration: symbol)?
+            attachment.image = UIImage(systemName: name, withConfiguration: symbol)?
                 .withTintColor(color, renderingMode: .alwaysOriginal)
             let size = attachment.image?.size ?? CGSize(width: side, height: side)
             attachment.bounds = CGRect(x: 0, y: (font.capHeight - size.height) / 2, width: size.width, height: size.height)
