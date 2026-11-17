@@ -569,13 +569,13 @@ private struct Refused: Error {}
         #expect(list.archivedCount == 0)
     }
 
-    /// #73 hides cron runs with the same filter.
+    /// #73 always hides cron runs. The filter hides other sources too.
     @Test func theFilterHidesSources() async throws {
         let list = model(FakeActionsTransport(rows: rows))
-        #expect(list.filtered("").map(\.id) == ["k3", "k2", "k1"])
-        list.filter = SessionListFilter(hiddenSources: ["cron"])
         #expect(list.filtered("").map(\.id) == ["k3", "k1"])
-        #expect(list.filtered("Trip").map(\.id) == ["k1"])
+        list.filter = SessionListFilter(hiddenSources: ["photon"])
+        #expect(list.filtered("").map(\.id) == ["k3"])
+        #expect(list.filtered("Trip").map(\.id) == [])
     }
 }
 
