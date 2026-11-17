@@ -51,6 +51,10 @@ public final class JobsModel {
     @ObservationIgnored public let transport: any CronTransport
     @ObservationIgnored private let cache: any CronJobCacheStore
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
+    /// Issue #83: counts server switches. An answer from the old server is dropped.
+    @ObservationIgnored private var generation = 0
+    /// Issue #83: the cache holds the jobs of the old server. The next good load saves, also an equal list.
+    @ObservationIgnored private var cacheIsStale = false
 
     public init(transport: any CronTransport, cache: any CronJobCacheStore) {
         self.transport = transport
@@ -85,16 +89,30 @@ public final class JobsModel {
     private func load() async {
         isRefreshing = true
         defer { isRefreshing = false }
+        let current = generation
         do {
             let fresh = try await transport.fetchCronJobs()
+            guard current == generation else { return }
             errorMessage = nil
             hasLoaded = true
-            guard fresh != jobs || cache.loadJobs() == nil else { return }
+            guard fresh != jobs || cacheIsStale || cache.loadJobs() == nil else { return }
+            cacheIsStale = false
             jobs = fresh
             cache.saveJobs(fresh)
         } catch {
+            guard current == generation else { return }
             errorMessage = CronErrorText.message(for: error)
         }
+    }
+
+    /// Issue #83: the active server changed. The list shows the redacted rows until the new server answers.
+    public func switchServer() {
+        generation += 1
+        refreshTask = nil
+        jobs = []
+        hasLoaded = false
+        errorMessage = nil
+        cacheIsStale = true
     }
 
     /// Refreshes on each connect, `cron.changed` and `sessions.changed` until the task ends.
