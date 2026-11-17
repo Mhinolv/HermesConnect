@@ -287,6 +287,8 @@ private final class FakeVoiceTransport: ChatTransport, @unchecked Sendable {
     }
 
     func stopReply(sessionId _: String) async throws -> Bool { true }
+
+    func history(sessionId _: String) async throws -> [TranscriptMessage] { [] }
 }
 
 /// Only `ChatTransport`'s required calls: the voice calls use the defaults.
@@ -300,6 +302,7 @@ private struct TextOnlyTransport: ChatTransport {
     }
     func submitPrompt(sessionId _: String, text _: String, retryBeforeRowId _: Int?) async throws -> Int? { 1 }
     func stopReply(sessionId _: String) async throws -> Bool { false }
+    func history(sessionId _: String) async throws -> [TranscriptMessage] { [] }
 }
 
 private final class RemovedFiles: @unchecked Sendable {
@@ -443,6 +446,23 @@ private func memo() -> VoiceMemo {
         await task.value
         let done = ChatTimeline.accessibilityLabel(for: ChatTimeline.rows(for: vm.messages)[0])
         #expect(done.hasPrefix("You, Voice memo, 12 seconds, Remind me to call Sam, "))
+    }
+}
+
+// MARK: - History merge (#7)
+
+@Suite struct VoiceMemoHistoryTests {
+    @Test func historyMergeKeepsTheMemoBubble() {
+        let current = [ChatMessage(id: "v1", role: .user, text: "Call Sam", date: .now, delivery: .delivered,
+                                   userRowId: 7, voice: memo())]
+        let transcript = [TranscriptMessage(role: "user", text: "Call Sam", rowId: 7),
+                          TranscriptMessage(role: "assistant", text: "Done.", rowId: 8)]
+        let merged = ChatHistory.messages(from: transcript, reusing: current)
+        #expect(merged.map(\.id).first == "v1")
+        #expect(merged.first?.voice?.fileURL == memoURL)
+        #expect(merged.first?.voice?.transcript == .done("Call Sam"))
+        // A row with no memo on the screen stays a text bubble.
+        #expect(ChatHistory.messages(from: transcript).first?.voice == nil)
     }
 }
 
