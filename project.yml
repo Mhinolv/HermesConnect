@@ -36,6 +36,7 @@ targets:
         NSLocationWhenInUseUsageDescription: Hermes sends your location to your own Hermes server so that your agent can answer location questions.
         NSLocationAlwaysAndWhenInUseUsageDescription: Hermes sends your location in the background, when you move a long distance or arrive at a place.
         ITSAppUsesNonExemptEncryption: false
+        UIBackgroundModes: [audio]
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
     settings:

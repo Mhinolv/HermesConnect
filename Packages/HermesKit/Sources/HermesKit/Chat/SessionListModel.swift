@@ -43,6 +43,10 @@ public final class SessionListModel {
     /// The session that the owner opened last, from the cache. The app pushes it at once on launch.
     public var cachedActiveSessionId: String? { cache.loadActiveSessionId() }
 
+    /// Issue #36: a new chat with no server row kept memos (for example a failed memo while offline).
+    /// The app opens that chat at launch.
+    public var hasCachedNewChat: Bool { !cache.loadTranscript(sessionId: SessionCache.newChatId).isEmpty }
+
     // MARK: Network
 
     /// `session.list`. Calls at the same time share one request. A failure keeps the cached list.
@@ -145,9 +149,13 @@ public final class SessionListModel {
     }
 
     /// A new, empty chat. The first send calls `session.create` (`source: "ios"`). `key` names the route.
+    /// Issue #36: one new chat at a time keeps its memos in the cache until its first prompt is accepted.
+    /// It shows the memos that a new chat kept before a quit. An empty holder gives the slot to this chat.
     public func newChat(key: String) -> ChatViewModel {
         if let chat = chats[key] { return chat }
-        let chat = ChatViewModel(transport: chatTransport, cache: cache)
+        chats.values.forEach { $0.yieldNewChat() }
+        let keeps = !chats.values.contains { $0.keepsNewChat }
+        let chat = ChatViewModel(transport: chatTransport, cache: cache, keepsNewChat: keeps)
         chat.startEvents()
         chats[key] = chat
         return chat
