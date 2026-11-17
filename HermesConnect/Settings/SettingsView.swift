@@ -47,6 +47,7 @@ struct SettingsView: View {
                     if let reason = connectionReason { Text(reason) }
                 }
                 LocationSettingsSection()
+                PhotoSettingsSection()
                 Section {
                     Toggle(Authenticator.appLockToggleTitle, isOn: Binding(
                         get: { model.lock.isEnabled },

@@ -223,11 +223,14 @@ public final class ChatViewModel {
 
     /// Shows the bubble at once, then sends the text as it is (also text that starts with `/`).
     /// Returns the send task (tests wait for it). Empty text after trimming sends nothing.
+    /// Issue #8: `attachments` upload first, in order, each with its own progress ring. Then `prompt.submit`.
+    /// Attachments with no text also send.
     @discardableResult
-    public func send(_ text: String) -> Task<Void, Never>? {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+    public func send(_ text: String, attachments: [ChatAttachment] = []) -> Task<Void, Never>? {
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hasText || !attachments.isEmpty else { return nil }
         let id = makeId()
-        thread.addOutgoing(id: id, text: text, date: now())
+        thread.addOutgoing(id: id, text: hasText ? text : "", date: now(), attachments: attachments)
         redrawNow()
         return Task { await deliver(id: id, retryBeforeRowId: nil) }
     }
@@ -319,11 +322,12 @@ public final class ChatViewModel {
     }
 
     private func deliver(id: String, retryBeforeRowId: Int?) async {
-        guard let message = thread.message(id: id) else { return }
-        let text = message.text
-        let isVoice = message.voice != nil
+        guard let isVoice = thread.message(id: id).map({ $0.voice != nil }) else { return }
         do {
             let session = try await currentSession()
+            try await uploadAttachments(of: id, to: session.liveId)
+            guard let message = thread.message(id: id) else { return }
+            let text = AttachmentPayload.promptText(message.text, attachments: message.attachments)
             thread.beginTurn(promptId: id)
             redrawNow()
             let row = if isVoice {
@@ -341,6 +345,60 @@ public final class ChatViewModel {
             thread.cancelWaiting()
         }
         redrawNow()
+    }
+
+    /// Issue #8: each attachment that the live session does not hold yet goes up, one at a time.
+    /// A failure marks the item and throws, so the message shows "Not Delivered" with "Try Again".
+    private func uploadAttachments(of id: String, to session: String) async throws {
+        guard let items = thread.message(id: id)?.attachments, items.contains(where: { $0.needsUpload(to: session) })
+        else { return }
+        guard let uploader = transport as? any AttachmentTransport else {
+            for item in items where item.needsUpload(to: session) {
+                thread.setUpload(.failed, attachment: item.id, message: id)
+            }
+            throw AttachmentUploadError.notSupported
+        }
+        for item in items where item.needsUpload(to: session) {
+            thread.setUpload(.uploading, attachment: item.id, message: id)
+            redrawNow()
+            do {
+                let ref = try await Self.upload(item, to: session, with: uploader)
+                thread.setUpload(.attached, attachment: item.id, message: id, refText: ref, sessionId: session)
+                redrawNow()
+            } catch {
+                thread.setUpload(.failed, attachment: item.id, message: id)
+                // The items after it wait for "Try Again".
+                for later in items.drop(while: { $0.id != item.id }).dropFirst() where later.needsUpload(to: session) {
+                    thread.setUpload(.pending, attachment: later.id, message: id)
+                }
+                throw error
+            }
+        }
+    }
+
+    /// One attach call. A PDF on a server with no `pdftoppm` (5028) goes as a file. Returns the `ref_text`.
+    private nonisolated static func upload(_ item: ChatAttachment, to session: String,
+                                           with uploader: any AttachmentTransport) async throws -> String? {
+        let data = try Data(contentsOf: item.fileURL, options: .mappedIfSafe)
+        switch item.kind {
+        case .photo:
+            try await uploader.attachImage(sessionId: session, data: data, filename: item.name)
+            return nil
+        case .pdf:
+            do {
+                let last = (item.pageCount ?? 0) > AttachmentLimits.pdfPages ? AttachmentLimits.pdfPages : nil
+                try await uploader.attachPDF(sessionId: session, data: data, filename: item.name, lastPage: last)
+                return nil
+            } catch GatewayError.rpc(let code, _) where code == pdfRendererMissingCode {
+                return try await uploader.attachFile(sessionId: session, data: data, name: item.name,
+                                                     mimeType: item.mimeType)
+            }
+        case .file:
+            return try await uploader.attachFile(sessionId: session, data: data, name: item.name,
+                                                 mimeType: item.mimeType)
+        case .location:
+            return nil
+        }
     }
 
     /// The live session. The first send creates it with `source: "ios"`. After a drop, the send resumes
@@ -412,4 +470,9 @@ public final class ChatViewModel {
 
     /// The thread state that is not drawn yet (tests).
     var pendingThread: ChatThread { thread }
+}
+
+/// The chat transport has no attach calls (issue #8).
+public enum AttachmentUploadError: Error, Equatable {
+    case notSupported
 }
