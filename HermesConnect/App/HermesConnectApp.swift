@@ -25,7 +25,8 @@ struct HermesConnectApp: App {
             jobs = JobsDemo.makeJobs() ?? ChatLaunch.makeOfflineJobs()
             link = nil
             // The DEBUG demo conversation: no server, no App Lock, so screenshots show the chat.
-            let demo = AppModel.preview(setUp: true, hostKey: .sample)
+            // Issue #66: the Servers screenshots use 3 servers.
+            let demo = ServersDemo.current.map(ServersDemo.makeModel) ?? AppModel.preview(setUp: true, hostKey: .sample)
             demo.previewConnection(.connected(gateVersion: "demo"))
             model = demo
             location = LocationController.preview(enabled: false)
@@ -61,7 +62,10 @@ struct HermesConnectApp: App {
     var body: some Scene {
         WindowGroup {
             #if DEBUG
-            if ChatLaunch.demoScenario?.showsNotificationSettings == true {
+            if let servers = ServersDemo.current {
+                // Issue #66: the DEBUG screenshots of Settings > Servers.
+                serversDemo(servers)
+            } else if ChatLaunch.demoScenario?.showsNotificationSettings == true {
                 // Issue #15: the DEBUG screenshot of Settings > Notifications.
                 NavigationStack {
                     Form { NotificationSettingsSection() }
@@ -87,6 +91,28 @@ struct HermesConnectApp: App {
             #endif
         }
     }
+
+    #if DEBUG
+    @ViewBuilder private func serversDemo(_ demo: ServersDemo) -> some View {
+        let first = model.servers.first?.id
+        Color(uiColor: .systemBackground)
+            .sheet(isPresented: .constant(true)) {
+                switch demo {
+                case .list, .one:
+                    SettingsView()
+                case .detail:
+                    SettingsView(path: first.map { [$0] } ?? [])
+                case .remove:
+                    SettingsView(path: first.map { [$0] } ?? [], opensRemoveDialog: true)
+                case .newServer:
+                    SettingsView(showAddServer: true, addServerHost: model.servers.first?.host ?? "")
+                }
+            }
+            .environment(model)
+            .environment(location)
+            .environment(notifications)
+    }
+    #endif
 
     @ViewBuilder private var scene: some View {
         Group {
