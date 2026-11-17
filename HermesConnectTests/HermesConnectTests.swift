@@ -282,6 +282,25 @@ private struct FailingKeyStore: DeviceKeyStore {
         #expect(setup.transport.record.spawns == 2)
     }
 
+    /// Issue #29: a fixed-port gate (version 2) must print the slot port that the app saw before.
+    @Test func fixedPortGateRefusesAChangedPortUntilResetDeviceKey() async throws {
+        let setup = await makeModel(pin: .sample)
+        setup.transport.pingReply = .success("PONG 2\n")
+        await setup.model.connect()
+        #expect(setup.model.connection == .connected(gateVersion: "2"))
+        await setup.model.disconnect()
+
+        setup.transport.serverAlive = false  // The fake gate spawns again on another port.
+        await setup.model.connect()
+        #expect(setup.model.connection == .notStarted(.gateError("port-changed")))
+        #expect(setup.model.hermesEndpoint == nil)
+        #expect(setup.transport.record.forwardPorts == [41_001], "no forward to the changed port")
+
+        await setup.model.resetKey()
+        await setup.model.connect()
+        #expect(setup.model.connection == .connected(gateVersion: "2"))
+    }
+
     @Test(arguments: ["hermes-not-found", "update-required", "not-allowed", "bad-token", "exit 2"])
     func gateRefusalIsNotStarted(code: String) async {
         let setup = await makeModel(pin: .sample)

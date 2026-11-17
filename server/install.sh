@@ -9,6 +9,7 @@
 # The key line must be "ssh-ed25519 <base64> [comment]" or
 # "ecdsa-sha2-nistp256 <base64> [comment]", with no options in front.
 # The script is idempotent: it replaces every older line for the same key.
+# It also upgrades an older line with permitopen="127.0.0.1:*" to the one slot port.
 #
 # Options:
 #   --user NAME              Account that runs Hermes (default: hermes).
@@ -16,6 +17,8 @@
 #   --gate-dest PATH         Where the gate goes (default: /usr/local/libexec/hermesconnect/hermesconnect-gate).
 #   --no-copy-gate           Do not copy the gate. Use the file at --gate-dest as it is.
 #   --hermes PATH            Pass an explicit Hermes binary to the gate.
+#   --port N                 Fixed Hermes port for this key (1024-65535). Default: the slot
+#                            port, 47100 + (slot as an integer) % 100.
 #   --remove                 Remove the key. Do not add it.
 #   --dry-run                Print the authorized_keys line. Change nothing.
 set -euo pipefail
@@ -25,6 +28,8 @@ AUTH_KEYS=""
 GATE_DEST=/usr/local/libexec/hermesconnect/hermesconnect-gate
 COPY_GATE=1
 HERMES_PATH=""
+PORT=""
+PORT_GIVEN=0
 REMOVE=0
 DRY_RUN=0
 KEY_ARG=""
@@ -40,9 +45,10 @@ while [ $# -gt 0 ]; do
     --gate-dest) [ $# -ge 2 ] || die "--gate-dest needs a value"; GATE_DEST="$2"; shift 2 ;;
     --no-copy-gate) COPY_GATE=0; shift ;;
     --hermes) [ $# -ge 2 ] || die "--hermes needs a value"; HERMES_PATH="$2"; shift 2 ;;
+    --port) [ $# -ge 2 ] || die "--port needs a value"; PORT="$2"; PORT_GIVEN=1; shift 2 ;;
     --remove) REMOVE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     -) [ -z "$KEY_ARG" ] || die "give one key line"; KEY_ARG="-"; shift ;;
     -*) die "unknown option: $1" ;;
     *) [ -z "$KEY_ARG" ] || die "give one key line (quote it)"; KEY_ARG="$1"; shift ;;
@@ -60,8 +66,9 @@ case "$KEY_LINE" in *$'\n'*) die "give exactly one key line" ;; esac
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required (the gate uses it)"
 
-# Check the key and compute the slot (sha256 of the key blob, first 32 hex).
-# The helper prints "<type> <blob> <comment> <slot>" or exits non-zero.
+# Check the key and compute the slot (sha256 of the key blob, first 32 hex) and the
+# slot port (the same rule as the gate). The helper prints
+# "<type> <blob> <comment> <slot> <slot port>" or exits non-zero.
 PARSED="$(python3 -I -c '
 import base64, binascii, hashlib, re, struct, sys
 line = sys.argv[1].strip()
@@ -101,11 +108,18 @@ try:
 except (ValueError, UnicodeDecodeError):
     sys.exit("the key data does not match its type")
 comment = re.sub(r"[^A-Za-z0-9@._+:=-]", "", "-".join(parts[2:]))[:64] or "hermesconnect"
-print(ktype, blob, comment, hashlib.sha256(blob.encode("ascii")).hexdigest()[:32])
+slot = hashlib.sha256(blob.encode("ascii")).hexdigest()[:32]
+print(ktype, blob, comment, slot, 47100 + int(slot, 16) % 100)
 ' "$KEY_LINE")" || die "the public key line is not valid"
-read -r KEY_TYPE KEY_BLOB KEY_COMMENT SLOT <<EOF
+read -r KEY_TYPE KEY_BLOB KEY_COMMENT SLOT SLOT_PORT <<EOF
 $PARSED
 EOF
+
+if [ "$PORT_GIVEN" -eq 0 ]; then
+  PORT="$SLOT_PORT"
+elif ! printf '%s' "$PORT" | grep -Eq '^[1-9][0-9]{3,4}$' || [ "$PORT" -lt 1024 ] || [ "$PORT" -gt 65535 ]; then
+  die "--port must be a number from 1024 to 65535"
+fi
 
 case "$GATE_DEST" in
   /*) ;;
@@ -116,10 +130,11 @@ if [ -n "$HERMES_PATH" ]; then
   printf '%s' "$HERMES_PATH" | grep -Eq '^/[A-Za-z0-9._/-]+$' || die "--hermes must be an absolute path with safe characters"
 fi
 
-GATE_CMD="$GATE_DEST --slot $SLOT"
+GATE_CMD="$GATE_DEST --slot $SLOT --port $PORT"
 [ -z "$HERMES_PATH" ] || GATE_CMD="$GATE_CMD --hermes $HERMES_PATH"
+# permitopen names one port: the phone key reaches only its own hermes serve, not the dashboard or other ports.
 # permitlisten on a privileged port blocks every remote (-R) forward: the phone key gets no reverse tunnel.
-OPTIONS="restrict,port-forwarding,permitopen=\"127.0.0.1:*\",permitlisten=\"127.0.0.1:1\",command=\"$GATE_CMD\""
+OPTIONS="restrict,port-forwarding,permitopen=\"127.0.0.1:$PORT\",permitlisten=\"127.0.0.1:1\",command=\"$GATE_CMD\""
 NEW_LINE="$OPTIONS $KEY_TYPE $KEY_BLOB $KEY_COMMENT"
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -169,6 +184,14 @@ if [ ! -d "$SSH_DIR" ]; then
 fi
 [ -e "$AUTH_KEYS" ] || : > "$AUTH_KEYS"
 [ -f "$AUTH_KEYS" ] && [ ! -L "$AUTH_KEYS" ] || die "$AUTH_KEYS is not a regular file"
+
+# Two phone keys must not share a port: the second serve would get "port-busy".
+if [ "$REMOVE" -eq 0 ] && awk -v blob="$KEY_BLOB" -v want="permitopen=\"127.0.0.1:$PORT\"" '
+    { mine = 0; for (i = 1; i <= NF; i++) if ($i == blob) mine = 1 }
+    !mine && index($0, want) { found = 1 }
+    END { exit found ? 0 : 1 }' "$AUTH_KEYS"; then
+  die "port $PORT is in use by another key in $AUTH_KEYS. Give another port with --port"
+fi
 
 # Keep every line that does not hold this key blob, then add the new line.
 TMP_KEYS="$(mktemp "$SSH_DIR/.authorized_keys.XXXXXX")"

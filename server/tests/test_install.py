@@ -3,15 +3,16 @@
 import base64
 import hashlib
 import os
+import re
 import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 
-from support import GATE, INSTALL
+from support import GATE, INSTALL, slot_port
 
-OPTIONS = 'restrict,port-forwarding,permitopen="127.0.0.1:*",permitlisten="127.0.0.1:1",command="'
+OPTIONS = 'restrict,port-forwarding,permitopen="127.0.0.1:%d",permitlisten="127.0.0.1:1",command="'
 
 
 def ssh_string(data):
@@ -52,9 +53,11 @@ class InstallTests(unittest.TestCase):
         with open(self.keys) as stream:
             return stream.read().splitlines()
 
-    def expected_line(self, blob=None, key_type="ssh-ed25519", comment="owner@iPhone", extra=""):
+    def expected_line(self, blob=None, key_type="ssh-ed25519", comment="owner@iPhone", extra="", port=None):
         blob = blob or self.blob
-        return '%s%s --slot %s%s" %s %s %s' % (OPTIONS, self.gate_dest, slot_of(blob), extra, key_type, blob, comment)
+        port = port or slot_port(slot_of(blob))
+        return '%s%s --slot %s --port %d%s" %s %s %s' % (OPTIONS % port, self.gate_dest, slot_of(blob), port, extra,
+                                                       key_type, blob, comment)
 
     def test_install_writes_restricted_line_and_gate(self):
         result = self.install(self.line)
@@ -74,7 +77,56 @@ class InstallTests(unittest.TestCase):
         for enabler in ("pty", "agent-forwarding", "X11-forwarding", "user-rc", "no-restrict"):
             self.assertNotIn("," + enabler, options)
         self.assertEqual(options.count("permitopen="), 1)
-        self.assertIn('permitopen="127.0.0.1:*"', options)
+        self.assertIn('permitopen="127.0.0.1:%d"' % slot_port(slot_of(self.blob)), options)
+
+    def test_key_line_names_exactly_one_port(self):
+        self.assertEqual(self.install(self.line).returncode, 0)
+        line = self.lines()[0]
+        self.assertNotIn("*", line)
+        opened = re.findall(r'permitopen="([^"]*)"', line)
+        self.assertEqual(len(opened), 1, line)
+        self.assertRegex(opened[0], r"^127\.0\.0\.1:\d+$")
+        port = int(opened[0].split(":")[1])
+        self.assertTrue(47100 <= port <= 47199, port)
+        command = line.split('command="', 1)[1].split('"', 1)[0].split()
+        self.assertEqual(command[command.index("--port") + 1], str(port), "the gate serves on the opened port")
+        self.assertEqual(command.count("--port"), 1)
+
+    def test_star_line_is_upgraded_in_place(self):
+        os.makedirs(os.path.dirname(self.keys), 0o700)
+        admin = "ssh-ed25519 %s admin@laptop" % ed25519_blob(9)
+        old = ('restrict,port-forwarding,permitopen="127.0.0.1:*",permitlisten="127.0.0.1:1",'
+               'command="%s --slot %s" ssh-ed25519 %s owner@iPhone' % (self.gate_dest, slot_of(self.blob), self.blob))
+        with open(self.keys, "w") as out:
+            out.write("%s\n%s\n" % (admin, old))
+        result = self.install(self.line)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.lines(), [admin, self.expected_line()])
+        with open(self.keys) as stream:
+            self.assertNotIn('127.0.0.1:*', stream.read())
+
+    def test_port_option_sets_the_one_port(self):
+        result = self.install("--port", "47555", self.line)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.lines(), [self.expected_line(port=47555)])
+
+    def test_bad_port_option_is_refused(self):
+        for port in ("0", "80", "1023", "65536", "abc", "4710 0", "+47100", "047100", ""):
+            with self.subTest(port=port):
+                result = self.install("--port", port, self.line)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertFalse(os.path.exists(self.keys))
+
+    def test_port_of_another_key_is_refused(self):
+        self.assertEqual(self.install("--port", "47150", self.line).returncode, 0)
+        other = "ssh-ed25519 %s other" % ed25519_blob(5)
+        result = self.install("--port", "47150", other)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"--port", result.stderr)
+        self.assertEqual(self.lines(), [self.expected_line(port=47150)])
+        # The same key can keep its own port.
+        again = self.install("--port", "47150", self.line)
+        self.assertEqual(again.returncode, 0, again.stderr)
 
     def test_install_is_idempotent(self):
         self.assertEqual(self.install(self.line).returncode, 0)
@@ -159,10 +211,11 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.install(self.line).returncode, 0)
         command = self.lines()[0].split('command="', 1)[1].split('"', 1)[0].split()
         self.assertEqual(command[:2], [self.gate_dest, "--slot"])
+        self.assertEqual(command[3:5], ["--port", str(slot_port(slot_of(self.blob)))])
         env = {"HOME": self.tmp, "PATH": "/usr/bin:/bin", "SSH_ORIGINAL_COMMAND": "ping"}
         result = subprocess.run([sys.executable] + command, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, timeout=60)
-        self.assertEqual(result.stdout, b"PONG 1\n", result.stderr)
+        self.assertEqual(result.stdout, b"PONG 2\n", result.stderr)
 
 
 if __name__ == "__main__":
