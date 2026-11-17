@@ -247,3 +247,35 @@ private struct FailingKeyStore: DeviceKeyStore {
         #expect(TrustServerSheet.hostKeyFile(for: ecdsa) == "ssh_host_ecdsa_key.pub")
     }
 }
+
+@MainActor
+@Suite struct ChatScreenTests {
+    private let messages = [
+        ChatMessage(id: "1", role: .user, text: "hi **there**", date: .now, delivery: .delivered),
+        ChatMessage(id: "2", role: .assistant, text: "See [docs](https://example.com)", date: .now, reply: .complete),
+    ]
+
+    @Test func controllerShowsOneSectionPerMessage() {
+        let controller = ChatViewController(model: ChatViewModel(transport: OfflineChatTransport(), messages: messages))
+        controller.loadViewIfNeeded()
+        #expect(controller.messagesCollectionView.numberOfSections == 2)
+    }
+
+    @Test func bubbleTextStylesMarkdownAndKeepsLinks() throws {
+        let traits = UITraitCollection(preferredContentSizeCategory: .large)
+        let outgoing = ChatBubbleText.make(messages[0], traits: traits)
+        #expect(outgoing.string == "hi there")
+        let bold = try #require(outgoing.attribute(.font, at: 4, effectiveRange: nil) as? UIFont)
+        #expect(bold.fontDescriptor.symbolicTraits.contains(.traitBold))
+        let incoming = ChatBubbleText.make(messages[1], traits: traits)
+        #expect(incoming.string == "See docs")
+        #expect(incoming.attribute(ChatBubbleText.linkKey, at: 5, effectiveRange: nil) as? URL
+            == URL(string: "https://example.com"))
+    }
+
+    @Test func offlineTransportFailsTheSend() async {
+        let model = ChatViewModel(transport: OfflineChatTransport())
+        await model.send("hello")?.value
+        #expect(model.messages.first?.delivery == .failed)
+    }
+}
