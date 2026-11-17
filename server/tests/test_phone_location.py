@@ -163,16 +163,91 @@ class FreshFixTests(PluginTestCase):
         self.assertAlmostEqual(self.call()["minutes_ago"], 3, delta=0.2)
 
 
-class FallbackTests(PluginTestCase):
-    def test_stale_fix_uses_findmy(self):
+class NotMovedTests(PluginTestCase):
+    """Issue #51 (owner decision): no newer phone fix means "not moved". The old fix wins over Find My."""
+
+    def test_old_background_fix_is_used_instead_of_findmy(self):
+        # The VPS test: a background fix, 86 minutes old, 1000 m, no speed or course. Find My is 2 minutes old.
         self.install_findmy(age=2)
+        self.write_fix(record(minutes_ago=86, accuracy_m=1000, speed=None, course=None))
+        result = self.call()
+        self.assertEqual(result["source"], "hermesconnect")
+        self.assertEqual((result["latitude"], result["longitude"]), (37.3349, -122.009))
+        self.assertEqual(result["accuracy_m"], 1000)
+        self.assertAlmostEqual(result["minutes_ago"], 86, delta=0.2)
+        self.assertTrue(result["stale"])
+        self.assertTrue(result["not_moved"])
+        self.assertNotIn("phone_fix", result)
+        self.assertIn("86 minutes old", result["note"])
+        self.assertIn("1000 m", result["note"])
+        self.assertIn("probably has not moved", result["note"])
+        self.assertEqual(self.findmy_calls(), 0, "an old valid phone fix must not call Find My")
+
+    def test_fix_just_over_30_minutes_is_not_moved(self):
+        self.install_findmy()
+        self.write_fix(record(minutes_ago=30.5))
+        result = self.call()
+        self.assertEqual(result["source"], "hermesconnect")
+        self.assertTrue(result["not_moved"])
+        self.assertEqual(self.findmy_calls(), 0)
+
+    def test_a_fix_up_to_12_hours_old_probably_has_not_moved(self):
+        self.write_fix(record(minutes_ago=11.9 * 60, accuracy_m=65))
+        result = self.call()
+        self.assertTrue(result["not_moved"])
+        self.assertIn("about 12 hours old", result["note"])
+        self.assertIn("65 m", result["note"])
+        self.assertIn("probably has not moved", result["note"])
+
+    def test_a_fix_over_12_hours_old_is_the_last_known_location(self):
+        # QA #53 risk 3 (main decision): no "not moved" claim after 12 hours. Keep the coordinates, no Find My.
+        self.install_findmy()
+        self.write_fix(record(minutes_ago=3 * 24 * 60))
+        result = self.call()
+        self.assertEqual(result["source"], "hermesconnect")
+        self.assertEqual((result["latitude"], result["longitude"]), (37.3349, -122.009))
+        self.assertAlmostEqual(result["minutes_ago"], 3 * 24 * 60, delta=0.2)
+        self.assertTrue(result["stale"])
+        self.assertFalse(result["not_moved"])
+        self.assertIn("Last known phone location, about 3 days old, may be out of date.", result["note"])
+        self.assertNotIn("not moved", result["note"])
+        self.assertEqual(self.findmy_calls(), 0)
+
+    def test_the_arrival_time_of_a_visit_is_in_the_result(self):
+        arrived = iso(datetime.now(timezone.utc) - timedelta(minutes=50))
+        self.write_fix(record(minutes_ago=50, arrived_at=arrived))
+        result = self.call()
+        self.assertEqual(result["arrived_at"], arrived[:19] + "Z")
+        self.assertIn("arrived at this place", result["note"])
+        self.write_fix(record(minutes_ago=5, arrived_at=None))
+        self.assertNotIn("arrived_at", self.call())
+        self.write_fix(record(minutes_ago=5, arrived_at="soon"))
+        result = self.call()
+        self.assertEqual(result["source"], "hermesconnect")
+        self.assertNotIn("arrived_at", result)
+
+    def test_fresh_fix_is_not_marked_not_moved(self):
+        self.write_fix(record(minutes_ago=5))
+        self.assertNotIn("not_moved", self.call())
+
+    def test_old_fix_without_findmy_needs_no_setup_hint(self):
         self.write_fix(record(minutes_ago=45))
         result = self.call()
-        self.assertEqual(result["source"], "findmy")
-        self.assertEqual((result["latitude"], result["longitude"]), (40.0, -74.0))
-        self.assertFalse(result["stale"])
-        self.assertEqual(result["phone_fix"], "stale: 45 minutes old")
-        self.assertEqual(self.findmy_calls(), 1)
+        self.assertEqual(result["source"], "hermesconnect")
+        self.assertTrue(result["not_moved"])
+        self.assertIn("45 minutes old", result["note"])
+        self.assertNotIn("Find My", result["note"])
+
+    def test_schema_says_find_my_is_only_for_a_missing_or_invalid_fix(self):
+        description = self.plugin.SCHEMA["description"]
+        self.assertIn("missing or not valid", description)
+        self.assertNotIn("more than 30 minutes old, the tool uses Find My", description)
+        self.assertIn("not_moved", description)
+        self.assertIn("12 hours", description)
+        self.assertIn("arrived_at", description)
+
+
+class FallbackTests(PluginTestCase):
 
     def test_missing_fix_uses_findmy(self):
         self.install_findmy()
@@ -187,35 +262,19 @@ class FallbackTests(PluginTestCase):
         self.install_findmy(root=profile)
         self.assertEqual(self.call()["source"], "findmy")
 
-    def test_findmy_that_is_older_than_the_stale_fix_is_not_used(self):
-        self.install_findmy(age=120)
-        self.write_fix(record(minutes_ago=45))
-        result = self.call()
-        self.assertEqual(result["source"], "hermesconnect")
-        self.assertTrue(result["stale"])
-        self.assertIn("Find My is older", result["note"])
-
     def test_old_findmy_result_is_marked_stale(self):
         self.install_findmy(age=90)
         result = self.call()
         self.assertEqual(result["source"], "findmy")
         self.assertTrue(result["stale"])
 
-    def test_stale_fix_without_findmy_is_returned_with_a_note(self):
-        self.write_fix(record(minutes_ago=45))
-        result = self.call()
-        self.assertEqual(result["source"], "hermesconnect")
-        self.assertTrue(result["stale"])
-        self.assertIn("45 minutes old", result["note"])
-        self.assertIn("Find My is not installed", result["note"])
-        self.assertIn("HermesConnect app", result["note"])
-
-    def test_stale_fix_with_findmy_error_gives_the_reason(self):
+    def test_invalid_fix_with_findmy_error_gives_the_reason(self):
         self.install_findmy(mode="error")
-        self.write_fix(record(minutes_ago=45))
+        self.write_fix("lat=1")
         result = self.call()
-        self.assertTrue(result["stale"])
-        self.assertIn("not sharing a location", result["note"])
+        self.assertEqual(set(result), {"error"})
+        self.assertIn("not sharing a location", result["error"])
+        self.assertIn("the phone location file is not valid", result["error"])
 
     def test_missing_fix_without_findmy_says_how_to_turn_on_sharing(self):
         result = self.call()
@@ -246,6 +305,7 @@ class FallbackTests(PluginTestCase):
             "timestamp missing": {k: v for k, v in record().items() if k != "timestamp"},
             "timestamp no zone": record(timestamp="2026-11-16T12:00:00"),
             "timestamp unix": record(timestamp=1763294400),
+            "timestamp before 2025": record(timestamp="2024-12-31T23:59:59.000Z"),
             "too large": json.dumps(record()) + " " * 70000,
         }
         for name, value in cases.items():
@@ -311,10 +371,9 @@ class FallbackTests(PluginTestCase):
     def test_findmy_not_set_up_is_not_called(self):
         self.install_findmy()
         os.environ["FAKE_FINDMY_AVAILABLE"] = "0"
-        self.write_fix(record(minutes_ago=45))
         result = self.call()
-        self.assertEqual(result["source"], "hermesconnect")
-        self.assertIn("Find My is not set up", result["note"])
+        self.assertEqual(set(result), {"error"})
+        self.assertIn("Find My is not set up", result["error"])
         self.assertEqual(self.findmy_calls(), 0, "the findmy handler must not run")
 
     def test_findmy_available_check_that_fails_is_not_set_up(self):
@@ -358,7 +417,8 @@ class FallbackTests(PluginTestCase):
 class GateToPluginTests(GateTestCase):
     def test_fix_stored_by_the_gate_is_read_by_the_plugin(self):
         moment = datetime.now(timezone.utc) - timedelta(minutes=4)
-        fix = {"lat": 51.5007, "lon": -0.1246, "accuracy_m": 8, "timestamp": iso(moment), "speed": None}
+        fix = {"lat": 51.5007, "lon": -0.1246, "accuracy_m": 8, "timestamp": iso(moment), "speed": None,
+               "arrived_at": iso(moment)}
         result = self.gate("location", stdin=json.dumps(fix).encode())
         self.assertEqual(result.stdout, b"OK\n", result.stderr)
         with mock.patch.dict(os.environ, {"HOME": self.home}), mock.patch.dict(sys.modules, fake_registry()):
@@ -368,6 +428,7 @@ class GateToPluginTests(GateTestCase):
         self.assertEqual((data["latitude"], data["longitude"], data["accuracy_m"]), (51.5007, -0.1246, 8))
         self.assertAlmostEqual(data["minutes_ago"], 4, delta=0.2)
         self.assertFalse(data["stale"])
+        self.assertEqual(data["arrived_at"], iso(moment)[:19] + "Z")
 
 
 class RegistrationTests(unittest.TestCase):

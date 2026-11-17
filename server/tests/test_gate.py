@@ -17,7 +17,7 @@ class CommandAllowListTests(GateTestCase):
     def test_ping_prints_gate_version(self):
         result = self.gate("ping")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, b"PONG 2\n")
+        self.assertEqual(result.stdout, b"PONG 3\n")
 
     def test_shell_login_without_command_is_refused(self):
         result = self.gate(None)
@@ -35,7 +35,7 @@ class CommandAllowListTests(GateTestCase):
                 result = self.gate(request)
                 if request == "ping ":
                     # Surrounding blanks are not part of the command name.
-                    self.assertEqual(result.stdout, b"PONG 2\n")
+                    self.assertEqual(result.stdout, b"PONG 3\n")
                     continue
                 self.assertEqual(result.returncode, 2, result.stdout)
                 self.assertEqual(result.stdout, b"")
@@ -53,11 +53,11 @@ class CommandAllowListTests(GateTestCase):
 
     def test_slot_option_is_accepted(self):
         result = self.gate("ping", options=["--slot", "0" * 32, "--hermes", self.hermes])
-        self.assertEqual(result.stdout, b"PONG 2\n")
+        self.assertEqual(result.stdout, b"PONG 3\n")
 
     def test_port_option_is_accepted(self):
         result = self.gate("ping", options=["--slot", "0" * 32, "--port", "47150", "--hermes", self.hermes])
-        self.assertEqual(result.stdout, b"PONG 2\n", result.stderr)
+        self.assertEqual(result.stdout, b"PONG 3\n", result.stderr)
 
 
 class ServeTests(GateTestCase):
@@ -412,6 +412,26 @@ class LocationTests(GateTestCase):
         self.assertIsNone(self.stored()["speed"])
         self.assertEqual(self.send(fix(timestamp="2026-11-16T12:00:01Z", speed=None, course=None)).stdout, b"OK\n")
         self.assertIsNone(self.stored()["course"])
+
+    def test_arrival_time_of_a_visit_is_stored(self):
+        # QA #53 defect 1: the app sends when the owner arrived at a place (gate 3).
+        result = self.send(fix(arrived_at="2026-11-16T11:15:00.250Z"))
+        self.assertEqual(result.stdout, b"OK\n", result.stderr)
+        self.assertEqual(self.stored()["arrived_at"], "2026-11-16T11:15:00.250Z")
+        self.assertEqual(self.send(fix(timestamp="2026-11-16T12:00:01Z", arrived_at=None)).stdout, b"OK\n")
+        self.assertIsNone(self.stored()["arrived_at"])
+        self.assertEqual(self.send(fix(timestamp="2026-11-16T12:00:02Z")).stdout, b"OK\n")
+        self.assertIsNone(self.stored()["arrived_at"])
+
+    def test_invalid_arrival_time_is_refused(self):
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for name, value in {"no zone": "2026-11-16T11:00:00", "text": "this morning", "bool": True,
+                            "future": future, "year 1": "0001-01-01T00:00:00+05:00"}.items():
+            with self.subTest(case=name):
+                result = self.send(fix(arrived_at=value))
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(b"ERROR bad-location", result.stderr)
+        self.assertFalse(os.path.exists(self.path("hermesconnect", "location.json")))
 
     def test_timestamp_forms(self):
         cases = {

@@ -357,6 +357,103 @@ private extension LocationFix {
         #expect(last["lat"] as? Double == 37.355)
     }
 
+    // Issue #51: the `phone_location` plugin refuses a fix older than 30 min, so the app never sends one.
+
+    @Test func aSavedFixOlderThanThirtyMinutesIsDroppedOnFlush() async {
+        let uploader = ScriptedLocationUploader()
+        // The VPS test: an unsent fix from 86 min ago waits for the next connect.
+        let store = InMemoryLocationStateStore(LocationShareState(pending: fix(), lastError: "The server is not reachable."))
+        let sharing = make(uploader: uploader, store: store, clock: TestClock(t0.addingTimeInterval(86 * 60)))
+        #expect(await sharing.flush(precision: .precise) == .nothing)
+        #expect(uploader.payloads.isEmpty)
+        #expect(store.load().pending == nil)
+        #expect(await sharing.status.waitingForConnection == false)
+    }
+
+    @Test func aSavedFixYoungerThanThirtyMinutesIsSent() async {
+        let uploader = ScriptedLocationUploader()
+        let store = InMemoryLocationStateStore(LocationShareState(pending: fix()))
+        let sharing = make(uploader: uploader, store: store, clock: TestClock(t0.addingTimeInterval(29 * 60)))
+        #expect(await sharing.flush(precision: .precise) == .sent)
+        #expect(uploader.payloads.count == 1)
+    }
+
+    @Test func anOldFixFromCoreLocationIsNotSentEvenWhenForced() async {
+        let uploader = ScriptedLocationUploader()
+        let store = InMemoryLocationStateStore()
+        let sharing = make(uploader: uploader, store: store, clock: TestClock(t0.addingTimeInterval(31 * 60)))
+        #expect(await sharing.submit(fix(), precision: .precise) == .nothing)
+        #expect(await sharing.submit(fix(), precision: .precise, force: true) == .nothing)
+        #expect(uploader.payloads.isEmpty)
+        #expect(store.load().pending == nil)
+    }
+
+    @Test func aFixThatAgesWhileItWaitsIsDropped() async {
+        let uploader = ScriptedLocationUploader(failure: .connection(.unreachable))
+        let store = InMemoryLocationStateStore()
+        let clock = TestClock(t0)
+        let sharing = make(uploader: uploader, store: store, clock: clock)
+        _ = await sharing.submit(fix(), precision: .precise)
+        #expect(store.load().pending == fix())
+        uploader.failure = nil
+        clock.advance(31 * 60)
+        #expect(await sharing.flush(precision: .precise) == .nothing)
+        #expect(uploader.payloads.count == 1)
+        #expect(store.load().pending == nil)
+    }
+
+    // QA #53 defect 1: iOS often delivers an arrival visit late. The 30 min limit counts from the delivery.
+
+    private func visit(arrivedMinutesAgo minutes: Double, departure: Date = .distantFuture, deliveredAt now: Date) -> LocationFix {
+        LocationFix(visitLatitude: 40.0, longitude: -74.0, horizontalAccuracy: 65,
+                    arrival: now.addingTimeInterval(-minutes * 60), departure: departure, now: now)!
+    }
+
+    @Test func aLateArrivalVisitIsSentWithTheArrivalTime() async throws {
+        let uploader = ScriptedLocationUploader()
+        let now = t0.addingTimeInterval(3 * 3600)
+        let sharing = make(uploader: uploader, clock: TestClock(now))
+        let late = visit(arrivedMinutesAgo: 45, deliveredAt: now)
+        #expect(await sharing.submit(late, precision: .precise) == .sent)
+        let body = try json(try #require(uploader.payloads.first))
+        #expect(body["arrived_at"] as? String == LocationPayload.timestampText(now.addingTimeInterval(-45 * 60)))
+        #expect(body["timestamp"] as? String == LocationPayload.timestampText(now.addingTimeInterval(-45 * 60)))
+    }
+
+    @Test func aVisitThatWaitsMoreThanThirtyMinutesAfterDeliveryIsDropped() async {
+        let uploader = ScriptedLocationUploader(failure: .connection(.unreachable))
+        let store = InMemoryLocationStateStore()
+        let clock = TestClock(t0)
+        let sharing = make(uploader: uploader, store: store, clock: clock)
+        _ = await sharing.submit(visit(arrivedMinutesAgo: 5, deliveredAt: t0), precision: .precise)
+        uploader.failure = nil
+        clock.advance(29 * 60)
+        #expect(await sharing.flush(precision: .precise) == .sent)
+        _ = await make(uploader: ScriptedLocationUploader(failure: .timedOut), store: store, clock: clock)
+            .submit(visit(arrivedMinutesAgo: 1, deliveredAt: clock.now), precision: .precise)
+        clock.advance(31 * 60)
+        #expect(await make(uploader: uploader, store: store, clock: clock).flush(precision: .precise) == .nothing)
+        #expect(uploader.payloads.count == 2)
+    }
+
+    @Test func aDepartureVisitHasNoArrivalTime() throws {
+        let now = t0.addingTimeInterval(3600)
+        let departed = visit(arrivedMinutesAgo: 50, departure: now.addingTimeInterval(-600), deliveredAt: now)
+        let body = try json(LocationPayload.encode(departed, precision: .precise))
+        #expect(body["arrived_at"] == nil)
+        #expect(body["timestamp"] as? String == LocationPayload.timestampText(now.addingTimeInterval(-600)))
+        // A plain Core Location fix has no arrival time either.
+        #expect(try json(LocationPayload.encode(fix(), precision: .precise))["arrived_at"] == nil)
+    }
+
+    @Test func savedFixesWithoutTheNewFieldsStillDecode() throws {
+        let text = #"{"pending":{"latitude":1,"longitude":2,"horizontalAccuracy":5,"timestamp":0}}"#
+        let state = try JSONDecoder().decode(LocationShareState.self, from: Data(text.utf8))
+        let pending = try #require(state.pending)
+        #expect(pending.latitude == 1)
+        #expect(pending.timestamp == Date(timeIntervalSinceReferenceDate: 0))
+    }
+
     @Test func oldStateFilesDecodeWithDefaults() throws {
         let state = try JSONDecoder().decode(LocationShareState.self, from: Data(#"{"lastError":"x","extra":1}"#.utf8))
         #expect(state.version == 1)
@@ -398,6 +495,22 @@ private extension LocationFix {
         #expect(transport.record.forwardPorts.isEmpty)
         #expect(transport.record.spawns == 0)
         #expect(GateCommand.location.rawValue == "location")
+    }
+
+    // QA #53 defect 1: gate 2 and older refuse unknown fields, so the uploader leaves out `arrived_at` for them.
+
+    @Test func anOlderGateGetsThePayloadWithoutTheArrivalTime() async throws {
+        let payload = Data(#"{"accuracy_m":65,"arrived_at":"2026-11-16T12:00:00.000Z","lat":40,"lon":-74,"timestamp":"2026-11-16T12:00:00.000Z"}"#.utf8)
+        for version in ["1", "2"] {
+            let transport = ScriptedSSHTransport(hostKey: .sample, pingReply: .success("PONG \(version)\n"))
+            try await uploader(transport).upload(payload)
+            let sent = try json(try #require(transport.record.stdins.last ?? nil))
+            #expect(sent["arrived_at"] == nil, "gate \(version)")
+            #expect(Set(sent.keys) == ["accuracy_m", "lat", "lon", "timestamp"])
+        }
+        let current = ScriptedSSHTransport(hostKey: .sample, pingReply: .success("PONG 3\n"))
+        try await uploader(current).upload(payload)
+        #expect(current.record.stdins == [nil, payload])
     }
 
     @Test func noPinnedKeyNeverAuthenticates() async {

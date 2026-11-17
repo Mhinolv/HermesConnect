@@ -217,7 +217,7 @@ class InstallTests(unittest.TestCase):
         env = {"HOME": self.tmp, "PATH": "/usr/bin:/bin", "SSH_ORIGINAL_COMMAND": "ping"}
         result = subprocess.run([sys.executable] + command, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, timeout=60)
-        self.assertEqual(result.stdout, b"PONG 2\n", result.stderr)
+        self.assertEqual(result.stdout, b"PONG 3\n", result.stderr)
 
 
 if __name__ == "__main__":

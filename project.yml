@@ -15,6 +15,10 @@ packages:
   MessageKit:
     url: https://github.com/MessageKit/MessageKit
     from: 5.0.0
+  # Issue #44: Parakeet on Core ML (Apache-2.0). The model downloads only when the owner taps Download.
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio
+    exactVersion: 0.18.3
 targets:
   HermesConnect:
     type: application
@@ -23,6 +27,7 @@ targets:
     dependencies:
       - package: HermesKit
       - package: MessageKit
+      - package: FluidAudio
     info:
       path: HermesConnect/Resources/Info.plist
       properties:
@@ -32,6 +37,7 @@ targets:
         NSMicrophoneUsageDescription: Hermes records voice memos that you send to your agent.
         NSPhotoLibraryUsageDescription: Hermes attaches photos that you choose to your messages.
         NSCameraUsageDescription: Hermes uses the camera to take photos that you send to your agent.
+        NSSpeechRecognitionUsageDescription: Hermes transcribes your voice memos on this iPhone.
         NSFaceIDUsageDescription: Hermes uses Face ID to unlock the app.
         NSLocationWhenInUseUsageDescription: Hermes sends your location to your own Hermes server so that your agent can answer location questions.
         NSLocationAlwaysAndWhenInUseUsageDescription: Hermes sends your location in the background, when you move a long distance or arrive at a place.

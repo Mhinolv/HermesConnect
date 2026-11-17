@@ -13,13 +13,22 @@ final class FakeNotificationCenter: NotificationCentering, @unchecked Sendable {
     private var _added: [UNNotificationRequest] = []
     private var _badges: [Int] = []
 
-    init(status: UNAuthorizationStatus = .notDetermined) { _status = status }
+    /// How long `authorizationStatus()` takes. A real center answers over XPC, so it is not instant.
+    private let statusDelay: Duration
+
+    init(status: UNAuthorizationStatus = .notDetermined, statusDelay: Duration = .zero) {
+        _status = status
+        self.statusDelay = statusDelay
+    }
 
     var requests: [UNAuthorizationOptions] { lock.withLock { _requests } }
     var added: [UNNotificationRequest] { lock.withLock { _added } }
     var badges: [Int] { lock.withLock { _badges } }
 
-    func authorizationStatus() async -> UNAuthorizationStatus { lock.withLock { _status } }
+    func authorizationStatus() async -> UNAuthorizationStatus {
+        if statusDelay > .zero { try? await Task.sleep(for: statusDelay) }
+        return lock.withLock { _status }
+    }
 
     func requestAuthorization(options: UNAuthorizationOptions) async throws -> Bool {
         lock.withLock {
@@ -100,13 +109,17 @@ private func freshDefaults(_ name: String) -> UserDefaults {
         #expect(request.content.userInfo[LocalNotificationPoster.sessionIdKey] as? String == "k1")
     }
 
-    @Test func permissionIsAskedOnceAfterTheFirstReply() async throws {
-        let center = FakeNotificationCenter()
-        let defaults = freshDefaults("CatchUpAppTests.ask")
+    @Test(arguments: [Duration.zero, .milliseconds(50)])
+    func permissionIsAskedOnceAfterTheFirstReply(statusDelay: Duration) async throws {
+        let center = FakeNotificationCenter(statusDelay: statusDelay)
+        // One suite per case: the two cases can run at the same time.
+        let defaults = freshDefaults("CatchUpAppTests.ask.\(statusDelay.components.attoseconds)")
         let controller = NotificationController(center: center, defaults: defaults)
         #expect(center.requests.isEmpty)
         controller.requestAfterFirstReply()
-        try await waitFor { center.requests.count == 1 }
+        // Wait for the end of the whole request. `requests` grows inside the center call, before the
+        // controller reads the new status. A check at that point raced with `refreshStatus()`.
+        try await waitFor { center.requests.count == 1 && controller.status == .authorized }
         #expect(center.requests == [[.alert, .sound, .badge]])
         #expect(controller.status == .authorized)
         controller.requestAfterFirstReply()
