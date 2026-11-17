@@ -156,6 +156,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         let model: AppModel
         let transport: ScriptedSSHTransport
         let profiles: InMemoryServerProfileStore
+        let http: ScriptedHermesHTTP
     }
 
     private func makeModel(pin: HostKey? = nil, serverKey: HostKey = .sample,
@@ -163,11 +164,14 @@ private struct FailingKeyStore: DeviceKeyStore {
         let keyStore = KeychainDeviceKeyStore(secrets: InMemorySecretStore(), factory: SoftwareKeyFactory())
         let profiles = InMemoryServerProfileStore(ServerProfile(host: "vps.example.com", hostKey: pin))
         let transport = ScriptedSSHTransport(hostKey: serverKey, connectFailure: failure)
+        let http = ScriptedHermesHTTP()
+        let serve = ServeBootstrap(loader: http, configuration: .init(serveTimeout: .seconds(5), healthAttempts: 1,
+                                                                      healthRetryDelay: .milliseconds(1)))
         let model = AppModel(keyStore: keyStore, profileStore: profiles,
                              defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!,
-                             deviceName: "Test iPhone", transport: transport)
+                             deviceName: "Test iPhone", transport: transport, serve: serve)
         await model.ensureKey()
-        return Setup(model: model, transport: transport, profiles: profiles)
+        return Setup(model: model, transport: transport, profiles: profiles, http: http)
     }
 
     @Test func firstConnectAsksForTrustAndSavesNothing() async throws {
@@ -187,7 +191,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         #expect(try setup.profiles.load()?.hostKey == .sample)
         #expect(setup.model.connection == .connected(gateVersion: "1"))
         #expect(setup.transport.record.authentications == 1)
-        #expect(setup.transport.record.commands == [.ping])
+        #expect(setup.transport.record.commands == [.ping, .serve])
     }
 
     @Test func cancelStopsTheConnectAndShowsOffline() async throws {
@@ -239,6 +243,94 @@ private struct FailingKeyStore: DeviceKeyStore {
         try setup.model.saveProfile(profile)
         #expect(setup.model.profile?.hostKey == nil)
         #expect(setup.model.connection == .idle)
+    }
+
+    // MARK: Issue #4: Hermes serve bootstrap
+
+    @Test func connectStartsHermesAndGivesTheLoopbackEndpoint() async throws {
+        let setup = await makeModel(pin: .sample)
+        await setup.model.connect()
+        #expect(setup.model.connection == .connected(gateVersion: "1"))
+        #expect(setup.transport.record.commands == [.ping, .serve])
+        #expect(setup.transport.record.forwardPorts == [41_001])
+        let endpoint = try #require(setup.model.hermesEndpoint)
+        #expect(endpoint.baseURL.host() == "127.0.0.1")
+        #expect(setup.http.paths == ["/api/health", "/api/ssh/ownership"])
+    }
+
+    @Test func reconnectReusesTheServerWithTheSameToken() async throws {
+        let setup = await makeModel(pin: .sample)
+        await setup.model.connect()
+        let first = try #require(setup.transport.record.stdins.last ?? nil)
+        await setup.model.disconnect()
+        #expect(setup.model.hermesEndpoint == nil)
+        #expect(setup.transport.record.closedForwards == 1)
+        await setup.model.connect()
+        #expect(setup.model.connection == .connected(gateVersion: "1"))
+        #expect(setup.transport.record.stdins.last == first)
+        #expect(setup.transport.record.spawns == 1)
+        #expect(setup.transport.record.reuses == 1)
+    }
+
+    @Test func renewSendsANewToken() async throws {
+        let setup = await makeModel(pin: .sample)
+        await setup.model.connect()
+        let first = try #require(setup.transport.record.stdins.last ?? nil)
+        await setup.model.renewHermesSession()
+        #expect(setup.model.connection == .connected(gateVersion: "1"))
+        #expect(setup.transport.record.stdins.last != first)
+        #expect(setup.transport.record.spawns == 2)
+    }
+
+    @Test(arguments: ["hermes-not-found", "update-required", "not-allowed", "bad-token", "exit 2"])
+    func gateRefusalIsNotStarted(code: String) async {
+        let setup = await makeModel(pin: .sample)
+        setup.transport.serveFailure = .gateError(code)
+        await setup.model.connect()
+        #expect(setup.model.connection == .notStarted(.gateError(code)))
+        #expect(setup.model.hermesEndpoint == nil)
+        #expect(setup.transport.record.closedSessions == 1)
+        #expect(!setup.model.showsHermesStartError)
+    }
+
+    @Test(arguments: ["serve-timeout", "serve-exited", "update-in-progress"])
+    func busyServerIsOffline(code: String) async {
+        let setup = await makeModel(pin: .sample)
+        setup.transport.serveFailure = .gateError(code)
+        await setup.model.connect()
+        #expect(setup.model.connection == .offline(.gateError(code)))
+    }
+
+    @Test func refusedKeyIsNotStarted() async {
+        let setup = await makeModel(pin: .sample, failure: .authenticationFailed)
+        await setup.model.connect()
+        #expect(setup.model.connection == .notStarted(.authenticationFailed))
+    }
+
+    @Test func noHealthAnswerIsOffline() async {
+        let setup = await makeModel(pin: .sample)
+        setup.http.healthy = false
+        await setup.model.connect()
+        #expect(setup.model.connection == .offline(.hermesNotReady))
+        #expect(setup.model.hermesEndpoint == nil)
+        #expect(setup.transport.record.closedForwards == 1)
+    }
+
+    @Test func rejectedTokenIsOfflineAndTheRetryUsesANewToken() async throws {
+        let setup = await makeModel(pin: .sample)
+        setup.http.ownershipStatus = 401
+        await setup.model.connect()
+        #expect(setup.model.connection == .offline(.sessionTokenRejected))
+        let first = try #require(setup.transport.record.stdins.last ?? nil)
+        setup.http.ownershipStatus = 200
+        await setup.model.connect()
+        #expect(setup.model.connection == .connected(gateVersion: "1"))
+        #expect(setup.transport.record.stdins.last != first)
+    }
+
+    @Test func gateFailureAlertTextHasNoServerDetails() {
+        #expect(HermesStartAlert.title == "Hermes Did Not Start")
+        #expect(HermesStartAlert.message == "The server refused the request. Check the install steps in Settings.")
     }
 
     @Test func trustInstructionsNameTheKeyFile() {

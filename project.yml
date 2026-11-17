@@ -35,6 +35,8 @@ targets:
         NSFaceIDUsageDescription: Hermes uses Face ID to unlock the app.
         NSLocationWhenInUseUsageDescription: Hermes shares your location with your agent when you ask it to.
         ITSAppUsesNonExemptEncryption: false
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.mhinoverse.hermesconnect
