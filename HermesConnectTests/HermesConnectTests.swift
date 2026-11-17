@@ -23,7 +23,7 @@ private struct FailingKeyStore: DeviceKeyStore {
                            defaults: UserDefaults? = nil) -> AppModel {
         let store = keyStore ?? KeychainDeviceKeyStore(secrets: InMemorySecretStore(), factory: SoftwareKeyFactory())
         let suite = defaults ?? UserDefaults(suiteName: "test-\(UUID().uuidString)")!
-        return AppModel(keyStore: store, profileStore: InMemoryServerProfileStore(profile),
+        return AppModel(keyStore: store, serverStore: InMemoryServerListStore(profile: profile),
                         defaults: suite, deviceName: "Test iPhone",
                         transport: ScriptedSSHTransport(hostKey: .sample))
     }
@@ -155,14 +155,14 @@ private struct FailingKeyStore: DeviceKeyStore {
     private struct Setup {
         let model: AppModel
         let transport: ScriptedSSHTransport
-        let profiles: InMemoryServerProfileStore
+        let profiles: InMemoryServerListStore
         let http: ScriptedHermesHTTP
         let keyStore: KeychainDeviceKeyStore
         let serve: ServeBootstrap
 
         /// A new model on the same stores and server: the app after a relaunch.
         @MainActor func relaunch() -> AppModel {
-            AppModel(keyStore: keyStore, profileStore: profiles,
+            AppModel(keyStore: keyStore, serverStore: profiles,
                      defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!,
                      deviceName: "Test iPhone", transport: transport, serve: serve)
         }
@@ -171,12 +171,12 @@ private struct FailingKeyStore: DeviceKeyStore {
     private func makeModel(pin: HostKey? = nil, serverKey: HostKey = .sample,
                            failure: SSHConnectionError? = nil) async -> Setup {
         let keyStore = KeychainDeviceKeyStore(secrets: InMemorySecretStore(), factory: SoftwareKeyFactory())
-        let profiles = InMemoryServerProfileStore(ServerProfile(host: "vps.example.com", hostKey: pin))
+        let profiles = InMemoryServerListStore(profile: ServerProfile(host: "vps.example.com", hostKey: pin))
         let transport = ScriptedSSHTransport(hostKey: serverKey, connectFailure: failure)
         let http = ScriptedHermesHTTP()
         let serve = ServeBootstrap(loader: http, configuration: .init(serveTimeout: .seconds(5), healthAttempts: 1,
                                                                       healthRetryDelay: .milliseconds(1)))
-        let model = AppModel(keyStore: keyStore, profileStore: profiles,
+        let model = AppModel(keyStore: keyStore, serverStore: profiles,
                              defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!,
                              deviceName: "Test iPhone", transport: transport, serve: serve)
         await model.ensureKey()
@@ -189,7 +189,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         #expect(setup.model.pendingTrust == .sample)
         #expect(setup.model.connection == .connecting)
         #expect(setup.transport.record.authentications == 0)
-        #expect(try setup.profiles.load()?.hostKey == nil)
+        #expect(try setup.profiles.load().active?.hostKey == nil)
     }
 
     @Test func trustSavesTheFullKeyAndConnects() async throws {
@@ -197,7 +197,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         await setup.model.connect()
         await setup.model.trustPendingHostKey()
         #expect(setup.model.pendingTrust == nil)
-        #expect(try setup.profiles.load()?.hostKey == .sample)
+        #expect(try setup.profiles.load().active?.hostKey == .sample)
         #expect(setup.model.connection == .connected(gateVersion: "1"))
         #expect(setup.transport.record.authentications == 1)
         #expect(setup.transport.record.commands == [.ping, .serve])
@@ -209,7 +209,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         setup.model.cancelTrust()
         #expect(setup.model.pendingTrust == nil)
         #expect(setup.model.connection == .offline(nil))
-        #expect(try setup.profiles.load()?.hostKey == nil)
+        #expect(try setup.profiles.load().active?.hostKey == nil)
         #expect(setup.transport.record.authentications == 0)
     }
 
@@ -220,7 +220,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         #expect(setup.model.showsHostKeyError)
         #expect(setup.model.pendingTrust == nil)
         #expect(setup.transport.record.authentications == 0)
-        #expect(try setup.profiles.load()?.hostKey == .sample)
+        #expect(try setup.profiles.load().active?.hostKey == .sample)
     }
 
     @Test func forgetHostKeyAsksForTrustAgain() async throws {
@@ -229,7 +229,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         try await setup.model.forgetHostKey()
         #expect(!setup.model.showsHostKeyError)
         #expect(setup.model.connection == .idle)
-        #expect(try setup.profiles.load()?.hostKey == nil)
+        #expect(try setup.profiles.load().active?.hostKey == nil)
         await setup.model.connect()
         #expect(setup.model.pendingTrust == .otherSample)
     }
@@ -316,7 +316,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         setup.transport.pingReply = .success("PONG 2\n")
         await setup.model.connect()
         #expect(setup.model.connection == .connected(gateVersion: "2"))
-        #expect(try setup.profiles.load()?.servePort == 41_001)
+        #expect(try setup.profiles.load().active?.servePort == 41_001)
         await setup.model.disconnect()
 
         let relaunched = setup.relaunch()
@@ -325,10 +325,10 @@ private struct FailingKeyStore: DeviceKeyStore {
         #expect(relaunched.connection == .notStarted(.gateError("port-changed")))
 
         try await relaunched.forgetHostKey()
-        #expect(try setup.profiles.load()?.servePort == 41_001)
+        #expect(try setup.profiles.load().active?.servePort == 41_001)
 
         await relaunched.resetKey()
-        #expect(try setup.profiles.load()?.servePort == nil)
+        #expect(try setup.profiles.load().active?.servePort == nil)
         #expect(relaunched.profile?.servePort == nil)
     }
 
@@ -341,8 +341,8 @@ private struct FailingKeyStore: DeviceKeyStore {
         #expect(profile.lastAlgorithms != nil)
         profile.host = "other.example.com"
         try setup.model.saveProfile(profile)
-        #expect(try setup.profiles.load()?.servePort == nil)
-        #expect(try setup.profiles.load()?.lastAlgorithms == nil)
+        #expect(try setup.profiles.load().active?.servePort == nil)
+        #expect(try setup.profiles.load().active?.lastAlgorithms == nil)
     }
 
     /// Issue #18: Settings > Server shows the last negotiated pair, also when offline.
@@ -351,7 +351,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         #expect(setup.model.profile?.lastAlgorithms == nil)
         await setup.model.connect()
         let expected = SSHNegotiatedAlgorithms(cipher: "aes256-gcm@openssh.com", keyExchange: "curve25519-sha256")
-        #expect(try setup.profiles.load()?.lastAlgorithms == expected)
+        #expect(try setup.profiles.load().active?.lastAlgorithms == expected)
 
         await setup.model.disconnect()
         setup.transport.algorithms = nil  // A connection that cannot tell keeps the last pair.

@@ -30,7 +30,7 @@ import Testing
 
     @Test func decodeFillsMissingFieldsWithDefaults() throws {
         let profile = try JSONDecoder().decode(ServerProfile.self, from: Data(#"{"host":"h"}"#.utf8))
-        #expect(profile == ServerProfile(host: "h"))
+        #expect(profile == ServerProfile(id: ServerProfile.legacyID, host: "h"))
     }
 
     /// Issue #18: a version 2 file has no port pin and no algorithms. It still loads.
@@ -47,7 +47,7 @@ import Testing
         let profile = ServerProfile(host: "h", hostKey: .sample, servePort: 47_123, lastAlgorithms: pair)
         let decoded = try JSONDecoder().decode(ServerProfile.self, from: JSONEncoder().encode(profile))
         #expect(decoded == profile)
-        #expect(decoded.version == 3)
+        #expect(decoded.version == 4)
     }
 
     @Test func badPortPinAndAlgorithmsReadAsNone() throws {

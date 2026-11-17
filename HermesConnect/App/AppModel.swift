@@ -30,7 +30,11 @@ final class AppModel {
         case hostKeyChanged(saved: HostKey, received: HostKey)
     }
 
-    private(set) var profile: ServerProfile?
+    /// Issue #66: every saved server and the active server. One server is connected at a time.
+    private(set) var serverList: ServerList
+    /// The active server: the one the app connects to. Nil before setup.
+    var profile: ServerProfile? { serverList.active }
+    var servers: [ServerProfile] { serverList.servers }
     private(set) var deviceKey: DeviceKey?
     private(set) var keyState: KeyState = .none
     private(set) var lock: AppLockPolicy
@@ -46,7 +50,7 @@ final class AppModel {
     private(set) var hermesEndpoint: GatewayEndpoint?
 
     @ObservationIgnored private let keyStore: any DeviceKeyStore
-    @ObservationIgnored private let profileStore: any ServerProfileStore
+    @ObservationIgnored private let serverStore: any ServerListStore
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let connector: HostConnector
     @ObservationIgnored private let serve: ServeBootstrap
@@ -60,18 +64,19 @@ final class AppModel {
 
     static let appLockDefaultsKey = "appLockEnabled"
 
-    init(keyStore: any DeviceKeyStore, profileStore: any ServerProfileStore,
+    init(keyStore: any DeviceKeyStore, serverStore: any ServerListStore,
          defaults: UserDefaults = .standard, deviceName: String, transport: any SSHTransport,
          serve: ServeBootstrap = ServeBootstrap()) {
         self.keyStore = keyStore
-        self.profileStore = profileStore
+        self.serverStore = serverStore
         self.defaults = defaults
         self.connector = HostConnector(transport: transport)
         self.serve = serve
         self.deviceName = deviceName
         let enabled = defaults.object(forKey: Self.appLockDefaultsKey) as? Bool ?? true
         lock = AppLockPolicy(isEnabled: enabled)
-        profile = try? profileStore.load()
+        // Issue #66: the first load migrates the old single profile, with its pin, to the list.
+        serverList = (try? serverStore.load()) ?? ServerList()
         if let key = try? keyStore.loadKey() {
             deviceKey = key
             keyState = .ready
@@ -80,9 +85,9 @@ final class AppModel {
 
     /// The app on a device: the Keychain (Secure Enclave when present) and Application Support.
     static func live() -> AppModel {
-        let profileStore: any ServerProfileStore = (try? FileServerProfileStore.applicationSupport())
-            ?? InMemoryServerProfileStore()
-        return AppModel(keyStore: KeychainDeviceKeyStore.system(), profileStore: profileStore,
+        let serverStore: any ServerListStore = (try? FileServerListStore.applicationSupport())
+            ?? InMemoryServerListStore()
+        return AppModel(keyStore: KeychainDeviceKeyStore.system(), serverStore: serverStore,
                         deviceName: UIDevice.current.name, transport: CitadelSSHTransport())
     }
 
@@ -111,7 +116,10 @@ final class AppModel {
     /// Delete the key and make a new one. The owner must install the new public key on the server.
     func resetKey() async {
         await disconnect()
-        updateProfile { $0.servePort = nil }  // A new key gets a new slot on the server, so a new slot port.
+        // One key serves all servers (issue #66). A new key gets a new slot on each server, so a new slot port.
+        var list = serverList
+        list.modifyAll { $0.servePort = nil }
+        commitQuietly(list)
         keyState = .creating
         deviceKey = nil
         let store = keyStore
@@ -130,34 +138,82 @@ final class AppModel {
         }
     }
 
-    // MARK: Server profile
+    // MARK: Servers (issue #66)
 
-    /// Save the profile. A different server (host, port or user) loses the pin, so the owner must trust it again.
+    /// Setup and Settings: save the active server. With no server, the profile becomes the first server.
+    /// A different server (host, port or user) loses the pin, so the owner must trust it again.
     /// It also loses the port pin and the last SSH algorithms: they belong to the old server.
     func saveProfile(_ profile: ServerProfile) throws {
-        var profile = profile
-        let newServer = self.profile.map { profile.isDifferentServer(from: $0) } ?? false
-        if newServer {
-            profile.hostKey = nil
-            profile.servePort = nil
-            profile.lastAlgorithms = nil
+        guard let active = self.profile else {
+            try addServer(profile)
+            return
         }
-        try profileStore.save(profile)
-        self.profile = profile
-        if newServer {
-            pendingTrust = nil
-            showsHostKeyError = false
-            connection = .idle
-            attempt += 1
-            serveToken = nil
-            let old = (session, hermes)
-            session = nil
-            hermes = nil
-            hermesEndpoint = nil
-            Task {
-                await old.1?.forward.close()
-                await old.0?.close()
-            }
+        var profile = profile
+        profile.id = active.id
+        try updateServer(profile)
+    }
+
+    /// "Add Server": save a new server at the end of the list. It becomes the active server
+    /// (orchestrator decision 2026-11-17), so the old connection closes. The device key stays.
+    func addServer(_ profile: ServerProfile) throws {
+        var list = serverList
+        try list.add(profile)
+        let hadServer = self.profile != nil
+        try commit(list)
+        if hadServer { resetConnection() }
+    }
+
+    /// Server detail "Done": save one server. Other servers do not change.
+    func updateServer(_ profile: ServerProfile) throws {
+        var list = serverList
+        let change = try list.update(profile)
+        try commit(list)
+        if change == .newServer, profile.id == self.profile?.id { resetConnection() }
+    }
+
+    /// "Remove Server": forget the server and its pin. The device key stays. If it was the active server,
+    /// the connection closes and the first other server becomes active. No server left: "Set Up Hermes".
+    func removeServer(id: UUID) throws {
+        let wasActive = profile?.id == id
+        var list = serverList
+        list.remove(id: id)
+        try commit(list)
+        if wasActive { resetConnection() }
+    }
+
+    /// True when a saved server other than `excluding` has the same host, port and user.
+    func containsServer(like profile: ServerProfile, excluding: UUID? = nil) -> Bool {
+        serverList.containsServer(like: profile, excluding: excluding)
+    }
+
+    /// Save the list, then keep it in memory. A save that fails throws and changes nothing.
+    private func commit(_ list: ServerList) throws {
+        try serverStore.save(list)
+        serverList = list
+    }
+
+    /// Keep the list in memory, and save it. A save that fails keeps the change in memory: the next change tries again.
+    private func commitQuietly(_ list: ServerList) {
+        guard list != serverList else { return }
+        serverList = list
+        try? serverStore.save(list)
+    }
+
+    /// The active server changed, or its host, port or user changed. Close the old connection.
+    /// The token belongs to the old server. Settings connects again when it closes.
+    private func resetConnection() {
+        pendingTrust = nil
+        showsHostKeyError = false
+        connection = .idle
+        attempt += 1
+        serveToken = nil
+        let old = (session, hermes)
+        session = nil
+        hermes = nil
+        hermesEndpoint = nil
+        Task {
+            await old.1?.forward.close()
+            await old.0?.close()
         }
     }
 
@@ -168,6 +224,7 @@ final class AppModel {
     func connect() async {
         guard let profile, let deviceKey, connection != .connecting, connection != .startingHermes,
               pendingTrust == nil else { return }
+        let serverID = profile.id
         await closeSession()
         attempt += 1
         let current = attempt
@@ -181,7 +238,7 @@ final class AppModel {
             session = result.session
             connection = .startingHermes
             if let algorithms = result.algorithms {
-                updateProfile { $0.lastAlgorithms = algorithms }
+                updateServer(id: serverID) { $0.lastAlgorithms = algorithms }
             }
             let pinsPort = ServeBootstrap.pinsPort(gateVersion: result.gateVersion)
             let running = try await serve.start(on: result.session, reuse: serveToken,
@@ -193,7 +250,7 @@ final class AppModel {
             hermes = running
             serveToken = running.token
             // Issue #29 and #18: the port pin is saved in the profile, so a relaunch keeps it.
-            updateProfile { $0.servePort = pinsPort ? running.remotePort : nil }
+            updateServer(id: serverID) { $0.servePort = pinsPort ? running.remotePort : nil }
             hermesEndpoint = running.endpoint
             connection = .connected(gateVersion: result.gateVersion)
         } catch {
@@ -235,16 +292,16 @@ final class AppModel {
 
     /// The owner compared the fingerprint and tapped "Trust Server". Save the full key, then connect.
     func trustPendingHostKey() async {
-        guard let key = pendingTrust, var profile else { return }
-        profile.hostKey = key
+        guard let key = pendingTrust, let profile else { return }
+        var list = serverList
+        list.modify(id: profile.id) { $0.hostKey = key }
         do {
-            try profileStore.save(profile)
+            try commit(list)
         } catch {
             pendingTrust = nil
             connection = .offline(nil)
             return
         }
-        self.profile = profile
         pendingTrust = nil
         connection = .idle
         await connect()
@@ -256,24 +313,24 @@ final class AppModel {
         connection = .offline(nil)
     }
 
-    /// Delete the pin. The next connect asks the owner to trust the server again.
-    func forgetHostKey() async throws {
-        guard var profile else { return }
-        profile.hostKey = nil
-        try profileStore.save(profile)
-        self.profile = profile
+    /// Delete the pin of one server (the active server when `id` is nil). The next connect to that server
+    /// asks the owner to trust it again. The pins of other servers stay.
+    func forgetHostKey(id: UUID? = nil) async throws {
+        guard let target = id ?? profile?.id, serverList.server(id: target) != nil else { return }
+        var list = serverList
+        list.modify(id: target) { $0.hostKey = nil }
+        try commit(list)
         // The port pin stays: it belongs to the device key slot, not to the host key (issue #18).
+        guard target == profile?.id else { return }
         showsHostKeyError = false
         await disconnect()
     }
 
-    /// Change the saved profile. A save that fails keeps the change in memory: the next change tries again.
-    private func updateProfile(_ change: (inout ServerProfile) -> Void) {
-        guard var updated = profile else { return }
-        change(&updated)
-        guard updated != profile else { return }
-        profile = updated
-        try? profileStore.save(updated)
+    /// Change one saved server. A save that fails keeps the change in memory: the next change tries again.
+    private func updateServer(id: UUID, _ change: (inout ServerProfile) -> Void) {
+        var list = serverList
+        list.modify(id: id, change)
+        commitQuietly(list)
     }
 
     // MARK: Foreground reconcile (issue #15)
@@ -353,11 +410,21 @@ extension AppModel {
                         transport: any SSHTransport = ScriptedSSHTransport(hostKey: .sample),
                         http: any HTTPDataLoading = ScriptedHermesHTTP()) -> AppModel {
         let keyStore = KeychainDeviceKeyStore(secrets: InMemorySecretStore(), factory: SoftwareKeyFactory())
-        let profiles = InMemoryServerProfileStore(setUp ? ServerProfile(host: "vps.example.com", hostKey: hostKey) : nil)
+        let profiles = InMemoryServerListStore(profile: setUp ? ServerProfile(host: "vps.example.com", hostKey: hostKey) : nil)
         if setUp { _ = try? keyStore.createKey() }
-        return AppModel(keyStore: keyStore, profileStore: profiles,
+        return AppModel(keyStore: keyStore, serverStore: profiles,
                         defaults: UserDefaults(suiteName: "preview") ?? .standard, deviceName: "iPhone",
                         transport: transport, serve: ServeBootstrap(loader: http))
+    }
+
+    /// Issue #66: a model with many servers, for previews and screenshots.
+    static func preview(servers: [ServerProfile], activeIndex: Int) -> AppModel {
+        let keyStore = KeychainDeviceKeyStore(secrets: InMemorySecretStore(), factory: SoftwareKeyFactory())
+        _ = try? keyStore.createKey()
+        let active = servers.indices.contains(activeIndex) ? servers[activeIndex].id : nil
+        return AppModel(keyStore: keyStore, serverStore: InMemoryServerListStore(ServerList(servers: servers, activeID: active)),
+                        defaults: UserDefaults(suiteName: "preview") ?? .standard, deviceName: "iPhone",
+                        transport: ScriptedSSHTransport(hostKey: .sample), serve: ServeBootstrap(loader: ScriptedHermesHTTP()))
     }
 
     /// Set a connection state directly, for previews and screenshots.
