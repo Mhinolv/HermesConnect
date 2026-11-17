@@ -31,6 +31,7 @@
 		6C761422A2E25F72ECC40E0E /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6150F9285784508FB2F6A3E /* AppModel.swift */; };
 		74C7DA0960EA120C51C2AF65 /* LocationControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40916C67E6E9CDFF43F23AB8 /* LocationControllerTests.swift */; };
 		75558AB7C9008A5CFE12F45B /* VoiceRecordingBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37EF80F3762ADA518CD0BE72 /* VoiceRecordingBar.swift */; };
+		82E8F7FA7611089BA44CFB3A /* TapbackUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02B9B8909DFDB725CB523CF7 /* TapbackUITests.swift */; };
 		8A60629016D1FCF8D20E0455 /* InstallStepsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12037EC69A1B3FFA5178CD6D /* InstallStepsView.swift */; };
 		8CCAD742FBA2926FF1940B53 /* ChatVoiceCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FB38BCE9C434337D022CF42 /* ChatVoiceCell.swift */; };
 		93EB90973911FD40D69BBC64 /* LocationCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10EC6A9B6B3791BCF28648B0 /* LocationCard.swift */; };
@@ -40,6 +41,7 @@
 		A675D39569C1E0604F673B25 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9975FCE49058019CADA6BA89 /* Assets.xcassets */; };
 		A725F31205078D24423F830F /* MessageKit in Frameworks */ = {isa = PBXBuildFile; productRef = CDED3844474FB97BAA703825 /* MessageKit */; };
 		AE56777FBDA0235B51FB078E /* AttachmentStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E77AC33AF86D6AFE86FDB669 /* AttachmentStripView.swift */; };
+		B08C29548D93122F0AA73C01 /* ReactionBadges.swift in Sources */ = {isa = PBXBuildFile; fileRef = 395F8B4FF8768E18F5789060 /* ReactionBadges.swift */; };
 		B433DA87A9B0ABD221346C7A /* LocalNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 446EDEE4C7998A61822DEA32 /* LocalNotifications.swift */; };
 		B72A042E912127198DCDA854 /* ProtectedStorageAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */; };
 		B97FEBCCFBBC2C3312E79743 /* AppLockCover.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5500FE30849A059FC03DF0 /* AppLockCover.swift */; };
@@ -64,6 +66,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		02B9B8909DFDB725CB523CF7 /* TapbackUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TapbackUITests.swift; sourceTree = "<group>"; };
 		02FBF4D3E812F7C4916B38A0 /* HostKeyViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostKeyViews.swift; sourceTree = "<group>"; };
 		10EC6A9B6B3791BCF28648B0 /* LocationCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationCard.swift; sourceTree = "<group>"; };
 		12037EC69A1B3FFA5178CD6D /* InstallStepsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstallStepsView.swift; sourceTree = "<group>"; };
@@ -74,6 +77,7 @@
 		2A8691638CC5B4480E12DCC9 /* VoiceMemoUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceMemoUITests.swift; sourceTree = "<group>"; };
 		2D3CB166FF51053854FFDA4B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		37EF80F3762ADA518CD0BE72 /* VoiceRecordingBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecordingBar.swift; sourceTree = "<group>"; };
+		395F8B4FF8768E18F5789060 /* ReactionBadges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionBadges.swift; sourceTree = "<group>"; };
 		3B47554FAB736FCFE8A2DAA6 /* BackgroundRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundRefresh.swift; sourceTree = "<group>"; };
 		3CD09535D569B73E633D952B /* HermesConnectTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HermesConnectTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		40916C67E6E9CDFF43F23AB8 /* LocationControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationControllerTests.swift; sourceTree = "<group>"; };
@@ -203,6 +207,7 @@
 				40916C67E6E9CDFF43F23AB8 /* LocationControllerTests.swift */,
 				DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */,
 				83E296700CE9EBB2D816E590 /* SessionListTests.swift */,
+				02B9B8909DFDB725CB523CF7 /* TapbackUITests.swift */,
 				2A8691638CC5B4480E12DCC9 /* VoiceMemoUITests.swift */,
 				7EBCCF57F6F99D73BDA35CD1 /* VoiceReplyUITests.swift */,
 			);
@@ -271,6 +276,7 @@
 				71BE1F0BBF1E0DC6C9086E97 /* ChatViewController.swift */,
 				7FB38BCE9C434337D022CF42 /* ChatVoiceCell.swift */,
 				F3C4E1EC060A41E57D2B774C /* DemoChatTransport.swift */,
+				395F8B4FF8768E18F5789060 /* ReactionBadges.swift */,
 				F0EA96A6753C403E6A93EDFD /* SessionListScreen.swift */,
 				27E6BC84392DF022945BB39D /* VoiceRecorder.swift */,
 				37EF80F3762ADA518CD0BE72 /* VoiceRecordingBar.swift */,
@@ -425,6 +431,7 @@
 				93EB90973911FD40D69BBC64 /* LocationCard.swift in Sources */,
 				0C197036101D133537EA865D /* LocationController.swift in Sources */,
 				DC807288C7246595D35CD72E /* LocationSettingsSection.swift in Sources */,
+				B08C29548D93122F0AA73C01 /* ReactionBadges.swift in Sources */,
 				0AA71132C6D0F9DF6AD60D27 /* SessionListScreen.swift in Sources */,
 				04DC34168B66E6DCE7820198 /* SettingsView.swift in Sources */,
 				5C009257C4A6066ED63FC699 /* SetupFlowView.swift in Sources */,
@@ -444,6 +451,7 @@
 				74C7DA0960EA120C51C2AF65 /* LocationControllerTests.swift in Sources */,
 				B72A042E912127198DCDA854 /* ProtectedStorageAppTests.swift in Sources */,
 				005CA6251E125BF95E1E03B3 /* SessionListTests.swift in Sources */,
+				82E8F7FA7611089BA44CFB3A /* TapbackUITests.swift in Sources */,
 				F3361E416896D9B2A169029A /* VoiceMemoUITests.swift in Sources */,
 				173CEA1C519578E124650A2A /* VoiceReplyUITests.swift in Sources */,
 			);

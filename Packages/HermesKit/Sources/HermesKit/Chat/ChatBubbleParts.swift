@@ -39,7 +39,10 @@ public enum ChatBubbleParts {
             }
         }
         for index in parts.indices {
-            if index > 0 { parts[index].row.timeHeader = nil }
+            if index > 0 {
+                parts[index].row.timeHeader = nil
+                parts[index].row.showsReactions = false
+            }
             if index < parts.count - 1 {
                 parts[index].row.hasTail = false
                 parts[index].row.footnote = nil
@@ -71,6 +74,7 @@ public enum ChatBubbleParts {
         case .failed: parts.append("Upload failed")
         case .pending, .attached: break
         }
+        parts += ChatTimeline.reactionLabels(for: part.row)
         if let footnote = part.row.footnote, footnote == .notDelivered { parts.append(footnote.text) }
         return parts.joined(separator: ", ")
     }

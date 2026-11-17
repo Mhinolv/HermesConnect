@@ -45,10 +45,15 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
     public var attachments: [ChatAttachment]
     /// Issue #10: the spoken audio of a reply to a voice memo. `nil` for a text turn.
     public var spokenReply: SpokenReply?
+    /// Issue #11: the agent ack on an owner prompt, from the turn state (D3). `nil` on replies.
+    public var agentAck: AgentAck?
+    /// Issue #11: the owner's tapback. It stays on the phone.
+    public var tapback: Tapback?
 
     public init(id: String, role: Role, text: String, date: Date, delivery: Delivery? = nil,
                 reply: Reply? = nil, userRowId: Int? = nil, promptId: String? = nil, voice: VoiceMemo? = nil,
-                attachments: [ChatAttachment] = [], spokenReply: SpokenReply? = nil) {
+                attachments: [ChatAttachment] = [], spokenReply: SpokenReply? = nil,
+                agentAck: AgentAck? = nil, tapback: Tapback? = nil) {
         self.id = id
         self.role = role
         self.text = text
@@ -60,6 +65,8 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
         self.voice = voice
         self.attachments = attachments
         self.spokenReply = spokenReply
+        self.agentAck = agentAck
+        self.tapback = tapback
     }
 
     public var isFailed: Bool {
