@@ -5,6 +5,14 @@ import SwiftUI
 enum ChatRoute: Hashable {
     case session(String)
     case new(String)
+
+    /// Issue #16: the chat that "Ask Hermes" opens.
+    init(_ route: AskHermesRoute) {
+        switch route {
+        case .session(let id): self = .session(id)
+        case .newChat(let key): self = .new(key)
+        }
+    }
 }
 
 /// The session list: the root screen, like the Messages list (issue #7).

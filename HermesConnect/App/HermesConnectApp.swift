@@ -102,6 +102,8 @@ struct RootView: View {
     @State private var path: [ChatRoute] = []
     /// `true` after the launch push, or after the owner moved in the stack. Then launch pushes nothing more.
     @State private var launchDone = false
+    /// Issue #16: the "Ask Hermes" shortcut puts its request here.
+    var ask = AskHermesInbox.shared
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -176,6 +178,10 @@ struct RootView: View {
             launchDone = true
             path = [.session(id)]
         }
+        // Issue #16: "Ask Hermes" waits for setup and App Lock, then sends the text at once.
+        .onChange(of: ask.pending, initial: true) { askHermes() }
+        .onChange(of: model.lock) { askHermes() }
+        .onChange(of: scenePhase) { askHermes() }
         .onChange(of: sessions.unreadCount, initial: true) { _, count in
             if !ChatLaunch.isDemo { notifications?.setBadge(count) }
         }
@@ -187,6 +193,32 @@ struct RootView: View {
 }
 
 extension RootView {
+    /// Issue #16: run the "Ask Hermes" request that waits. App Lock covers the app until Face ID, so the
+    /// text never goes before an unlock. No setup: show the setup screen and drop the text.
+    private func askHermes() {
+        guard scenePhase == .active else { return }
+        let locked = !ChatLaunch.isDemo && model.lock.locks(at: .now)
+        switch ask.next(isSetUp: model.isSetUp, isLocked: locked) {
+        case nil:
+            return
+        case .dropForSetup:
+            showSettings = false
+            showSetup = true
+        case .run(let request):
+            launchDone = true
+            showSettings = false
+            let link = self.link
+            Task {
+                await AskHermes.run(request, sessions: sessions,
+                                    linkReady: { await AskHermes.waitUntilReady { link?.status } },
+                                    show: { route in
+                                        launchDone = true
+                                        path = [ChatRoute(route)]
+                                    })
+            }
+        }
+    }
+
     /// Issue #15: schedule the background refresh on the way out. Back in the foreground, reconnect when
     /// the connection can be dead, and refresh the list. The chats catch up on the `connected` event.
     private func foregroundChange(_ phase: ScenePhase) {
