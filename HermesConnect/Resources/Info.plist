@@ -44,7 +44,7 @@
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Hermes attaches photos that you choose to your messages.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Hermes transcribes your voice memos on this iPhone.</string>
+	<string>Hermes transcribes your voice memos and audio files on this iPhone.</string>
 	<key>NSUserActivityTypes</key>
 	<array>
 		<string>INSendMessageIntent</string>

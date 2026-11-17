@@ -208,6 +208,14 @@ struct ChatThreadView: UIViewControllerRepresentable {
             controller.onFirstAppear = { _ = $0.messageInputBar.inputTextView.becomeFirstResponder() }
             return controller
         }
+        if DemoChatTransport.Scenario.current == .audioTranscripts {
+            // Issue #50: a fake engine. The runs start when the audio bubbles are ready.
+            let controller = ChatViewController(model: model)
+            controller.audioTranscripts = ReceivedAudioTranscripts(files: model.receivedFiles,
+                                                                   transcribe: AudioTranscriptDemo.transcribe)
+            controller.onFirstAppear = { AudioTranscriptDemo.start($0.audioTranscripts) }
+            return controller
+        }
         if DemoChatTransport.Scenario.current == .receivedFiles {
             // The ring and the error show with no tap: start those 2 downloads.
             for file in ReceivedFileDemo.startedFiles { model.receivedFiles.load(file) }
