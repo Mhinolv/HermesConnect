@@ -28,11 +28,38 @@ public struct ServerInstallGuide: Sendable, Equatable {
         return String(digest.map { String(format: "%02x", $0) }.joined().prefix(32))
     }
 
-    /// The restricted key options (D2): no shell, no agent or X11 forwarding,
-    /// local forwards to 127.0.0.1 only, no remote forwards.
-    public var keyOptions: String {
-        let command = slot.map { "\(gatePath) --slot \($0)" } ?? gatePath
-        return #"restrict,port-forwarding,permitopen="127.0.0.1:*",permitlisten="127.0.0.1:1",command="\#(command)""#
+    /// The first fixed port of the gate slots. `server/install.sh` and the gate use the same rule (issue #29).
+    public static let slotPortBase = 47100
+    /// The count of slot ports after `slotPortBase`.
+    public static let slotPortCount = 100
+
+    /// The fixed server port of the slot: `47100 + (slot as an integer) % 100`, as in `server/install.sh`.
+    public var slotPort: Int? {
+        guard let slot else { return nil }
+        var remainder = 0
+        for digit in slot {
+            guard let value = digit.hexDigitValue else { return nil }
+            remainder = (remainder * 16 + value) % Self.slotPortCount
+        }
+        return Self.slotPortBase + remainder
+    }
+
+    /// The key as `server/install.sh` writes it: type, blob, and the comment with only `[A-Za-z0-9@._+:=-]`,
+    /// 64 characters at most, or `hermesconnect` if nothing is left.
+    public var installedKeyLine: String? {
+        let fields = publicKeyLine.split(whereSeparator: \.isWhitespace)
+        guard fields.count >= 2 else { return nil }
+        let allowed = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@._+:=-")
+        let comment = String(fields.dropFirst(2).joined(separator: "-").filter { allowed.contains($0) }.prefix(64))
+        return "\(fields[0]) \(fields[1]) \(comment.isEmpty ? "hermesconnect" : comment)"
+    }
+
+    /// The restricted key options (D2): no shell, no agent or X11 forwarding, no remote forwards,
+    /// and local forwards to the one slot port on 127.0.0.1 only (issue #41).
+    public var keyOptions: String? {
+        guard let slot, let port = slotPort else { return nil }
+        let command = "\(gatePath) --slot \(slot) --port \(port)"
+        return #"restrict,port-forwarding,permitopen="127.0.0.1:\#(port)",permitlisten="127.0.0.1:1",command="\#(command)""#
     }
 
     /// The command that installs the gate and the key line (issue #2).
@@ -40,34 +67,38 @@ public struct ServerInstallGuide: Sendable, Equatable {
         "sudo \(Self.serverFolder)/install.sh '\(publicKeyLine)'"
     }
 
-    /// One line for `~<user>/.ssh/authorized_keys`.
-    public var authorizedKeysLine: String {
-        "\(keyOptions) \(publicKeyLine)"
+    /// The line that `server/install.sh` adds to `~<user>/.ssh/authorized_keys`. Nil for a bad key line.
+    public var authorizedKeysLine: String? {
+        guard let keyOptions, let installedKeyLine else { return nil }
+        return "\(keyOptions) \(installedKeyLine)"
     }
 
     public var authorizedKeysPath: String {
         "/home/\(user)/.ssh/authorized_keys"
     }
 
-    /// A `Match` block for the end of `/etc/ssh/sshd_config`. Key auth only, no remote forwards,
-    /// local forwards to 127.0.0.1 only.
-    public var sshdMatchBlock: String {
-        """
-        Match User \(user)
-            AuthenticationMethods publickey
-            PasswordAuthentication no
-            KbdInteractiveAuthentication no
-            AllowAgentForwarding no
-            AllowStreamLocalForwarding no
-            X11Forwarding no
-            PermitTunnel no
-            GatewayPorts no
-            AllowTcpForwarding local
-            PermitOpen 127.0.0.1:*
-            PermitListen none
-        """
+    /// One step of the install screen. `text` is Markdown.
+    public struct Step: Sendable, Equatable {
+        public let text: String
+        public let code: String?
+        public let copyTitle: String?
+        public let codeLabel: String?
     }
 
-    public static let sshdConfigPath = "/etc/ssh/sshd_config"
-    public static let reloadCommand = "sudo sshd -t && sudo systemctl reload ssh"
+    /// The install steps. `install.sh` does all of the server work, so no step edits `sshd_config` (issue #41).
+    public var steps: [Step] {
+        var steps = [Step(text: "Copy the `server` folder of HermesConnect to `\(Self.serverFolder)` on the server. "
+                            + "Then run `install.sh` to install the gate and the key:",
+                          code: installCommand, copyTitle: "Copy Command",
+                          codeLabel: "Install command with the public key of this iPhone")]
+        if let authorizedKeysLine {
+            steps.append(Step(text: "Make sure that `\(authorizedKeysPath)` has this line:",
+                              code: authorizedKeysLine, copyTitle: "Copy Line",
+                              codeLabel: "authorized_keys line with the public key of this iPhone"))
+        }
+        return steps
+    }
+
+    /// The footer of the steps.
+    public static let footnote = "`install.sh` sets all of the limits of this key. Do not change the SSH server configuration."
 }

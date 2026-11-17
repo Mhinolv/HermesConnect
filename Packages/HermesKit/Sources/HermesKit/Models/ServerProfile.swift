@@ -6,6 +6,11 @@ public struct ServerProfile: Codable, Sendable, Equatable {
     public static let currentVersion = 3
     public static let defaultPort = 22
     public static let defaultUser = "hermes"
+    /// The example in the Host field: a Tailscale address (issue #41).
+    public static let exampleHost = "100.x.y.z"
+    /// Issue #41: a server firewall can block SSH on port 22 over cellular, so the owner uses Tailscale.
+    public static let hostHint = "Use the Tailscale address of the server, for example \(exampleHost). "
+        + "A server firewall can block port 22 on cellular data."
 
     public var version: Int
     public var host: String
