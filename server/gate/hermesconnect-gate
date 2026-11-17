@@ -1,0 +1,607 @@
+#!/usr/bin/python3
+"""HermesConnect server gate.
+
+sshd runs this program as the forced command (``command="..."``) for the
+HermesConnect phone key. The phone never gets a shell. The command that the
+phone asks for is in ``SSH_ORIGINAL_COMMAND``. The gate accepts exactly one
+of these command names, with no arguments:
+
+  serve     Read a 64-hex session token on stdin. Start or reuse
+            ``hermes serve --isolated`` on 127.0.0.1. Print ``PORT <n>``.
+  location  Read one JSON location fix on stdin (4 KiB max). Store it in
+            ``~/.hermes/hermesconnect/location.json``. Print ``OK``.
+  ping      Print ``PONG <gate version>``.
+
+Every other request (no command, a shell, scp, sftp, extra arguments) fails
+with exit code 2. Errors go to stderr as ``ERROR <code>: <text>``.
+
+The gate never prints or logs the session token. It uses the Python 3
+standard library only (Python 3.8 or later).
+
+Gate options (set by install.sh in the ``command=`` value, never by the phone):
+
+  --slot <32 hex>    Ownership slot for this key. Default: a fixed slot.
+  --hermes <path>    Hermes binary. Default: the same search as Hermes Desktop.
+
+Environment for tests only: ``HERMESCONNECT_READY_TIMEOUT`` (seconds).
+"""
+
+import datetime
+import errno
+import fcntl
+import hashlib
+import json
+import math
+import os
+import re
+import secrets
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+GATE_VERSION = "1"
+COMMANDS = ("serve", "location", "ping")
+
+DEFAULT_SLOT = hashlib.sha256(b"hermesconnect\0default").hexdigest()[:32]
+TOKEN_RE = re.compile(r"[0-9a-f]{64}")
+SLOT_RE = re.compile(r"[0-9a-f]{32}")
+NONCE_RE = re.compile(r"[0-9a-f]{16}")
+READY_RE = re.compile(r"(?<!\w)HERMES_(?:BACKEND|DASHBOARD)_READY port=(\d+)")
+PROFILE_MISSING_RE = re.compile(r"Error: Profile '[^']*' does not exist\.")
+
+STATE_SCHEMA = 1
+LOCATION_SCHEMA = 1
+LOCATION_MAX_BYTES = 4096
+LOCATION_FUTURE_SLACK_S = 600
+TOKEN_FILE_MAX_AGE_S = 3600
+NOFILE_SOFT_LIMIT = 65536
+
+
+class GateError(Exception):
+    """A refusal or a failure. ``code`` is a stable word for the client."""
+
+    def __init__(self, code, text, exit_code=1):
+        super().__init__(text)
+        self.code = code
+        self.text = text
+        self.exit_code = exit_code
+
+
+# ---------------------------------------------------------------------------
+# Paths and files
+# ---------------------------------------------------------------------------
+
+def home():
+    return os.path.expanduser("~")
+
+
+def hermes_root():
+    # Hermes Desktop and `hermes serve` anchor SSH state at $HOME/.hermes,
+    # independent of HERMES_HOME (main_dashboard.py, see docs/hermes-protocol.md 1.1).
+    return os.path.join(home(), ".hermes")
+
+
+def gate_dir():
+    return os.path.join(hermes_root(), "hermesconnect")
+
+
+def desktop_ssh_dir():
+    return os.path.join(hermes_root(), "desktop-ssh")
+
+
+def ensure_private_dir(path, fix_mode=True):
+    """Create ``path`` with mode 0700 if needed. Refuse a symlink or a foreign owner.
+
+    If ``fix_mode`` is true, set an existing directory to mode 0700."""
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode):
+        raise GateError("unsafe-path", "%s is not a directory" % path)
+    if st.st_uid != os.getuid():
+        raise GateError("unsafe-path", "%s has the wrong owner" % path)
+    if fix_mode and stat.S_IMODE(st.st_mode) != 0o700:
+        os.chmod(path, 0o700)
+
+
+def write_private_file_atomic(path, data):
+    """Write ``data`` (bytes) to ``path`` with mode 0600 through a rename."""
+    directory = os.path.dirname(path)
+    tmp = os.path.join(directory, ".%s.%s.tmp" % (os.path.basename(path), secrets.token_hex(4)))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def read_json_file(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            value = json.loads(stream.read(65536).decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def read_stdin(limit):
+    """Read at most ``limit`` bytes. Return None if stdin holds more."""
+    stream = sys.stdin.buffer
+    data = b""
+    while len(data) <= limit:
+        chunk = stream.read(limit + 1 - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return None if len(data) > limit else data
+
+
+# ---------------------------------------------------------------------------
+# serve
+# ---------------------------------------------------------------------------
+
+def fingerprint_token(token):
+    # Same as Hermes Desktop `fingerprint_token`: sha256(token) hex, first 32 chars.
+    return hashlib.sha256(token.encode("ascii")).hexdigest()[:32]
+
+
+def find_hermes(explicit):
+    if explicit:
+        if os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+            return explicit
+        raise GateError("hermes-not-found", "the --hermes path is not executable")
+    candidates = []
+    found = shutil.which("hermes")
+    if found:
+        candidates.append(found)
+    candidates += [
+        os.path.join(home(), ".local", "bin", "hermes"),
+        "/usr/local/bin/hermes",
+        os.path.join(hermes_root(), "hermes-agent", "venv", "bin", "hermes"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    raise GateError("hermes-not-found", "no hermes binary found")
+
+
+def check_serve_support(hermes):
+    try:
+        result = subprocess.run([hermes, "serve", "--help"], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        raise GateError("update-required", "hermes serve --help failed")
+    text = result.stdout.decode("utf-8", "replace")
+    if "ssh-session-token-file" not in text or "ssh-owner-nonce" not in text:
+        raise GateError("update-required", "this hermes has no SSH session token support")
+
+
+def update_in_progress():
+    return os.path.exists(os.path.join(hermes_root(), ".hermes-update-in-progress"))
+
+
+def pid_alive(pid):
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def pid_argv(pid):
+    """Return the argv of ``pid`` as a list, or None."""
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as stream:
+            raw = stream.read()
+        if raw:
+            return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+    except OSError:
+        pass
+    try:
+        out = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    text = out.decode("utf-8", "replace").strip()
+    return text.split() if text else None
+
+
+def pid_is_our_serve(state):
+    """True when the state pid is alive and its argv is the serve that this gate started."""
+    pid = state.get("pid")
+    if not pid_alive(pid):
+        return False
+    argv = pid_argv(pid)
+    if not argv:
+        return False
+    nonce = state.get("spawnNonce", "")
+    token_path = state.get("tokenPath", "")
+    for i, word in enumerate(argv):
+        if word == "--ssh-owner-nonce" and argv[i + 1:i + 2] != [nonce]:
+            return False
+        if word == "--ssh-session-token-file" and argv[i + 1:i + 2] != [token_path]:
+            return False
+    return ("serve" in argv and "--isolated" in argv and "--ssh-owner-nonce" in argv
+            and "--ssh-session-token-file" in argv)
+
+
+def terminate(pid):
+    """SIGTERM, wait up to 5 s, then SIGKILL, wait up to 2 s (as Hermes Desktop does)."""
+    for sig, wait_s in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 2.0)):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            reap_child(pid)
+            if not pid_alive(pid):
+                return
+            time.sleep(0.05)
+
+
+def reap_child(pid):
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        pass
+    except OSError:
+        pass
+
+
+def remove_quietly(path):
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def prune_old_token_files(directory):
+    now = time.time()
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if re.fullmatch(r"[0-9a-f]{16}\.token", name):
+            path = os.path.join(directory, name)
+            try:
+                if now - os.lstat(path).st_mtime > TOKEN_FILE_MAX_AGE_S:
+                    os.unlink(path)
+            except OSError:
+                pass
+
+
+def write_token_file(path, token):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(token.encode("ascii"))
+
+
+def scrape_ready_port(log_path, pid, timeout_s):
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            with open(log_path, "rb") as stream:
+                text = stream.read(1 << 20).decode("utf-8", "replace")
+        except OSError:
+            text = ""
+        match = READY_RE.search(text)
+        if match:
+            port = int(match.group(1))
+            if 0 < port < 65536:
+                return port
+        if PROFILE_MISSING_RE.search(text):
+            raise GateError("profile-missing", "the Hermes profile does not exist")
+        reap_child(pid)
+        if not pid_alive(pid):
+            raise GateError("serve-exited", "hermes serve exited before it was ready")
+        if time.monotonic() >= deadline:
+            raise GateError("serve-timeout", "hermes serve was not ready in time")
+        time.sleep(0.1)
+
+
+def spawn_serve(hermes, slot_dir, token):
+    nonce = secrets.token_hex(8)
+    token_path = os.path.join(slot_dir, nonce + ".token")
+    log_path = os.path.join(slot_dir, nonce + ".log")
+    prune_old_token_files(slot_dir)
+    write_token_file(token_path, token)
+    argv = [hermes, "serve", "--isolated", "--host", "127.0.0.1", "--port", "0",
+            "--ssh-session-token-file", token_path, "--ssh-owner-nonce", nonce]
+    env = dict(os.environ)
+    env.pop("HERMES_DESKTOP_DEV_SERVER", None)
+    env.pop("SSH_ORIGINAL_COMMAND", None)
+    env["HERMES_DESKTOP"] = "1"
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        want = NOFILE_SOFT_LIMIT if hard == resource.RLIM_INFINITY else min(NOFILE_SOFT_LIMIT, hard)
+        if soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except (ImportError, ValueError, OSError):
+        pass
+    log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        # start_new_session = setsid: the server outlives the SSH channel.
+        child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log_fd, stderr=log_fd,
+                                 env=env, cwd=home(), close_fds=True, start_new_session=True)
+    except OSError:
+        remove_quietly(token_path)
+        raise GateError("serve-failed", "could not start hermes serve")
+    finally:
+        os.close(log_fd)
+    return {
+        "schemaVersion": STATE_SCHEMA,
+        "gateVersion": GATE_VERSION,
+        "pid": child.pid,
+        "port": 0,
+        "spawnNonce": nonce,
+        "tokenPath": token_path,
+        "logPath": log_path,
+        "tokenFingerprint": fingerprint_token(token),
+        "hermesPath": hermes,
+        "startedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def cleanup_state(state, state_path):
+    pid = state.get("pid")
+    if pid_is_our_serve(state):
+        terminate(pid)
+    remove_quietly(state.get("tokenPath"))
+    remove_quietly(state.get("logPath"))
+    remove_quietly(state_path)
+
+
+def cmd_serve(options):
+    data = read_stdin(66)
+    if data is None:
+        raise GateError("bad-token", "the token must be 64 lowercase hex characters")
+    token = data.decode("ascii", "replace")
+    if token.endswith("\r\n"):
+        token = token[:-2]
+    elif token.endswith("\n"):
+        token = token[:-1]
+    if not TOKEN_RE.fullmatch(token):
+        raise GateError("bad-token", "the token must be 64 lowercase hex characters")
+
+    slot = options["slot"]
+    ensure_private_dir(hermes_root(), fix_mode=False)
+    ensure_private_dir(gate_dir())
+    ensure_private_dir(desktop_ssh_dir())
+    slot_dir = os.path.join(desktop_ssh_dir(), slot)
+    ensure_private_dir(slot_dir)
+    state_path = os.path.join(gate_dir(), "serve-%s.json" % slot)
+    lock_path = os.path.join(gate_dir(), "serve-%s.lock" % slot)
+
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        state = read_json_file(state_path)
+        if state is not None:
+            if (state.get("tokenFingerprint") == fingerprint_token(token)
+                    and isinstance(state.get("port"), int) and state["port"] > 0
+                    and pid_is_our_serve(state)):
+                return "PORT %d" % state["port"]
+            # Dead server, half-done spawn, or a new token: replace the server.
+            cleanup_state(state, state_path)
+
+        if update_in_progress():
+            raise GateError("update-in-progress", "a Hermes update is running")
+        hermes = find_hermes(options.get("hermes"))
+        check_serve_support(hermes)
+        state = spawn_serve(hermes, slot_dir, token)
+        write_private_file_atomic(state_path, json.dumps(state, sort_keys=True).encode("utf-8"))
+        timeout_s = float(os.environ.get("HERMESCONNECT_READY_TIMEOUT", "120"))
+        try:
+            port = scrape_ready_port(state["logPath"], state["pid"], timeout_s)
+        except GateError:
+            cleanup_state(state, state_path)
+            raise
+        state["port"] = port
+        write_private_file_atomic(state_path, json.dumps(state, sort_keys=True).encode("utf-8"))
+        return "PORT %d" % port
+    finally:
+        os.close(lock_fd)
+
+
+# ---------------------------------------------------------------------------
+# location
+# ---------------------------------------------------------------------------
+
+LOCATION_REQUIRED = ("lat", "lon", "accuracy_m", "timestamp")
+LOCATION_OPTIONAL = ("speed", "course")
+
+
+def _reject_constant(name):
+    raise ValueError("non-finite number")
+
+
+def _number(value):
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def parse_timestamp(value):
+    """Return an aware UTC datetime from ISO 8601 text (with a zone) or Unix seconds."""
+    if _number(value):
+        try:
+            return datetime.datetime.fromtimestamp(value, datetime.timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str) or len(value) > 40:
+        return None
+    text = value.strip()
+    if text.endswith("Z") or text.endswith("z"):
+        text = text[:-1] + "+00:00"
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d{1,9})?([+-]\d{2}:\d{2})", text)
+    if not match:
+        return None
+    fraction = (match.group(2) or "")[:7]  # Python 3.8 accepts 3 or 6 fraction digits only.
+    if fraction:
+        fraction = (fraction + "000000")[:7]
+    try:
+        parsed = datetime.datetime.fromisoformat(match.group(1) + fraction + match.group(3))
+    except ValueError:
+        return None
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def iso_utc(moment):
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (moment.microsecond // 1000)
+
+
+def validate_location(raw):
+    """Return the record to store, or raise GateError."""
+    def bad(text):
+        return GateError("bad-location", text)
+
+    try:
+        fix = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+    except (UnicodeDecodeError, ValueError):
+        raise bad("the input is not valid JSON")
+    if not isinstance(fix, dict):
+        raise bad("the input must be one JSON object")
+    unknown = sorted(set(fix) - set(LOCATION_REQUIRED) - set(LOCATION_OPTIONAL))
+    if unknown:
+        raise bad("unknown field: %s" % unknown[0][:40])
+    for key in LOCATION_REQUIRED:
+        if key not in fix:
+            raise bad("missing field: %s" % key)
+    lat, lon, accuracy = fix["lat"], fix["lon"], fix["accuracy_m"]
+    if not _number(lat) or not -90 <= lat <= 90:
+        raise bad("lat must be a number from -90 to 90")
+    if not _number(lon) or not -180 <= lon <= 180:
+        raise bad("lon must be a number from -180 to 180")
+    if not _number(accuracy) or accuracy < 0:
+        raise bad("accuracy_m must be a number of 0 or more")
+    moment = parse_timestamp(fix["timestamp"])
+    if moment is None:
+        raise bad("timestamp must be ISO 8601 with a time zone, or Unix seconds")
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if (moment - now).total_seconds() > LOCATION_FUTURE_SLACK_S:
+        raise bad("timestamp is in the future")
+    speed = fix.get("speed")
+    if speed is not None and (not _number(speed) or speed < 0):
+        raise bad("speed must be a number of 0 or more, or null")
+    course = fix.get("course")
+    if course is not None and (not _number(course) or not 0 <= course <= 360):
+        raise bad("course must be a number from 0 to 360, or null")
+    return {
+        "schemaVersion": LOCATION_SCHEMA,
+        "lat": float(lat),
+        "lon": float(lon),
+        "accuracy_m": float(accuracy),
+        "timestamp": iso_utc(moment),
+        "speed": None if speed is None else float(speed),
+        "course": None if course is None else float(course),
+        "received_at": iso_utc(now),
+        "source": "hermesconnect",
+    }
+
+
+def cmd_location(options):
+    raw = read_stdin(LOCATION_MAX_BYTES)
+    if raw is None:
+        raise GateError("bad-location", "the input is larger than %d bytes" % LOCATION_MAX_BYTES)
+    record = validate_location(raw)
+    ensure_private_dir(hermes_root(), fix_mode=False)
+    ensure_private_dir(gate_dir())
+    path = os.path.join(gate_dir(), "location.json")
+    lock_fd = os.open(os.path.join(gate_dir(), "location.lock"),
+                      os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        current = read_json_file(path)
+        if current is not None:
+            stored = parse_timestamp(current.get("timestamp"))
+            if stored is not None and stored > parse_timestamp(record["timestamp"]):
+                return "OK"  # An older fix (outbox replay) never replaces a newer one.
+        write_private_file_atomic(path, (json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
+    finally:
+        os.close(lock_fd)
+    return "OK"
+
+
+# ---------------------------------------------------------------------------
+# ping and dispatch
+# ---------------------------------------------------------------------------
+
+def cmd_ping(options):
+    return "PONG %s" % GATE_VERSION
+
+
+HANDLERS = {"serve": cmd_serve, "location": cmd_location, "ping": cmd_ping}
+
+
+def parse_options(argv):
+    options = {"slot": DEFAULT_SLOT, "hermes": None}
+    i = 0
+    while i < len(argv):
+        word = argv[i]
+        if word in ("--slot", "--hermes") and i + 1 < len(argv):
+            options[word[2:]] = argv[i + 1]
+            i += 2
+            continue
+        raise GateError("bad-config", "unknown gate option", exit_code=2)
+    if not SLOT_RE.fullmatch(options["slot"]):
+        raise GateError("bad-config", "--slot must be 32 lowercase hex characters", exit_code=2)
+    return options
+
+
+def parse_request(environ):
+    request = environ.get("SSH_ORIGINAL_COMMAND")
+    if request is None:
+        raise GateError("not-allowed", "this key cannot open a shell", exit_code=2)
+    words = request.split()
+    if len(words) != 1 or words[0] not in COMMANDS or request.strip() != words[0]:
+        raise GateError("not-allowed", "allowed commands: %s" % ", ".join(COMMANDS), exit_code=2)
+    return words[0]
+
+
+def main(argv=None, environ=None):
+    argv = sys.argv[1:] if argv is None else argv
+    environ = os.environ if environ is None else environ
+    try:
+        options = parse_options(argv)
+        command = parse_request(environ)
+        output = HANDLERS[command](options)
+    except GateError as error:
+        sys.stderr.write("ERROR %s: %s\n" % (error.code, error.text))
+        sys.stderr.flush()
+        return error.exit_code
+    except OSError as error:
+        sys.stderr.write("ERROR io: %s\n" % (errno.errorcode.get(error.errno, "failure")))
+        sys.stderr.flush()
+        return 1
+    sys.stdout.write(output + "\n")
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
