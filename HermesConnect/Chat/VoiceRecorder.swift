@@ -131,13 +131,14 @@ final class AVVoiceRecorder: VoiceRecording {
 }
 
 /// The folder of the memo files: Application Support/VoiceMemos. The files stay until the owner deletes the memo.
+/// `ProtectedStorage` rules (issue #18): `completeUntilFirstUserAuthentication`, and no backup.
 enum VoiceMemoFiles {
     static func directory() -> URL {
         let base = (try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                                  appropriateFor: nil, create: true))
             ?? FileManager.default.temporaryDirectory
         let folder = base.appendingPathComponent("VoiceMemos", isDirectory: true)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? ProtectedStorage.prepare(directory: folder)
         return folder
     }
 

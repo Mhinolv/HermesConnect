@@ -111,7 +111,9 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.lines(), [self.expected_line(port=47555)])
 
     def test_bad_port_option_is_refused(self):
-        for port in ("0", "80", "1023", "65536", "abc", "4710 0", "+47100", "047100", ""):
+        # A newline hides a second value from a line-based check (issue #18).
+        for port in ("0", "80", "1023", "65536", "abc", "4710 0", "+47100", "047100", "",
+                     "47100\n9119", "47100\n", "\n47100", "47100\t"):
             with self.subTest(port=port):
                 result = self.install("--port", port, self.line)
                 self.assertNotEqual(result.returncode, 0, result.stdout)

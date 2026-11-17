@@ -34,6 +34,7 @@
 		A38CB3AF8652AF8F16EC8DB7 /* ConnectionStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76E748D4ED9CB565A2F48120 /* ConnectionStatusView.swift */; };
 		A725F31205078D24423F830F /* MessageKit in Frameworks */ = {isa = PBXBuildFile; productRef = CDED3844474FB97BAA703825 /* MessageKit */; };
 		AE56777FBDA0235B51FB078E /* AttachmentStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E77AC33AF86D6AFE86FDB669 /* AttachmentStripView.swift */; };
+		B72A042E912127198DCDA854 /* ProtectedStorageAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */; };
 		B97FEBCCFBBC2C3312E79743 /* AppLockCover.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5500FE30849A059FC03DF0 /* AppLockCover.swift */; };
 		CFB55369F229DCF8B92BA398 /* ChatBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12550753F6EF1111C87EA8A8 /* ChatBubble.swift */; };
 		D079943BAE0C42A8E25FFAB2 /* DeviceKeyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEE713B92846B56241CD9612 /* DeviceKeyView.swift */; };
@@ -88,6 +89,7 @@
 		BF8E9D05C49A73D36F5106A7 /* LocationAccessPrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationAccessPrompt.swift; sourceTree = "<group>"; };
 		C80A034BAA06291CE4BB4106 /* HermesConnectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesConnectTests.swift; sourceTree = "<group>"; };
 		CEE713B92846B56241CD9612 /* DeviceKeyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceKeyView.swift; sourceTree = "<group>"; };
+		DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtectedStorageAppTests.swift; sourceTree = "<group>"; };
 		E77AC33AF86D6AFE86FDB669 /* AttachmentStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentStripView.swift; sourceTree = "<group>"; };
 		F0EA96A6753C403E6A93EDFD /* SessionListScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListScreen.swift; sourceTree = "<group>"; };
 		F3C4E1EC060A41E57D2B774C /* DemoChatTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoChatTransport.swift; sourceTree = "<group>"; };
@@ -156,6 +158,7 @@
 				BDDF85200B57F3AFCAB1552A /* AttachmentUITests.swift */,
 				C80A034BAA06291CE4BB4106 /* HermesConnectTests.swift */,
 				40916C67E6E9CDFF43F23AB8 /* LocationControllerTests.swift */,
+				DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */,
 				83E296700CE9EBB2D816E590 /* SessionListTests.swift */,
 				2A8691638CC5B4480E12DCC9 /* VoiceMemoUITests.swift */,
 			);
@@ -357,6 +360,7 @@
 				43E9BA6A1999EA550F1BE33C /* AttachmentUITests.swift in Sources */,
 				E230335998617506596F1F26 /* HermesConnectTests.swift in Sources */,
 				74C7DA0960EA120C51C2AF65 /* LocationControllerTests.swift in Sources */,
+				B72A042E912127198DCDA854 /* ProtectedStorageAppTests.swift in Sources */,
 				005CA6251E125BF95E1E03B3 /* SessionListTests.swift in Sources */,
 				F3361E416896D9B2A169029A /* VoiceMemoUITests.swift in Sources */,
 			);

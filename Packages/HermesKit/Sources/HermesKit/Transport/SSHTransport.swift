@@ -35,6 +35,8 @@ public protocol SSHSession: Sendable {
     /// Listen on `127.0.0.1:<random port>` on this device. Each accepted connection opens a
     /// `direct-tcpip` channel to `127.0.0.1:<remotePort>` on the server (`LoopbackForward.remoteHost`).
     func openLoopbackForward(remotePort: Int) async throws -> any LoopbackForward
+    /// The cipher and key exchange that this connection uses (issue #18). Nil when the transport cannot tell.
+    func negotiatedAlgorithms() async -> SSHNegotiatedAlgorithms?
     func close() async
 }
 
@@ -42,6 +44,8 @@ extension SSHSession {
     public func execute(_ command: GateCommand) async throws -> String {
         try await execute(command, stdin: nil)
     }
+
+    public func negotiatedAlgorithms() async -> SSHNegotiatedAlgorithms? { nil }
 }
 
 /// A local listener on this device that forwards to the server loopback.
@@ -93,6 +97,8 @@ public enum SSHConnectionError: Error, Sendable, Equatable, CustomStringConverti
     case sessionTokenRejected
     /// The local forward to the server loopback did not open (issue #4).
     case forwardFailed
+    /// The server offers no cipher or key exchange that the app allows (`SSHAlgorithmPolicy`, issue #18).
+    case noAllowedAlgorithms
 
     public var description: String {
         switch self {
@@ -107,6 +113,7 @@ public enum SSHConnectionError: Error, Sendable, Equatable, CustomStringConverti
         case .hermesNotReady: "Hermes did not get ready in time."
         case .sessionTokenRejected: "Hermes did not accept the session token."
         case .forwardFailed: "The connection to Hermes on the server did not open."
+        case .noAllowedAlgorithms: "The server offers no strong SSH cipher or key exchange that this app allows."
         }
     }
 }
@@ -116,11 +123,14 @@ public struct GateConnection: Sendable {
     public let session: any SSHSession
     /// The gate version from `PONG <version>`.
     public let gateVersion: String
+    /// The cipher and key exchange of this connection (issue #18). Nil when the transport cannot tell.
+    public var algorithms: SSHNegotiatedAlgorithms? = nil
 }
 
 /// Connects to the one server of the owner with the pinned host key (issue #3).
 public struct HostConnector: Sendable {
     public let transport: any SSHTransport
+    private let log = HermesLog(category: "ssh")
 
     public init(transport: any SSHTransport) {
         self.transport = transport
@@ -148,7 +158,9 @@ public struct HostConnector: Sendable {
         do {
             let reply = try await session.execute(.ping)
             guard let version = Self.parsePong(reply) else { throw SSHConnectionError.unexpectedReply }
-            return GateConnection(session: session, gateVersion: version)
+            let algorithms = await session.negotiatedAlgorithms()
+            log.info("SSH connected: gate \(version), \(algorithms?.displayText ?? "algorithms unknown")")
+            return GateConnection(session: session, gateVersion: version, algorithms: algorithms)
         } catch {
             await session.close()
             throw (error as? SSHConnectionError) ?? .unreachable
@@ -205,6 +217,8 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
     private var _forwardFailure: SSHConnectionError?
     private var _locationFailure: SSHConnectionError?
     private var _locationReply = "OK\n"
+    private var _algorithms: SSHNegotiatedAlgorithms? = SSHNegotiatedAlgorithms(
+        cipher: "aes256-gcm@openssh.com", keyExchange: "curve25519-sha256")
     private var _serverAlive = false
     private var liveToken: Data?
     private var livePort = 0
@@ -256,6 +270,12 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
     public var locationReply: String {
         get { lock.withLock { _locationReply } }
         set { lock.withLock { _locationReply = newValue } }
+    }
+
+    /// The algorithms that each session reports. Nil simulates a transport that cannot tell.
+    public var algorithms: SSHNegotiatedAlgorithms? {
+        get { lock.withLock { _algorithms } }
+        set { lock.withLock { _algorithms = newValue } }
     }
 
     /// `false` simulates a server that exited. The next `serve` spawns a new one.
@@ -333,6 +353,10 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
 
         func openLoopbackForward(remotePort: Int) async throws -> any LoopbackForward {
             try transport.openForward(remotePort: remotePort)
+        }
+
+        func negotiatedAlgorithms() async -> SSHNegotiatedAlgorithms? {
+            transport.algorithms
         }
 
         func close() async {

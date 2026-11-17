@@ -117,8 +117,14 @@ EOF
 
 if [ "$PORT_GIVEN" -eq 0 ]; then
   PORT="$SLOT_PORT"
-elif ! printf '%s' "$PORT" | grep -Eq '^[1-9][0-9]{3,4}$' || [ "$PORT" -lt 1024 ] || [ "$PORT" -gt 65535 ]; then
-  die "--port must be a number from 1024 to 65535"
+else
+  # Digits only. `case` checks the whole value: grep checks each line, so "47100<newline>9119" passed it.
+  case "$PORT" in
+    ''|*[!0-9]*) die "--port must be a number from 1024 to 65535" ;;
+  esac
+  if ! printf '%s' "$PORT" | grep -Eq '^[1-9][0-9]{3,4}$' || [ "$PORT" -lt 1024 ] || [ "$PORT" -gt 65535 ]; then
+    die "--port must be a number from 1024 to 65535"
+  fi
 fi
 
 case "$GATE_DEST" in

@@ -157,6 +157,15 @@ private struct FailingKeyStore: DeviceKeyStore {
         let transport: ScriptedSSHTransport
         let profiles: InMemoryServerProfileStore
         let http: ScriptedHermesHTTP
+        let keyStore: KeychainDeviceKeyStore
+        let serve: ServeBootstrap
+
+        /// A new model on the same stores and server: the app after a relaunch.
+        @MainActor func relaunch() -> AppModel {
+            AppModel(keyStore: keyStore, profileStore: profiles,
+                     defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!,
+                     deviceName: "Test iPhone", transport: transport, serve: serve)
+        }
     }
 
     private func makeModel(pin: HostKey? = nil, serverKey: HostKey = .sample,
@@ -171,7 +180,7 @@ private struct FailingKeyStore: DeviceKeyStore {
                              defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!,
                              deviceName: "Test iPhone", transport: transport, serve: serve)
         await model.ensureKey()
-        return Setup(model: model, transport: transport, profiles: profiles, http: http)
+        return Setup(model: model, transport: transport, profiles: profiles, http: http, keyStore: keyStore, serve: serve)
     }
 
     @Test func firstConnectAsksForTrustAndSavesNothing() async throws {
@@ -299,6 +308,66 @@ private struct FailingKeyStore: DeviceKeyStore {
         await setup.model.resetKey()
         await setup.model.connect()
         #expect(setup.model.connection == .connected(gateVersion: "2"))
+    }
+
+    /// Issue #18: the port pin is saved per profile, so a relaunch keeps it. Only Reset Device Key clears it.
+    @Test func portPinSurvivesARelaunchAndForgetHostKey() async throws {
+        let setup = await makeModel(pin: .sample)
+        setup.transport.pingReply = .success("PONG 2\n")
+        await setup.model.connect()
+        #expect(setup.model.connection == .connected(gateVersion: "2"))
+        #expect(try setup.profiles.load()?.servePort == 41_001)
+        await setup.model.disconnect()
+
+        let relaunched = setup.relaunch()
+        setup.transport.serverAlive = false  // The fake gate spawns again on another port.
+        await relaunched.connect()
+        #expect(relaunched.connection == .notStarted(.gateError("port-changed")))
+
+        try await relaunched.forgetHostKey()
+        #expect(try setup.profiles.load()?.servePort == 41_001)
+
+        await relaunched.resetKey()
+        #expect(try setup.profiles.load()?.servePort == nil)
+        #expect(relaunched.profile?.servePort == nil)
+    }
+
+    @Test func newServerClearsThePortPinAndTheAlgorithms() async throws {
+        let setup = await makeModel(pin: .sample)
+        setup.transport.pingReply = .success("PONG 2\n")
+        await setup.model.connect()
+        var profile = try #require(setup.model.profile)
+        #expect(profile.servePort != nil)
+        #expect(profile.lastAlgorithms != nil)
+        profile.host = "other.example.com"
+        try setup.model.saveProfile(profile)
+        #expect(try setup.profiles.load()?.servePort == nil)
+        #expect(try setup.profiles.load()?.lastAlgorithms == nil)
+    }
+
+    /// Issue #18: Settings > Server shows the last negotiated pair, also when offline.
+    @Test func connectSavesTheNegotiatedAlgorithms() async throws {
+        let setup = await makeModel(pin: .sample)
+        #expect(setup.model.profile?.lastAlgorithms == nil)
+        await setup.model.connect()
+        let expected = SSHNegotiatedAlgorithms(cipher: "aes256-gcm@openssh.com", keyExchange: "curve25519-sha256")
+        #expect(try setup.profiles.load()?.lastAlgorithms == expected)
+
+        await setup.model.disconnect()
+        setup.transport.algorithms = nil  // A connection that cannot tell keeps the last pair.
+        await setup.model.connect()
+        #expect(setup.model.connection == .connected(gateVersion: "1"))
+        #expect(setup.model.profile?.lastAlgorithms == expected)
+
+        await setup.model.disconnect()
+        setup.transport.connectFailure = .unreachable
+        await setup.model.connect()
+        #expect(setup.model.connection == .offline(.unreachable))
+        #expect(setup.model.profile?.lastAlgorithms?.displayText == "aes256-gcm@openssh.com · curve25519-sha256")
+    }
+
+    @Test func noAllowedAlgorithmsIsNotStarted() {
+        #expect(AppModel.failureState(for: .noAllowedAlgorithms) == .notStarted(.noAllowedAlgorithms))
     }
 
     @Test(arguments: ["hermes-not-found", "update-required", "not-allowed", "bad-token", "exit 2"])
