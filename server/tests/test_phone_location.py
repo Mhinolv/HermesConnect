@@ -180,7 +180,7 @@ class NotMovedTests(PluginTestCase):
         self.assertNotIn("phone_fix", result)
         self.assertIn("86 minutes old", result["note"])
         self.assertIn("1000 m", result["note"])
-        self.assertIn("did not move", result["note"])
+        self.assertIn("probably has not moved", result["note"])
         self.assertEqual(self.findmy_calls(), 0, "an old valid phone fix must not call Find My")
 
     def test_fix_just_over_30_minutes_is_not_moved(self):
@@ -191,14 +191,40 @@ class NotMovedTests(PluginTestCase):
         self.assertTrue(result["not_moved"])
         self.assertEqual(self.findmy_calls(), 0)
 
-    def test_a_fix_days_old_is_still_used_with_its_age(self):
+    def test_a_fix_up_to_12_hours_old_probably_has_not_moved(self):
+        self.write_fix(record(minutes_ago=11.9 * 60, accuracy_m=65))
+        result = self.call()
+        self.assertTrue(result["not_moved"])
+        self.assertIn("about 12 hours old", result["note"])
+        self.assertIn("65 m", result["note"])
+        self.assertIn("probably has not moved", result["note"])
+
+    def test_a_fix_over_12_hours_old_is_the_last_known_location(self):
+        # QA #53 risk 3 (main decision): no "not moved" claim after 12 hours. Keep the coordinates, no Find My.
         self.install_findmy()
         self.write_fix(record(minutes_ago=3 * 24 * 60))
         result = self.call()
         self.assertEqual(result["source"], "hermesconnect")
+        self.assertEqual((result["latitude"], result["longitude"]), (37.3349, -122.009))
         self.assertAlmostEqual(result["minutes_ago"], 3 * 24 * 60, delta=0.2)
-        self.assertIn("4320 minutes old", result["note"])
+        self.assertTrue(result["stale"])
+        self.assertFalse(result["not_moved"])
+        self.assertIn("Last known phone location, about 3 days old, may be out of date.", result["note"])
+        self.assertNotIn("not moved", result["note"])
         self.assertEqual(self.findmy_calls(), 0)
+
+    def test_the_arrival_time_of_a_visit_is_in_the_result(self):
+        arrived = iso(datetime.now(timezone.utc) - timedelta(minutes=50))
+        self.write_fix(record(minutes_ago=50, arrived_at=arrived))
+        result = self.call()
+        self.assertEqual(result["arrived_at"], arrived[:19] + "Z")
+        self.assertIn("arrived at this place", result["note"])
+        self.write_fix(record(minutes_ago=5, arrived_at=None))
+        self.assertNotIn("arrived_at", self.call())
+        self.write_fix(record(minutes_ago=5, arrived_at="soon"))
+        result = self.call()
+        self.assertEqual(result["source"], "hermesconnect")
+        self.assertNotIn("arrived_at", result)
 
     def test_fresh_fix_is_not_marked_not_moved(self):
         self.write_fix(record(minutes_ago=5))
@@ -217,6 +243,8 @@ class NotMovedTests(PluginTestCase):
         self.assertIn("missing or not valid", description)
         self.assertNotIn("more than 30 minutes old, the tool uses Find My", description)
         self.assertIn("not_moved", description)
+        self.assertIn("12 hours", description)
+        self.assertIn("arrived_at", description)
 
 
 class FallbackTests(PluginTestCase):
@@ -389,7 +417,8 @@ class FallbackTests(PluginTestCase):
 class GateToPluginTests(GateTestCase):
     def test_fix_stored_by_the_gate_is_read_by_the_plugin(self):
         moment = datetime.now(timezone.utc) - timedelta(minutes=4)
-        fix = {"lat": 51.5007, "lon": -0.1246, "accuracy_m": 8, "timestamp": iso(moment), "speed": None}
+        fix = {"lat": 51.5007, "lon": -0.1246, "accuracy_m": 8, "timestamp": iso(moment), "speed": None,
+               "arrived_at": iso(moment)}
         result = self.gate("location", stdin=json.dumps(fix).encode())
         self.assertEqual(result.stdout, b"OK\n", result.stderr)
         with mock.patch.dict(os.environ, {"HOME": self.home}), mock.patch.dict(sys.modules, fake_registry()):
@@ -399,6 +428,7 @@ class GateToPluginTests(GateTestCase):
         self.assertEqual((data["latitude"], data["longitude"], data["accuracy_m"]), (51.5007, -0.1246, 8))
         self.assertAlmostEqual(data["minutes_ago"], 4, delta=0.2)
         self.assertFalse(data["stale"])
+        self.assertEqual(data["arrived_at"], iso(moment)[:19] + "Z")
 
 
 class RegistrationTests(unittest.TestCase):

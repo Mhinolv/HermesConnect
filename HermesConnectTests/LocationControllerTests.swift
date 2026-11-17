@@ -61,8 +61,8 @@ private final class FakeBackgroundTasks {
 
 private let t0 = Date(timeIntervalSince1970: 1_800_000_000)
 
-private func fix(_ lat: Double = 37.3349, at time: Date = t0) -> LocationFix {
-    LocationFix(latitude: lat, longitude: -122.009, horizontalAccuracy: 10, timestamp: time)!
+private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double = 10) -> LocationFix {
+    LocationFix(latitude: lat, longitude: -122.009, horizontalAccuracy: accuracy, timestamp: time)!
 }
 
 @MainActor
@@ -360,6 +360,36 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0) -> LocationFix {
         #expect(rig.uploader.payloads.count == 2)
         // A later fix in the same place obeys the rate limit again.
         rig.controller.received([fix(37.3351, at: .now)])
+        await rig.controller.waitForUploads()
+        #expect(rig.uploader.payloads.count == 2)
+    }
+
+    // QA #53 risk 2: only a new, accurate fix answers the request. A cached or coarse update keeps the rate limit.
+
+    @Test func aCachedUpdateOlderThanTheRequestDoesNotTakeTheFreshSlot() async {
+        let rig = make(.authorizedAlways, enabled: true)
+        rig.controller.received([fix(at: .now.addingTimeInterval(-10))])
+        await rig.controller.waitForUploads()
+        rig.controller.appDidBecomeActive()
+        // `startUpdatingLocation` gives the cached location first.
+        rig.controller.received([fix(37.3350, at: .now.addingTimeInterval(-60))])
+        await rig.controller.waitForUploads()
+        #expect(rig.uploader.payloads.count == 1)
+        // The `requestLocation` answer still goes without the rate limit.
+        rig.controller.received([fix(37.3351, at: .now)])
+        await rig.controller.waitForUploads()
+        #expect(rig.uploader.payloads.count == 2)
+    }
+
+    @Test func aCoarseUpdateDoesNotTakeTheFreshSlot() async {
+        let rig = make(.authorizedAlways, enabled: true)
+        rig.controller.received([fix(at: .now.addingTimeInterval(-10))])
+        await rig.controller.waitForUploads()
+        rig.controller.didConnect()
+        rig.controller.received([fix(37.3350, at: .now, accuracy: 101)])
+        await rig.controller.waitForUploads()
+        #expect(rig.uploader.payloads.count == 1)
+        rig.controller.received([fix(37.3351, at: .now, accuracy: 100)])
         await rig.controller.waitForUploads()
         #expect(rig.uploader.payloads.count == 2)
     }

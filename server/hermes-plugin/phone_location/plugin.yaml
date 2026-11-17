@@ -1,12 +1,13 @@
 name: phone_location
 label: Phone location (HermesConnect)
 kind: standalone
-version: 0.2.0
+version: 0.3.0
 author: local
 description: >
   One tool, phone_location: the last location fix that the owner's iPhone sent through the
-  HermesConnect gate (~/.hermes/hermesconnect/location.json). A fix older than 30 minutes means
-  "not moved" and comes back with its age and accuracy. If the fix is missing or not valid, the
+  HermesConnect gate (~/.hermes/hermesconnect/location.json). A fix from 30 minutes to 12 hours old
+  means "probably not moved". An older fix is the last known location. Both come back with their age
+  and accuracy. If the fix is missing or not valid, the
   tool uses the findmy plugin (findmy_location) when it is installed.
 provides_tools:
   - phone_location

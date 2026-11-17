@@ -8,8 +8,8 @@ The gate stores the newest fix in ``$HOME/.hermes/hermesconnect/location.json`` 
      "received_at": "2026-11-16T12:00:03.120Z", "source": "hermesconnect"}
 
 The app sends a fix only when the owner moves (about 500 m) or arrives at a place, so a valid fix
-older than STALE_MINUTES means "not moved" (issue #51). The tool returns it with its real age and
-accuracy. Only if the fix is missing or not valid does the tool call the findmy plugin
+older than STALE_MINUTES means "probably not moved" up to NOT_MOVED_HOURS, and "last known location"
+after that (issue #51). The tool returns it with its real age and accuracy. Only if the fix is missing or not valid does the tool call the findmy plugin
 (``findmy_location``) in this process, when that plugin is installed. The phone gets no
 command channel: this plugin only reads the file. It never logs coordinates.
 """
@@ -28,6 +28,8 @@ from tools.registry import tool_error, tool_result
 
 TOOLSET = "phone_location"
 STALE_MINUTES = 30
+# Up to this age an old fix means "probably not moved". After it, the fix is only the last known location.
+NOT_MOVED_HOURS = 12
 MAX_FILE_BYTES = 65536
 FUTURE_SLACK_MINUTES = 5
 # A fix from before HermesConnect existed is not valid. Any later valid fix counts, however old.
@@ -45,9 +47,11 @@ SCHEMA = {
         "longitude, accuracy, when it was located, how many minutes ago, and an Apple Maps link. "
         "Use it when the owner asks about places near them, distance, directions, travel time, or "
         "weather where they are. If the phone fix is missing or not valid, the tool uses Find My "
-        "(findmy_location) when it can. If 'not_moved' is true, no newer fix came from the phone, so the "
-        "owner most likely did not move: use the location, and say how old it is and how exact it is "
-        "(accuracy_m). If 'stale' is true, say how old the location is. "
+        "(findmy_location) when it can. If 'not_moved' is true (a fix up to 12 hours old), no newer fix came "
+        "from the phone, so the owner has probably not moved: use the location, and say how old it is and how "
+        "exact it is (accuracy_m). If 'stale' is true and 'not_moved' is false, it is only the last known "
+        "location and may be out of date: say so. 'arrived_at' is when the owner arrived at this place. "
+        "If 'stale' is true, say how old the location is. "
         "Do not repeat exact coordinates unless the owner asks for them."
     ),
     "parameters": {"type": "object", "properties": {}, "required": []},
@@ -129,6 +133,10 @@ def _read_fix(path: str, now: datetime) -> Tuple[Optional[dict], str]:
     if (when - now).total_seconds() > FUTURE_SLACK_MINUTES * 60:
         return None, "the phone location time is in the future (clock skew)"
     speed, course = data.get("speed"), data.get("course")
+    arrived = _parse_time(data.get("arrived_at"))
+    if arrived is not None and ((arrived - now).total_seconds() > FUTURE_SLACK_MINUTES * 60
+                                or arrived < EARLIEST_FIX):
+        arrived = None  # A bad arrival time does not make the fix invalid. It is left out.
     return {
         "lat": float(lat),
         "lon": float(lon),
@@ -136,11 +144,20 @@ def _read_fix(path: str, now: datetime) -> Tuple[Optional[dict], str]:
         "when": when,
         "speed": float(speed) if _finite(speed) and speed >= 0 else None,
         "course": float(course) if _finite(course) and 0 <= course <= 360 else None,
+        "arrived": arrived,
     }, ""
 
 
 def _maps_link(lat: float, lon: float) -> str:
     return f"https://maps.apple.com/?ll={lat:.6f},{lon:.6f}"
+
+
+def _age_text(minutes: float) -> str:
+    if minutes < 120:
+        return f"{round(minutes)} minutes"
+    if minutes < 48 * 60:
+        return f"about {round(minutes / 60)} hours"
+    return f"about {round(minutes / (24 * 60))} days"
 
 
 def _phone_result(fix: dict, now: datetime, note: Optional[str] = None) -> dict:
@@ -159,12 +176,20 @@ def _phone_result(fix: dict, now: datetime, note: Optional[str] = None) -> dict:
         result["speed_mps"] = round(fix["speed"], 1)
     if fix["course"] is not None:
         result["course_deg"] = round(fix["course"])
-    if age > STALE_MINUTES:
-        result["not_moved"] = True
-        if note is None:
-            note = (f"No newer fix came from the phone. This location is {round(age)} minutes old, "
-                    f"accurate to about {round(fix['accuracy_m'])} m. The phone sends a new fix when the "
-                    "owner moves about 500 m or arrives at a place, so the owner most likely did not move.")
+    if fix.get("arrived") is not None:
+        result["arrived_at"] = fix["arrived"].strftime("%Y-%m-%dT%H:%M:%SZ")
+    if age > STALE_MINUTES and note is None:
+        accuracy = f"accurate to about {round(fix['accuracy_m'])} m"
+        if age <= NOT_MOVED_HOURS * 60:
+            result["not_moved"] = True
+            note = (f"No newer fix came from the phone. This location is {_age_text(age)} old, {accuracy}. "
+                    "The phone sends a new fix when the owner moves about 500 m or arrives at a place, "
+                    "so the owner probably has not moved.")
+        else:
+            result["not_moved"] = False
+            note = f"Last known phone location, {_age_text(age)} old, may be out of date. It is {accuracy}."
+        if "arrived_at" in result:
+            note += f" The owner arrived at this place at {result['arrived_at']}."
     if note:
         result["note"] = note
     return result

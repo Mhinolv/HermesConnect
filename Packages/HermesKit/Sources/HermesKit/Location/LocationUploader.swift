@@ -68,7 +68,8 @@ public struct GateLocationUploader: LocationUploading {
                 do {
                     // The app cancels the upload when iOS ends the background time.
                     try Task.checkCancellation()
-                    reply = try await connection.session.execute(.location, stdin: payload)
+                    let body = LocationPayload.forGate(payload, gateVersion: connection.gateVersion)
+                    reply = try await connection.session.execute(.location, stdin: body)
                 } catch {
                     await connection.session.close()
                     throw error

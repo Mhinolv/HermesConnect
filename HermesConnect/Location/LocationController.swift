@@ -108,8 +108,9 @@ final class LocationController: NSObject {
     @ObservationIgnored private let background: BackgroundTasks
     /// The owner tapped "Send Location Now". The next fix goes at once, without the rate limit.
     @ObservationIgnored private var oneShotPending = false
-    /// The app asked for a new fix on open or on connect. The next fix goes without the rate limit.
-    @ObservationIgnored private var freshFixPending = false
+    /// When the app asked for a new fix on open or on connect. The first fix that answers it goes without the
+    /// rate limit (`answersFreshRequest`). Nil when no request waits.
+    @ObservationIgnored private var freshRequestedAt: Date?
     /// True while the app is active. A launch in the background (by a location event) starts as false.
     @ObservationIgnored private var isForeground = false
     /// The uploads that run now. Tests wait for them.
@@ -123,6 +124,10 @@ final class LocationController: NSObject {
     static let alwaysAskedKey = "locationAlwaysAsked"
     /// The distance filter of the foreground updates, in meters.
     static let foregroundDistanceFilter: CLLocationDistance = 50
+    /// A fix less accurate than this does not answer a fresh request (QA #53 risk 2).
+    static let freshFixAccuracy: CLLocationAccuracy = 100
+    /// A fresh request ends after this time. Then the rate limit applies again.
+    static let freshRequestWindow: TimeInterval = 120
 
     init(manager: any LocationManaging, sharing: LocationSharing, defaults: UserDefaults = .standard,
          background: BackgroundTasks = .none) {
@@ -265,8 +270,8 @@ final class LocationController: NSObject {
 
     func received(_ fixes: [LocationFix]) {
         guard let latest = fixes.max(by: { $0.timestamp < $1.timestamp }) else { return }
-        let fresh = freshFixPending
-        freshFixPending = false
+        let fresh = answersFreshRequest(latest)
+        if fresh || oneShotPending { freshRequestedAt = nil }
         if oneShotPending {
             oneShotPending = false
             run { [weak self] sharing, precision in
@@ -280,7 +285,6 @@ final class LocationController: NSObject {
 
     /// Core Location could not get a fix. Only a "Send Location Now" tap shows it.
     func locationFailed() {
-        freshFixPending = false
         guard oneShotPending else { return }
         oneShotPending = false
         manualSend = .notDelivered
@@ -308,8 +312,19 @@ final class LocationController: NSObject {
     /// Ask Core Location for one new full-accuracy fix (issue #51). Only when automatic sharing is on.
     private func requestFreshFix() {
         guard monitors else { return }
-        freshFixPending = true
+        freshRequestedAt = Date()
         manager.requestLocation()
+    }
+
+    /// True if `fix` answers the waiting fresh request. A cached update from `startUpdatingLocation` (older than
+    /// the request) or a coarse fix does not, so the accurate `requestLocation` answer still skips the rate limit.
+    private func answersFreshRequest(_ fix: LocationFix) -> Bool {
+        guard let requestedAt = freshRequestedAt else { return false }
+        if Date().timeIntervalSince(requestedAt) > Self.freshRequestWindow {
+            freshRequestedAt = nil
+            return false
+        }
+        return fix.timestamp >= requestedAt && fix.horizontalAccuracy <= Self.freshFixAccuracy
     }
 
     /// iOS shows the "Always" question once. Ask after the owner gave "While Using".

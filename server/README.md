@@ -36,7 +36,7 @@ restrict,port-forwarding,permitopen="127.0.0.1:<port>",permitlisten="127.0.0.1:1
 5. The gate starts `hermes serve --isolated --host 127.0.0.1 --port <port> --ssh-session-token-file <file> --ssh-owner-nonce <nonce>` in a new session.
 6. The gate waits up to 120 s for `HERMES_BACKEND_READY port=<n>` in `<nonce>.log`. If `<n>` is not the slot port, the gate stops the server and fails with `port-mismatch`. Else it prints `PORT <port>`.
 
-The app pins the port of a version 2 gate in memory. If a later `serve` prints another port, the app refuses it (`port-changed`). Reset Device Key clears the pin.
+The app pins the port of a version 2 or later gate in memory. If a later `serve` prints another port, the app refuses it (`port-changed`). Reset Device Key clears the pin.
 
 The server reads and deletes the token file. The gate stores only `sha256(token)[:32]` in `~/.hermes/hermesconnect/serve-<slot>.json` (mode 0600). The gate never prints or logs the token.
 
@@ -63,12 +63,14 @@ The input is one JSON object:
 - `lat` (-90 to 90), `lon` (-180 to 180), `accuracy_m` (0 or more) and `timestamp` are required.
 - `timestamp` is ISO 8601 with a time zone, or Unix seconds. A time more than 10 minutes in the future is refused.
 - `speed` (m/s, 0 or more) and `course` (0 to 360) are optional and can be `null`. Other fields are refused.
+- `arrived_at` (gate 3, issue #51) is optional and can be `null`. It is when the owner arrived at the place of a visit, ISO 8601 with a time zone. The app sends it only to gate 3 or later.
 
 The gate writes `~/.hermes/hermesconnect/location.json` (mode 0600) through an atomic rename. An older fix never replaces a newer fix. The `phone_location` plugin reads this file (see [phone_location plugin](#phone_location-plugin)):
 
 ```json
-{"accuracy_m": 12.5, "course": 90.0, "lat": 37.3349, "lon": -122.009, "received_at": "2026-11-16T12:00:03.120Z",
- "schemaVersion": 1, "source": "hermesconnect", "speed": 1.5, "timestamp": "2026-11-16T12:00:00.000Z"}
+{"accuracy_m": 12.5, "arrived_at": null, "course": 90.0, "lat": 37.3349, "lon": -122.009,
+ "received_at": "2026-11-16T12:00:03.120Z", "schemaVersion": 1, "source": "hermesconnect", "speed": 1.5,
+ "timestamp": "2026-11-16T12:00:00.000Z"}
 ```
 
 ## Install
@@ -97,9 +99,9 @@ Run these commands from a computer that has a test copy of the phone key (`phone
 
 | Test | Command | Expected result |
 |---|---|---|
-| Gate works | `ssh -i phone_key hermes@<host> ping` | `PONG 2` |
+| Gate works | `ssh -i phone_key hermes@<host> ping` | `PONG 3` |
 | No login shell | `ssh -i phone_key hermes@<host>` | `ERROR not-allowed`, connection closes |
-| No PTY | `ssh -t -i phone_key hermes@<host> ping` | `PTY allocation request failed`, then `PONG 2` |
+| No PTY | `ssh -t -i phone_key hermes@<host> ping` | `PTY allocation request failed`, then `PONG 3` |
 | No command | `ssh -i phone_key hermes@<host> 'id; bash'` | `ERROR not-allowed` |
 | No sftp | `sftp -i phone_key hermes@<host>` | Connection closes |
 | No scp | `scp -i phone_key /etc/hosts hermes@<host>:/tmp/` | Fails |
@@ -108,7 +110,7 @@ Run these commands from a computer that has a test copy of the phone key (`phone
 | No forward to other loopback ports | `ssh -N -L 9000:127.0.0.1:22 -i phone_key hermes@<host>` and `nc 127.0.0.1 9000` | `open failed: administratively prohibited` |
 | Other forward | `ssh -N -L 9000:example.com:80 -i phone_key hermes@<host>` and `nc 127.0.0.1 9000` | `open failed: administratively prohibited` |
 | No reverse forward | `ssh -N -R 9001:127.0.0.1:22 -i phone_key hermes@<host>` | `remote port forwarding failed` |
-| No agent | `ssh -A -i phone_key hermes@<host> ping` | `PONG 2` and no agent on the server |
+| No agent | `ssh -A -i phone_key hermes@<host> ping` | `PONG 3` and no agent on the server |
 | Serve | `openssl rand -hex 32 \| tr -d '\n' \| ssh -i phone_key hermes@<host> serve` | `PORT <port>` |
 | Location | `echo '{"lat":1,"lon":2,"accuracy_m":5,"timestamp":"2026-11-16T12:00:00Z"}' \| ssh -i phone_key hermes@<host> location` | `OK` |
 
@@ -119,8 +121,10 @@ Run these commands from a computer that has a test copy of the phone key (`phone
 | State of the phone fix | Result |
 |---|---|
 | 30 minutes old or less | The phone fix: `latitude`, `longitude`, `accuracy_m`, `located_at`, `minutes_ago`, `apple_maps`, `"source": "hermesconnect"`, `"stale": false`. |
-| Older than 30 minutes (issue #51) | The same phone fix with `"stale": true`, `"not_moved": true` and a `note` with its age and accuracy. No newer fix came, so the owner most likely did not move. The tool does not call Find My. |
+| Older than 30 minutes, up to 12 hours (issue #51) | The same phone fix with `"stale": true`, `"not_moved": true` and a `note` with its age and accuracy. No newer fix came, so the owner has probably not moved. The tool does not call Find My. |
+| Older than 12 hours | The same phone fix with `"stale": true`, `"not_moved": false` and the `note` "Last known phone location, <age> old, may be out of date." The tool does not call Find My. |
 | Missing, not valid (bad JSON, bad coordinates, a time before 2025), or more than 5 minutes in the future (clock skew) | The `findmy_location` result, with `"source": "findmy"` and a `phone_fix` reason. The tool calls the findmy plugin in the same process, only when its `_available()` returns true. |
+| Any valid fix with `arrived_at` | The result has `arrived_at`. A note also says when the owner arrived. A bad `arrived_at` is left out. |
 | Missing or not valid, and no Find My result | An error that tells the owner to turn on location sharing in HermesConnect. |
 
 The tool never raises an exception to Hermes. An unexpected failure gives a tool error with the exception type only. The tool looks for the findmy plugin next to its own folder, then in `$HERMES_HOME/plugins/findmy`, then in `~/.hermes/plugins/findmy`.
