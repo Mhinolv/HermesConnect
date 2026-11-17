@@ -127,6 +127,15 @@ private func query(_ request: URLRequest) -> [String: String] {
         #expect(items["request_id"]?.count == 36)
     }
 
+    /// QA #76 minor: a REST delete of an id that the server does not have is a success, like `session.delete` 4007.
+    @Test func restDeleteOfAnAbsentSessionIsASuccess() async throws {
+        let http = ScriptedHTTP()
+        http.answer("GET /api/sessions/k1/mutation-snapshot",
+                    body: #"{"session_id":"k1","exists":false,"runtime_revision":0,"runtime_generation":null}"#)
+        try await client(http).deleteSession(storedSessionId: "k1")
+        #expect(http.keys == ["GET /api/sessions/k1/mutation-snapshot"])
+    }
+
     @Test func archivedQueryAsksForArchivedRowsOnly() async throws {
         let http = ScriptedHTTP()
         http.answer("GET /api/sessions", body: #"""
@@ -402,6 +411,28 @@ private struct Refused: Error {}
         #expect(list.sessions.map(\.id) == ["k3", "k1"])
         #expect(cache.loadSessions().map(\.id) == ["k3", "k1"])
         #expect(list.archivedCount == 1)
+    }
+
+    /// QA #76 defect 1: launch and Ask Hermes must not open an archived chat.
+    @Test func archiveClearsTheActiveSessionId() async throws {
+        let transport = FakeActionsTransport(rows: rows)
+        let cache = InMemorySessionCacheStore(sessions: rows, activeSessionId: "k1")
+        let list = model(transport, cache: cache)
+        try await list.archive("k3")
+        #expect(cache.loadActiveSessionId() == "k1")
+        try await list.archive("k1")
+        #expect(cache.loadActiveSessionId() == nil)
+        #expect(list.cachedActiveSessionId == nil)
+    }
+
+    /// A failed archive keeps the active id.
+    @Test func aFailedArchiveKeepsTheActiveSessionId() async throws {
+        let transport = FakeActionsTransport(rows: rows)
+        let cache = InMemorySessionCacheStore(sessions: rows, activeSessionId: "k1")
+        let list = model(transport, cache: cache)
+        transport.failure = Refused()
+        await #expect(throws: Refused.self) { try await list.archive("k1") }
+        #expect(cache.loadActiveSessionId() == "k1")
     }
 
     @Test func aFailedArchivePutsTheRowBackInItsPlace() async throws {

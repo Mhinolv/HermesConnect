@@ -211,6 +211,8 @@ public final class SessionListModel {
             restore(removed)
             throw error
         }
+        // QA #76: launch and Ask Hermes open the active id. An archived chat must not open there.
+        if cache.loadActiveSessionId() == id { cache.saveActiveSessionId(nil) }
         archivedCount += 1
         if hasLoadedArchived, let row = removed.row, !archivedSessions.contains(where: { $0.id == id }) {
             archivedSessions.insert(row, at: 0)

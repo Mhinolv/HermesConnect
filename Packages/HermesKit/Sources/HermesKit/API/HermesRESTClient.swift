@@ -207,7 +207,12 @@ public struct HermesRESTClient: Sendable {
 
     /// `DELETE /api/sessions/{id}` (`sessions.py:853-883`), fenced like `renameSession`. Already absent is a success.
     public func deleteSession(storedSessionId: String) async throws {
-        let identity = try await mutationIdentity(storedSessionId: storedSessionId)
+        let identity: SessionMutationIdentity
+        do {
+            identity = try await mutationIdentity(storedSessionId: storedSessionId)
+        } catch HermesAPIError.notFound {
+            return // Already absent: a success, as the server answers for DELETE.
+        }
         var items = [URLQueryItem(name: "request_id", value: identity.requestId),
                      URLQueryItem(name: "expected_revision", value: String(identity.expectedRevision))]
         if let generation = identity.expectedGeneration {
