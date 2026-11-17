@@ -38,7 +38,7 @@ HermesConnect is a native iOS app. It connects one owner to their self-hosted He
 ## Security rules
 
 - Never log or print key material, tokens, the session token file content, or message bodies at info level.
-- Store the SSH private key in the Keychain, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, with user presence (Face ID) for use.
+- The SSH key is a Secure Enclave P-256 key made on the device (not extractable). Keychain `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, no per-use Face ID, so background location and catch-up work. App Lock (Face ID on open) is on by default. See research.md D1.
 - Pin the server host key on first connect (show the SHA256 fingerprint). Refuse a changed host key with a clear error.
 - Only forward to `127.0.0.1` on the server. Never accept remote forwards or agent forwarding.
 - Do not add third-party analytics or crash SDKs.
