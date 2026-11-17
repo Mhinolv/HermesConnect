@@ -229,6 +229,13 @@ public final class ReceivedFileLoader {
 
     /// The #10 bubble audio of a file: its length and levels. Ogg Opus is decoded to a WAV file next to it.
     public nonisolated static func playableAudio(at url: URL) -> VoiceReplyAudio? {
+        guard let (playable, duration) = playableFile(at: url) else { return nil }
+        return VoiceReplyAudio(fileURL: playable, duration: duration, waveform: VoiceWaveform.bars(contentsOf: playable) ?? [])
+    }
+
+    /// The file that iOS plays, and its length. Ogg Opus is decoded to a WAV file next to it.
+    /// `nil`: iOS cannot read the format. Issue #87 uses it for sent audio files, with no levels.
+    public nonisolated static func playableFile(at url: URL) -> (url: URL, duration: TimeInterval)? {
         var playable = url
         if let data = try? Data(contentsOf: url, options: .mappedIfSafe), OggOpus.isOgg(data) {
             let wav = url.deletingLastPathComponent().appending(path: "playable.wav")
@@ -238,6 +245,6 @@ public final class ReceivedFileLoader {
             playable = wav
         }
         guard let duration = VoiceReplyFiles.playableDuration(playable) else { return nil }
-        return VoiceReplyAudio(fileURL: playable, duration: duration, waveform: VoiceWaveform.bars(contentsOf: playable) ?? [])
+        return (playable, duration)
     }
 }

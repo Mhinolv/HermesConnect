@@ -256,6 +256,11 @@ struct ChatThreadView: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_: ChatViewController, context _: Context) {}
+
+    /// Issue #87: the owner left the chat. A transcription that nobody sees stops.
+    static func dismantleUIViewController(_ controller: ChatViewController, coordinator _: ()) {
+        controller.chatClosed()
+    }
 }
 
 /// A transport with no server: every send fails with "Not Delivered". Previews, tests and the DEBUG

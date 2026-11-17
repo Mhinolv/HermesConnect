@@ -79,7 +79,8 @@ final class ChatViewController: MessagesViewController {
     private var buildingBubbles = false
     /// Issue #73: the cron run screen. No composer and no tapbacks. "Copy" stays.
     let readOnly: Bool
-    /// Issue #50: the on-device transcripts of received audio files. Tests and the DEBUG demo set a fake first.
+    /// Issue #50: the on-device transcripts of received audio files. Issue #87: and of sent audio files.
+    /// Tests and the DEBUG demo set a fake first.
     lazy var audioTranscripts = ReceivedAudioTranscripts(files: model.receivedFiles,
                                                          transcription: OnDeviceTranscription.shared.transcription,
                                                          permission: SystemSpeechPermission())
@@ -117,6 +118,7 @@ final class ChatViewController: MessagesViewController {
         additionalBottomInset = ChatComposerLayout.threadGap
         configureLayout()
         audioTranscripts.onChange = { [weak self] file in self?.audioTranscriptChanged(file) }
+        audioTranscripts.onSentChange = { [weak self] item in self?.sentAudioTranscriptChanged(item) }
         if readOnly {
             // Issue #73: an empty input bar of no height, so the thread goes to the bottom of the screen.
             // MessageKit swaps the bar on the next main queue turn. Take the composer out now, so it never shows.
@@ -172,6 +174,14 @@ final class ChatViewController: MessagesViewController {
 
     private func configureLayout() {
         guard let layout = flowLayout else { return }
+        // Issue #87: a sent audio file cell is as wide as the audio bubble. First, so the setters below reach it.
+        let textCalculator = ChatTextSizeCalculator(layout: layout)
+        textCalculator.minimumWidth = { [weak self] message, maxWidth in
+            guard let self, let item = (message as? ChatBubble)?.part.attachment,
+                  self.audioTranscripts.canTranscribe(item) else { return nil }
+            return ChatVoiceLayout.bubbleSize(traits: self.traitCollection, maxWidth: maxWidth).width
+        }
+        layout.attributedTextMessageSizeCalculator = textCalculator
         // No avatars, no sender names.
         layout.setMessageIncomingAvatarSize(.zero)
         layout.setMessageOutgoingAvatarSize(.zero)
@@ -516,6 +526,15 @@ final class ChatViewController: MessagesViewController {
             // Issue #50: the transcript line under a received audio bubble.
             guard let state = audioTranscriptState(bubble, file: file) else { return nil }
             text = ReceivedAudioTranscriptText.make(state, traits: traitCollection)
+        } else if let bubble = message as? ChatBubble, let item = bubble.part.attachment {
+            // Issue #87: the same line under a sent audio file cell. The line has the width of the cell.
+            guard let state = sentAudioTranscriptState(item) else { return nil }
+            text = ReceivedAudioTranscriptText.make(state, traits: traitCollection)
+            let width = flowLayout?.attributedTextMessageSizeCalculator.messageContainerSize(for: message, at: indexPath)
+                .width ?? 0
+            let height = ChatVoiceLayout.transcriptHeight(text, width: width,
+                                                          expanded: expandedTranscripts.contains(message.messageId))
+            return (text, height, width)
         } else {
             return nil
         }
@@ -976,6 +995,13 @@ final class ChatViewController: MessagesViewController {
             cell.accessibilityCustomActions = actions
             return cell
         }
+        // Issue #87: a sent audio file reads its transcript, with "Transcribe" or "Cancel Transcription".
+        if let item = part.attachment, let transcript = sentAudioTranscriptState(item) {
+            if let spoken = ReceivedAudioTranscriptText.spoken(transcript) {
+                cell.accessibilityLabel = [cell.accessibilityLabel ?? "", spoken].joined(separator: ", ")
+            }
+            actions += sentAudioTranscriptAccessibilityActions(for: item, state: transcript)
+        }
         if part.content == .spokenReply {
             let id = row.id
             cell.accessibilityHint = row.message.spokenReply == .failed ? "Double-tap to retry." : nil
@@ -1073,6 +1099,7 @@ final class ChatViewController: MessagesViewController {
                         UIPasteboard.general.string = item.name
                     }
                 })
+                if let self { actions += self.sentAudioTranscriptMenu(for: item) }
             } else if !row.message.text.isEmpty {
                 actions.append(UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = row.message.text
@@ -1478,6 +1505,16 @@ extension ChatViewController: MessagesDataSource {
         cell.openLink = { url in UIApplication.shared.open(url) }
         if let id = row(for: message).flatMap({ $0.message.quote == nil ? nil : $0.id }) {
             cell.openQuote = { [weak self] in self?.showQuotedMessage(for: id) }
+        }
+        // Issue #87: the transcript line, or "Transcribe", under a sent audio file cell.
+        if let bubble = message as? ChatBubble, let item = bubble.part.attachment,
+           let info = transcript(for: bubble.row, message: message, at: indexPath), let text = info.text {
+            let partId = message.messageId
+            let lines = expandedTranscripts.contains(partId) ? 0 : ChatVoiceLayout.collapsedLines
+            cell.configure(transcript: text, height: info.height, lines: lines)
+            cell.onTranscriptTap = { [weak self] in self?.tapSentAudioTranscript(item, partId: partId) }
+        } else {
+            cell.configure(transcript: nil, height: 0, lines: 0)
         }
         return cell
     }
@@ -2021,4 +2058,83 @@ extension ChatViewController {
         guard audioTranscripts.state(for: file) == .noPermission, presentedViewController == nil else { return }
         present(ReceivedAudioTranscriptText.permissionAlert(), animated: true)
     }
+}
+
+// MARK: - Sent audio file transcripts (issue #87)
+
+extension ChatViewController {
+    /// The transcript state of a sent file cell. `nil` for a file that is not audio, or that is not on the phone.
+    fileprivate func sentAudioTranscriptState(_ item: ChatAttachment) -> AudioFileTranscript? {
+        audioTranscripts.canTranscribe(item) ? audioTranscripts.state(for: item) : nil
+    }
+
+    /// A tap on the line under a sent audio file cell, as under a received audio bubble.
+    fileprivate func tapSentAudioTranscript(_ item: ChatAttachment, partId: String) {
+        switch audioTranscripts.state(for: item) {
+        case .none, .failed, .noPermission:
+            audioTranscripts.start(item)
+        case .transcribing:
+            audioTranscripts.cancel(item)
+        case .done:
+            if expandedTranscripts.remove(partId) == nil { expandedTranscripts.insert(partId) }
+            guard let index = bubbles.firstIndex(where: { $0.messageId == partId }) else { return }
+            UIView.performWithoutAnimation {
+                messagesCollectionView.reloadSections(IndexSet(integer: index))
+            }
+        case .empty, .unreadable:
+            break
+        }
+    }
+
+    /// "Transcribe" or "Cancel Transcription" in the long-press menu of a sent audio file.
+    fileprivate func sentAudioTranscriptMenu(for item: ChatAttachment) -> [UIMenuElement] {
+        guard let state = sentAudioTranscriptState(item) else { return [] }
+        if state.isTranscribing {
+            return [UIAction(title: "Cancel Transcription", image: UIImage(systemName: "xmark")) { [weak self] _ in
+                self?.audioTranscripts.cancel(item)
+            }]
+        }
+        guard state.canStart else { return [] }
+        return [UIAction(title: "Transcribe", image: UIImage(systemName: ReceivedAudioTranscriptText.symbolName)) {
+            [weak self] _ in
+            self?.audioTranscripts.start(item)
+        }]
+    }
+
+    fileprivate func sentAudioTranscriptAccessibilityActions(for item: ChatAttachment,
+                                                             state: AudioFileTranscript) -> [UIAccessibilityCustomAction] {
+        if state.isTranscribing {
+            return [UIAccessibilityCustomAction(name: "Cancel Transcription") { [weak self] _ in
+                self?.audioTranscripts.cancel(item)
+                return true
+            }]
+        }
+        guard state.canStart else { return [] }
+        return [UIAccessibilityCustomAction(name: "Transcribe") { [weak self] _ in
+            self?.audioTranscripts.start(item)
+            return true
+        }]
+    }
+
+    /// Redraws the file cell of a sent audio file. Speech recognition off: the "Open Settings" alert, as in #50.
+    fileprivate func sentAudioTranscriptChanged(_ item: ChatAttachment) {
+        guard isViewLoaded else { return }
+        let sections = IndexSet(bubbles.indices.filter { bubbles[$0].part.attachment?.id == item.id })
+        if !sections.isEmpty, !buildingBubbles {
+            UIView.performWithoutAnimation {
+                messagesCollectionView.reloadSections(sections)
+            }
+            if pinnedToBottom { scrollToBottom() }
+        }
+        guard audioTranscripts.state(for: item) == .noPermission, presentedViewController == nil else { return }
+        present(ReceivedAudioTranscriptText.permissionAlert(), animated: true)
+    }
+
+    /// Issue #87 (QA #86 note 1): the owner left the chat. Each running transcription stops.
+    func chatClosed() {
+        audioTranscripts.cancelAll()
+    }
+
+    /// The bubbles of sent files (tests).
+    var sentFileBubbles: [ChatBubble] { bubbles.filter { $0.part.attachment != nil } }
 }
