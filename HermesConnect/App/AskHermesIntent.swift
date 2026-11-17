@@ -1,14 +1,28 @@
 import AppIntents
 import HermesKit
 
-/// Issue #16: the one "Ask Hermes" App Shortcut. It opens the app and sends the "Message" text at once
-/// (owner decision 2026-11-16). The root waits for setup and App Lock (`AskHermesInbox`).
-/// A text of only spaces opens the chat and sends nothing.
+/// Issue #45: what the two Siri shortcuts call. The app gives `SiriService`, and tests give a fake.
+@MainActor
+protocol SiriServing: AnyObject {
+    /// Sends the text, waits for the reply, and returns what Siri says.
+    func ask(_ text: String) async -> String
+    /// Returns what Siri says for the unread replies.
+    func read() async -> String
+}
+
+/// The service of this process. The app sets it at launch, also for a launch in the background.
+@MainActor
+enum SiriRuntime {
+    static var service: (any SiriServing)?
+}
+
+/// Issue #16 and #45: the "Ask Hermes" App Shortcut. It runs in the background: Siri sends the text and speaks
+/// the reply, and the app does not open (owner decision 2026-11-17, replaces the #16 "opens the app" decision).
 struct AskHermesIntent: AppIntent {
     static let title: LocalizedStringResource = "Ask Hermes"
-    static let description = IntentDescription("Open Hermes and send a message to your agent.")
-    /// The app opens. `openAppWhenRun` is deprecated in iOS 26.
-    static let supportedModes: IntentModes = .foreground
+    static let description = IntentDescription("Send a message to your agent. Siri speaks the reply.")
+    /// The app does not open. `openAppWhenRun` is deprecated in iOS 26.
+    static let supportedModes: IntentModes = .background
 
     /// Siri asks this when the owner does not say the text.
     static let askPrompt: LocalizedStringResource = "What do you want to ask Hermes?"
@@ -24,9 +38,24 @@ struct AskHermesIntent: AppIntent {
     }
 
     @MainActor
-    func perform() async throws -> some IntentResult {
-        AskHermesInbox.shared.post(message: message)
-        return .result()
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let text = await SiriRuntime.service?.ask(message) ?? SiriDialog.notSetUp
+        return .result(dialog: IntentDialog(stringLiteral: text))
+    }
+}
+
+/// Issue #45: the "Read Hermes" App Shortcut. Siri reads 3 or fewer unread replies in the background.
+struct ReadHermesIntent: AppIntent {
+    static let title: LocalizedStringResource = "Read Hermes"
+    static let description = IntentDescription("Siri reads the new replies from your agent.")
+    static let supportedModes: IntentModes = .background
+
+    init() {}
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let text = await SiriRuntime.service?.read() ?? SiriDialog.notSetUp
+        return .result(dialog: IntentDialog(stringLiteral: text))
     }
 }
 
@@ -36,12 +65,17 @@ struct HermesShortcuts: AppShortcutsProvider {
                     phrases: ["Ask \(.applicationName)", "Message \(.applicationName)"],
                     shortTitle: "Ask Hermes",
                     systemImageName: "bubble.left.and.text.bubble.right")
+        AppShortcut(intent: ReadHermesIntent(),
+                    phrases: ["Read \(.applicationName)", "Read my \(.applicationName) messages",
+                              "What did \(.applicationName) say"],
+                    shortTitle: "Read Hermes",
+                    systemImageName: "speaker.wave.2.bubble")
     }
 
     static let shortcutTileColor: ShortcutTileColor = .blue
 }
 
 extension AskHermesInbox {
-    /// The inbox of the app process. The intent posts to it, and `RootView` takes from it.
+    /// The inbox of the app process. `RootView` takes from it. Since #45 the intent no longer posts to it.
     static let shared = AskHermesInbox()
 }

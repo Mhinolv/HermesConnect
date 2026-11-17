@@ -1,5 +1,6 @@
 import Foundation
 import HermesKit
+import Intents
 import Observation
 import UIKit
 import UserNotifications
@@ -46,8 +47,31 @@ struct LocalNotificationPoster: LocalNotifying {
         return UNNotificationRequest(identifier: "reply-\(notification.sessionId)", content: content, trigger: nil)
     }
 
+    /// Issue #45: the incoming message of a communication notification, so Siri "Announce Notifications" can
+    /// read it. The content is the notification body: with "Show Message Preview" off it has no message text.
+    static func messageIntent(for notification: CatchUpNotification) -> INSendMessageIntent {
+        let hermes = INPerson(personHandle: INPersonHandle(value: "hermes", type: .unknown), nameComponents: nil,
+                              displayName: "Hermes", image: nil, contactIdentifier: nil, customIdentifier: "hermes")
+        return INSendMessageIntent(recipients: nil, outgoingMessageType: .outgoingMessageText,
+                                   content: notification.body,
+                                   speakableGroupName: INSpeakableString(spokenPhrase: notification.title),
+                                   conversationIdentifier: notification.sessionId, serviceName: nil,
+                                   sender: hermes, attachments: nil)
+    }
+
+    /// The request with communication content. If iOS refuses the update, the plain request goes.
+    static func communicationRequest(for notification: CatchUpNotification) async -> UNNotificationRequest {
+        let plain = request(for: notification)
+        let intent = messageIntent(for: notification)
+        let interaction = INInteraction(intent: intent, response: nil)
+        interaction.direction = .incoming
+        try? await interaction.donate()
+        guard let content = try? plain.content.updating(from: intent) else { return plain }
+        return UNNotificationRequest(identifier: plain.identifier, content: content, trigger: nil)
+    }
+
     func post(_ notification: CatchUpNotification) async {
-        try? await center.add(Self.request(for: notification))
+        try? await center.add(Self.communicationRequest(for: notification))
     }
 
     func setBadge(_ count: Int) async {
@@ -83,6 +107,19 @@ final class NotificationController: NSObject, UNUserNotificationCenterDelegate {
         set {
             withMutation(keyPath: \.showsPreview) {
                 defaults.set(newValue, forKey: NotificationSettings.showPreviewKey)
+            }
+        }
+    }
+
+    /// Issue #45: "Use Siri When Locked" in Settings > Notifications. Off by default (owner decision 2026-11-17).
+    var usesSiriWhenLocked: Bool {
+        get {
+            access(keyPath: \.usesSiriWhenLocked)
+            return SiriSettings.usesSiriWhenLocked(defaults)
+        }
+        set {
+            withMutation(keyPath: \.usesSiriWhenLocked) {
+                defaults.set(newValue, forKey: SiriSettings.useWhenLockedKey)
             }
         }
     }
