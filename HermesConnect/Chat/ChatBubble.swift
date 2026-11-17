@@ -18,7 +18,8 @@ struct ChatBubble: MessageType {
     var sender: SenderType { row.message.role == .user ? ChatSender.owner : ChatSender.hermes }
     var messageId: String { row.id }
     var sentDate: Date { row.message.date }
-    var kind: MessageKind { .attributedText(text) }
+    /// A voice memo draws in `ChatVoiceCell` (issue #9).
+    var kind: MessageKind { row.message.voice == nil ? .attributedText(text) : .custom(nil) }
 }
 
 /// Bubble text: inline Markdown, code blocks and links, with Dynamic Type fonts (issue #6).

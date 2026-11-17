@@ -28,6 +28,7 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport {
     public nonisolated var events: AsyncStream<GatewayClientEvent> { broadcast.subscribe() }
     @ObservationIgnored private nonisolated let broadcast = GatewayEventBroadcast()
     @ObservationIgnored private let makeClient: @Sendable (GatewayEndpoint) -> GatewayClient
+    @ObservationIgnored private let makeREST: @Sendable (GatewayEndpoint) -> HermesRESTClient
     @ObservationIgnored private var endpoint: GatewayEndpoint?
     @ObservationIgnored private var client: GatewayClient?
     @ObservationIgnored private var forwardTask: Task<Void, Never>?
@@ -37,8 +38,10 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport {
     /// The app asks the #4 bootstrap for a new Hermes session (`AppModel.renewHermesSession`).
     @ObservationIgnored public var onStaleToken: (@MainActor () async -> Void)?
 
-    public init(makeClient: @escaping @Sendable (GatewayEndpoint) -> GatewayClient = { GatewayClient(endpoint: $0) }) {
+    public init(makeClient: @escaping @Sendable (GatewayEndpoint) -> GatewayClient = { GatewayClient(endpoint: $0) },
+                makeREST: @escaping @Sendable (GatewayEndpoint) -> HermesRESTClient = { HermesRESTClient(endpoint: $0) }) {
         self.makeClient = makeClient
+        self.makeREST = makeREST
     }
 
     /// `true` for errors that mean "the token is not valid any more".
@@ -177,6 +180,22 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport {
 
     public func stopReply(sessionId: String) async throws -> Bool {
         try await readyClient().stopReply(sessionId: sessionId)
+    }
+
+    public func submitVoicePrompt(sessionId: String, text: String, retryBeforeRowId: Int?) async throws -> Int? {
+        try await readyClient().submitVoicePrompt(sessionId: sessionId, text: text, retryBeforeRowId: retryBeforeRowId)
+    }
+
+    /// REST on the forwarded port. It needs the #4 endpoint, not the socket.
+    /// A refused token asks for a new session once, as a socket refusal does.
+    public func transcribe(audio: Data, mimeType: String) async throws -> String {
+        guard let endpoint else { throw GatewayError.notConnected }
+        do {
+            return try await makeREST(endpoint).transcribe(audio: audio, mimeType: mimeType)
+        } catch {
+            if Self.isStaleToken(error), endpoint == self.endpoint, status == .ready { staleToken() }
+            throw error
+        }
     }
 
     public func history(sessionId: String) async throws -> [TranscriptMessage] {

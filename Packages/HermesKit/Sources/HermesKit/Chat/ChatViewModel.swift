@@ -44,6 +44,10 @@ public final class ChatViewModel {
     /// The last `open()` did not finish (offline). The next connect runs it again.
     @ObservationIgnored private var needsOpen = false
     @ObservationIgnored private var eventTask: Task<Void, Never>?
+    /// Reads a memo file for the upload. Tests use a fake.
+    @ObservationIgnored private let loadAudio: @Sendable (URL) throws -> Data
+    /// Deletes a memo file when the owner deletes the memo.
+    @ObservationIgnored private let removeAudio: @Sendable (URL) -> Void
 
     /// `messages` is history that the screen shows at once (DEBUG demo). With no `messages`, a model with
     /// a `storedSessionId` and a `cache` shows the cached transcript.
@@ -51,8 +55,12 @@ public final class ChatViewModel {
                 title: String? = nil, messages: [ChatMessage] = [], cache: (any SessionCacheStore)? = nil,
                 redrawInterval: Duration = .milliseconds(100),
                 now: @escaping @Sendable () -> Date = { Date() },
-                makeId: @escaping @Sendable () -> String = { UUID().uuidString }) {
+                makeId: @escaping @Sendable () -> String = { UUID().uuidString },
+                loadAudio: @escaping @Sendable (URL) throws -> Data = { try Data(contentsOf: $0) },
+                removeAudio: @escaping @Sendable (URL) -> Void = { try? FileManager.default.removeItem(at: $0) }) {
         self.transport = transport
+        self.loadAudio = loadAudio
+        self.removeAudio = removeAudio
         self.session = session
         self.storedSessionId = storedSessionId ?? session?.storedId
         self.title = title
@@ -224,17 +232,35 @@ public final class ChatViewModel {
         return Task { await deliver(id: id, retryBeforeRowId: nil) }
     }
 
-    /// "Try Again" on a bubble that shows "Not Delivered".
+    /// Sends a recorded voice memo (issue #9, docs/hermes-protocol.md 3.9). The bubble shows at once with
+    /// "Transcribing…". Then the clip goes to `POST /api/audio/transcribe`, and the transcript goes out as
+    /// `prompt.submit` with `voice_turn: true`. An empty transcript sends no turn. A failure keeps the memo.
+    @discardableResult
+    public func sendVoiceMemo(_ memo: VoiceMemo) -> Task<Void, Never> {
+        let id = makeId()
+        thread.addOutgoingVoice(id: id, memo: memo, date: now())
+        redrawNow()
+        return Task { await deliverVoice(id: id) }
+    }
+
+    /// "Try Again" on a bubble that shows "Not Delivered" (or "No speech found." for a memo).
+    /// A memo with a transcript sends the turn again. A memo with no transcript is transcribed again.
     @discardableResult
     public func retrySend(id: String) -> Task<Void, Never>? {
         guard let message = thread.message(id: id), message.delivery == .failed else { return nil }
         thread.setDelivery(.sending, id: id)
+        if let voice = message.voice, voice.transcript.text == nil {
+            thread.setTranscript(.pending, id: id)
+            redrawNow()
+            return Task { await deliverVoice(id: id) }
+        }
         redrawNow()
         return Task { await deliver(id: id, retryBeforeRowId: nil) }
     }
 
-    /// "Delete" on a bubble that shows "Not Delivered".
+    /// "Delete" on a bubble that shows "Not Delivered". A memo also loses its audio file.
     public func delete(id: String) {
+        if let url = thread.message(id: id)?.voice?.fileURL { removeAudio(url) }
         thread.remove(id: id)
         redrawNow()
     }
@@ -263,14 +289,50 @@ public final class ChatViewModel {
 
     // MARK: Send
 
+    private func deliverVoice(id: String) async {
+        guard let url = thread.message(id: id)?.voice?.fileURL else { return }
+        let transport = self.transport
+        let loadAudio = self.loadAudio
+        let transcript: String
+        do {
+            // The clip and the transcript never go to a log.
+            transcript = try await Task.detached {
+                let audio = try loadAudio(url)
+                return try await transport.transcribe(audio: audio, mimeType: VoiceMemoLimits.mimeType)
+            }.value
+        } catch {
+            thread.setTranscript(.failed, id: id)
+            thread.setDelivery(.failed, id: id)
+            redrawNow()
+            return
+        }
+        guard thread.message(id: id) != nil else { return }
+        if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            thread.setTranscript(.empty, id: id)
+            thread.setDelivery(.failed, id: id)
+            redrawNow()
+            return
+        }
+        thread.setTranscript(.done(transcript), id: id)
+        redrawNow()
+        await deliver(id: id, retryBeforeRowId: nil)
+    }
+
     private func deliver(id: String, retryBeforeRowId: Int?) async {
-        guard let text = thread.message(id: id)?.text else { return }
+        guard let message = thread.message(id: id) else { return }
+        let text = message.text
+        let isVoice = message.voice != nil
         do {
             let session = try await currentSession()
             thread.beginTurn(promptId: id)
             redrawNow()
-            let row = try await transport.submitPrompt(sessionId: session.liveId, text: text,
-                                                       retryBeforeRowId: retryBeforeRowId)
+            let row = if isVoice {
+                try await transport.submitVoicePrompt(sessionId: session.liveId, text: text,
+                                                      retryBeforeRowId: retryBeforeRowId)
+            } else {
+                try await transport.submitPrompt(sessionId: session.liveId, text: text,
+                                                 retryBeforeRowId: retryBeforeRowId)
+            }
             thread.setDelivery(.delivered, id: id, userRowId: row)
             saveActiveSessionId()
             saveTranscript()
