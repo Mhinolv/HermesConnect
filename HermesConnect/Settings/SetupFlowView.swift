@@ -72,7 +72,7 @@ struct ServerFields: View {
             Section {
                 ServerFieldRows(host: $host, port: $port)
             } footer: {
-                Text("The app connects over SSH as the user hermes.")
+                Text("\(ServerProfile.hostHint) The app connects over SSH as the user hermes.")
             }
         }
     }
@@ -84,7 +84,7 @@ struct ServerFieldRows: View {
 
     var body: some View {
         LabeledContent("Host") {
-            TextField("Host", text: $host, prompt: Text("vps.example.com"))
+            TextField("Host", text: $host, prompt: Text(ServerProfile.exampleHost))
                 .keyboardType(.URL)
                 .textContentType(.URL)
                 .textInputAutocapitalization(.never)
