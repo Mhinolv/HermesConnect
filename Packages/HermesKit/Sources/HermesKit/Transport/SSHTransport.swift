@@ -53,7 +53,7 @@ public protocol LoopbackForward: Sendable {
 }
 
 public enum LoopbackForwardTarget {
-    /// The only host that a forward opens on the server. The gate key line has `permitopen="127.0.0.1:*"`,
+    /// The only host that a forward opens on the server. The gate key line has `permitopen="127.0.0.1:<slot port>"`,
     /// and `localhost` does not match it (`server/README.md`).
     public static let remoteHost = "127.0.0.1"
     /// The host of the listener on this device.

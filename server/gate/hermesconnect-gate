@@ -7,7 +7,7 @@ phone asks for is in ``SSH_ORIGINAL_COMMAND``. The gate accepts exactly one
 of these command names, with no arguments:
 
   serve     Read a 64-hex session token on stdin. Start or reuse
-            ``hermes serve --isolated`` on 127.0.0.1. Print ``PORT <n>``.
+            ``hermes serve --isolated`` on 127.0.0.1:<slot port>. Print ``PORT <n>``.
   location  Read one JSON location fix on stdin (4 KiB max). Store it in
             ``~/.hermes/hermesconnect/location.json``. Print ``OK``.
   ping      Print ``PONG <gate version>``.
@@ -21,6 +21,9 @@ standard library only (Python 3.8 or later).
 Gate options (set by install.sh in the ``command=`` value, never by the phone):
 
   --slot <32 hex>    Ownership slot for this key. Default: a fixed slot.
+  --port <n>         Fixed server port for this slot (1024-65535). It must match the
+                     ``permitopen`` of the key line. Default: the slot port,
+                     47100 + (slot as an integer) % 100.
   --hermes <path>    Hermes binary. Default: the same search as Hermes Desktop.
 
 Environment for tests only: ``HERMESCONNECT_READY_TIMEOUT`` (seconds).
@@ -37,17 +40,23 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
 import time
 
-GATE_VERSION = "1"
+# Version 2 (issue #29): `serve` uses one fixed port for each slot. The app pins it.
+GATE_VERSION = "2"
 COMMANDS = ("serve", "location", "ping")
 
 DEFAULT_SLOT = hashlib.sha256(b"hermesconnect\0default").hexdigest()[:32]
 TOKEN_RE = re.compile(r"[0-9a-f]{64}")
 SLOT_RE = re.compile(r"[0-9a-f]{32}")
+PORT_RE = re.compile(r"[1-9][0-9]{3,4}")
+SLOT_PORT_BASE = 47100
+SLOT_PORT_COUNT = 100
+PORT_MIN = 1024
 NONCE_RE = re.compile(r"[0-9a-f]{16}")
 READY_RE = re.compile(r"(?<!\w)HERMES_(?:BACKEND|DASHBOARD)_READY port=(\d+)")
 PROFILE_MISSING_RE = re.compile(r"Error: Profile '[^']*' does not exist\.")
@@ -324,13 +333,44 @@ def scrape_ready_port(log_path, pid, timeout_s):
         time.sleep(0.1)
 
 
-def spawn_serve(hermes, slot_dir, token):
+def slot_port(slot):
+    """The default fixed port of a slot. install.sh uses the same rule."""
+    return SLOT_PORT_BASE + int(slot, 16) % SLOT_PORT_COUNT
+
+
+def port_busy(port):
+    """True when a process listens on 127.0.0.1:``port``, or ``hermes serve`` cannot bind it.
+
+    The bind probe uses SO_REUSEADDR like uvicorn, so TIME_WAIT remnants pass and a live
+    listener fails. The connect probe also finds a listener on 0.0.0.0, which a BSD bind
+    with SO_REUSEADDR does not see."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.settimeout(2.0)
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            return True
+    except OSError:
+        pass
+    finally:
+        probe.close()
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("127.0.0.1", port))
+    except OSError:
+        return True
+    finally:
+        probe.close()
+    return False
+
+
+def spawn_serve(hermes, slot_dir, token, port):
     nonce = secrets.token_hex(8)
     token_path = os.path.join(slot_dir, nonce + ".token")
     log_path = os.path.join(slot_dir, nonce + ".log")
     prune_old_token_files(slot_dir)
     write_token_file(token_path, token)
-    argv = [hermes, "serve", "--isolated", "--host", "127.0.0.1", "--port", "0",
+    argv = [hermes, "serve", "--isolated", "--host", "127.0.0.1", "--port", str(port),
             "--ssh-session-token-file", token_path, "--ssh-owner-nonce", nonce]
     env = dict(os.environ)
     env.pop("HERMES_DESKTOP_DEV_SERVER", None)
@@ -390,6 +430,7 @@ def cmd_serve(options):
         raise GateError("bad-token", "the token must be 64 lowercase hex characters")
 
     slot = options["slot"]
+    port = options["port"]
     ensure_private_dir(hermes_root(), fix_mode=False)
     ensure_private_dir(gate_dir())
     ensure_private_dir(desktop_ssh_dir())
@@ -403,22 +444,29 @@ def cmd_serve(options):
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         state = read_json_file(state_path)
         if state is not None:
-            if (state.get("tokenFingerprint") == fingerprint_token(token)
-                    and isinstance(state.get("port"), int) and state["port"] > 0
-                    and pid_is_our_serve(state)):
-                return "PORT %d" % state["port"]
-            # Dead server, half-done spawn, or a new token: replace the server.
+            ours = pid_is_our_serve(state)
+            if ours and state.get("tokenFingerprint") == fingerprint_token(token) and state.get("port") == port:
+                return "PORT %d" % port
+            # Our own server can hold the slot port (port 0: a half-done spawn). Stop it first.
+            # Any other holder: refuse before the gate stops anything.
+            if not (ours and state.get("port") in (0, port)) and port_busy(port):
+                raise GateError("port-busy", "another process uses port %d" % port)
+            # Dead server, half-done spawn, a new token or a new port: replace the server.
             cleanup_state(state, state_path)
+        if port_busy(port):
+            raise GateError("port-busy", "another process uses port %d" % port)
 
         if update_in_progress():
             raise GateError("update-in-progress", "a Hermes update is running")
         hermes = find_hermes(options.get("hermes"))
         check_serve_support(hermes)
-        state = spawn_serve(hermes, slot_dir, token)
+        state = spawn_serve(hermes, slot_dir, token, port)
         write_private_file_atomic(state_path, json.dumps(state, sort_keys=True).encode("utf-8"))
         timeout_s = float(os.environ.get("HERMESCONNECT_READY_TIMEOUT", "120"))
         try:
-            port = scrape_ready_port(state["logPath"], state["pid"], timeout_s)
+            ready_port = scrape_ready_port(state["logPath"], state["pid"], timeout_s)
+            if ready_port != port:
+                raise GateError("port-mismatch", "hermes serve is not on port %d" % port)
         except GateError:
             cleanup_state(state, state_path)
             raise
@@ -563,17 +611,23 @@ HANDLERS = {"serve": cmd_serve, "location": cmd_location, "ping": cmd_ping}
 
 
 def parse_options(argv):
-    options = {"slot": DEFAULT_SLOT, "hermes": None}
+    options = {"slot": DEFAULT_SLOT, "hermes": None, "port": None}
     i = 0
     while i < len(argv):
         word = argv[i]
-        if word in ("--slot", "--hermes") and i + 1 < len(argv):
+        if word in ("--slot", "--hermes", "--port") and i + 1 < len(argv):
             options[word[2:]] = argv[i + 1]
             i += 2
             continue
         raise GateError("bad-config", "unknown gate option", exit_code=2)
     if not SLOT_RE.fullmatch(options["slot"]):
         raise GateError("bad-config", "--slot must be 32 lowercase hex characters", exit_code=2)
+    if options["port"] is None:
+        options["port"] = slot_port(options["slot"])
+    elif PORT_RE.fullmatch(options["port"]) and PORT_MIN <= int(options["port"]) <= 65535:
+        options["port"] = int(options["port"])
+    else:
+        raise GateError("bad-config", "--port must be a number from %d to 65535" % PORT_MIN, exit_code=2)
     return options
 
 

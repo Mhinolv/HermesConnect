@@ -54,6 +54,9 @@ final class AppModel {
     @ObservationIgnored private var hermes: HermesServe?
     /// The token of the last spawn, in memory only. The next connect sends it again, so the gate reuses the server.
     @ObservationIgnored private var serveToken: SessionToken?
+    /// The server port of the last connect to a fixed-port gate (version 2 or later), in memory only.
+    /// The next `serve` must print the same port (issue #29). Reset Device Key and a new server clear it.
+    @ObservationIgnored private var servePort: Int?
     /// Counts connect attempts. A result from an old attempt is dropped (the server changed, or a disconnect ran).
     @ObservationIgnored private var attempt = 0
     @ObservationIgnored let deviceName: String
@@ -111,6 +114,7 @@ final class AppModel {
     /// Delete the key and make a new one. The owner must install the new public key on the server.
     func resetKey() async {
         await disconnect()
+        servePort = nil  // A new key gets a new slot on the server, so a new slot port.
         keyState = .creating
         deviceKey = nil
         let store = keyStore
@@ -144,6 +148,7 @@ final class AppModel {
             connection = .idle
             attempt += 1
             serveToken = nil
+            servePort = nil
             let old = (session, hermes)
             session = nil
             hermes = nil
@@ -174,13 +179,16 @@ final class AppModel {
             }
             session = result.session
             connection = .startingHermes
-            let running = try await serve.start(on: result.session, reuse: serveToken)
+            let pinsPort = ServeBootstrap.pinsPort(gateVersion: result.gateVersion)
+            let running = try await serve.start(on: result.session, reuse: serveToken,
+                                                pinnedPort: pinsPort ? servePort : nil)
             guard current == attempt else {
                 await running.forward.close()
                 return
             }
             hermes = running
             serveToken = running.token
+            servePort = pinsPort ? running.remotePort : nil
             hermesEndpoint = running.endpoint
             connection = .connected(gateVersion: result.gateVersion)
         } catch {
@@ -249,6 +257,7 @@ final class AppModel {
         profile.hostKey = nil
         try profileStore.save(profile)
         self.profile = profile
+        servePort = nil
         showsHostKeyError = false
         await disconnect()
     }
