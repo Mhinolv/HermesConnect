@@ -53,6 +53,18 @@ import UIKit
         #expect(ChatLaunch.cachedLaunchRoute(sessions()) == nil)
     }
 
+    /// Issue #36: a new chat with a kept memo opens at launch, before the active session.
+    @Test func launchOpensTheNewChatWithAKeptMemo() {
+        let memo = ChatMessage(id: "m1", role: .user, text: "", date: now, delivery: .failed,
+                               voice: VoiceMemo(fileURL: URL(fileURLWithPath: "/tmp/m1.m4a"), duration: 3, waveform: [],
+                                                transcript: .failed))
+        let cache = InMemorySessionCacheStore(transcripts: [SessionCache.newChatId: [memo]], activeSessionId: "k1")
+        let list = SessionListModel(transport: OfflineChatTransport(), chatTransport: OfflineChatTransport(), cache: cache)
+        let route = ChatLaunch.cachedLaunchRoute(list)
+        #expect(route == .new(SessionCache.newChatId))
+        #expect(list.newChat(key: SessionCache.newChatId).messages.map(\.id) == ["m1"])
+    }
+
     /// QA #27 defect 1: after a dead id is dropped, the next launch shows the list, not a dead chat.
     @Test func droppedSessionIsNotTheLaunchRoute() {
         let list = sessions([SessionListItem(id: "dead1", title: "Gone")], active: "dead1")

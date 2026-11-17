@@ -39,7 +39,7 @@ targets:
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         # Issue #15: BGAppRefresh catch-up with local notifications (D5). No push entitlement.
-        UIBackgroundModes: [fetch]
+        UIBackgroundModes: [audio, fetch]
         BGTaskSchedulerPermittedIdentifiers: [io.mhinoverse.hermesconnect.refresh]
     settings:
       base:
