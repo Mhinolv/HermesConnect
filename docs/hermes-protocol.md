@@ -107,6 +107,8 @@ exec env HERMES_DESKTOP=1 <hermes> [--profile <name>] serve --isolated --host 12
 
    It is wrapped in `setsid` (Linux) or `nohup` (macOS) so it survives the SSH channel (`:281-282`). The last stdout line is the child pid.
 
+   HermesConnect differs here (issue #29). Its gate passes `--port <slot port>`, not `--port 0`. The phone key line has `permitopen="127.0.0.1:<slot port>"`, so the phone can forward to that one port only. See `server/README.md`.
+
 7. Output handling (`:399-405`): last line `EXISTING` = another client owns a live server (needs a reuse token). A positive integer = new pid. Anything else = failure.
 8. Write the lock again at once with `port: 0` (spawn in progress) (`:597`).
 9. Read the port: poll `cat <log>` every 0.75 s, up to 120 s (`scrape_ready_port`, `:682-698`). Match this regex anywhere in the log (`:32`):

@@ -1,8 +1,10 @@
 """Shared helpers for the server tests. Standard library only. No test connects to a real server."""
 
+import hashlib
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -16,11 +18,28 @@ INSTALL = os.path.join(SERVER_DIR, "install.sh")
 TOKEN_A = "a" * 64
 TOKEN_B = "0123456789abcdef" * 4
 
+# The gate default slot and the slot port rule (issue #29): 47100 + (slot as an integer) % 100.
+DEFAULT_SLOT = hashlib.sha256(b"hermesconnect\0default").hexdigest()[:32]
+SLOT_PORT_BASE = 47100
+SLOT_PORT_COUNT = 100
+
+
+def slot_port(slot):
+    return SLOT_PORT_BASE + int(slot, 16) % SLOT_PORT_COUNT
+
+
+def free_port():
+    """A loopback port that is free now. Tests pass it with --port, so two test runs do not collide."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
 # A fake `hermes` binary. It checks the token file the way `hermes serve` does
 # (main_dashboard.py `_read_ssh_session_token_file`), reads and deletes it, writes one
-# JSON record per start to $FAKE_RECORD, prints the ready line, then waits for a signal.
+# JSON record per start to $FAKE_RECORD, listens on its --port (like uvicorn), prints the
+# ready line, then waits for a signal. FAKE_PORT makes it report a different port.
 FAKE_HERMES = r'''#!{python}
-import hashlib, json, os, re, signal, stat, sys, time
+import hashlib, json, os, re, signal, socket, stat, sys, time
 argv = sys.argv[1:]
 if "--help" in argv:
     if os.environ.get("FAKE_NO_SUPPORT"):
@@ -65,9 +84,19 @@ if problems:
     print("Error: bad token file: " + ",".join(problems), flush=True)
     sys.exit(3)
 signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+port = int(argv[argv.index("--port") + 1])
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    listener.bind(("127.0.0.1", port))
+except OSError:
+    print("ERROR: [Errno 48] address already in use", flush=True)
+    sys.exit(1)
+listener.listen(8)
+port = listener.getsockname()[1]
 if mode != "hang":
     print("starting", flush=True)
-    print("HERMES_BACKEND_READY port=" + os.environ.get("FAKE_PORT", "45678"), flush=True)
+    print("HERMES_BACKEND_READY port=" + os.environ.get("FAKE_PORT", str(port)), flush=True)
     print("HERMES_DASHBOARD_READY port=1", flush=True)
 while True:
     time.sleep(1)
@@ -88,6 +117,7 @@ class GateTestCase(unittest.TestCase):
         with open(self.hermes, "w") as out:
             out.write(FAKE_HERMES.format(python=sys.executable))
         os.chmod(self.hermes, 0o755)
+        self.port = free_port()
         self.env = {
             "HOME": self.home,
             "PATH": "/usr/bin:/bin",
@@ -112,7 +142,9 @@ class GateTestCase(unittest.TestCase):
         if command is not None:
             env["SSH_ORIGINAL_COMMAND"] = command
         env.update(extra_env or {})
-        args = [sys.executable, GATE] + (options if options is not None else ["--hermes", self.hermes])
+        if options is None:
+            options = ["--hermes", self.hermes, "--port", str(self.port)]
+        args = [sys.executable, GATE] + options
         return subprocess.run(args, input=stdin, env=env, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, timeout=60)
 

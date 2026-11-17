@@ -15,24 +15,28 @@ Every other request exits with code 2 and `ERROR not-allowed` on stderr. Other f
 `install.sh` writes this line to `~hermes/.ssh/authorized_keys`:
 
 ```
-restrict,port-forwarding,permitopen="127.0.0.1:*",permitlisten="127.0.0.1:1",command="/usr/local/libexec/hermesconnect/hermesconnect-gate --slot <slot>" ssh-ed25519 AAAA... <comment>
+restrict,port-forwarding,permitopen="127.0.0.1:<port>",permitlisten="127.0.0.1:1",command="/usr/local/libexec/hermesconnect/hermesconnect-gate --slot <slot> --port <port>" ssh-ed25519 AAAA... <comment>
 ```
 
 - `restrict` disables the PTY, agent forwarding, X11 forwarding and `~/.ssh/rc`.
-- `port-forwarding` with `permitopen="127.0.0.1:*"` allows local (`-L`) forwards to the server loopback only.
+- `port-forwarding` with `permitopen="127.0.0.1:<port>"` allows local (`-L`) forwards to one port only: the `hermes serve` of this key. The dashboard (9119) and all other ports are refused.
 - `permitlisten="127.0.0.1:1"` blocks remote (`-R`) forwards. A normal account cannot listen on port 1.
 - `command=` runs the gate for every request, also for scp and sftp.
 - `<slot>` is the first 32 hex characters of `sha256(<key base64>)`. Each phone key gets its own server slot.
+- `<port>` is the slot port: `47100 + (<slot> as an integer) % 100`, so 47100 to 47199. `install.sh --port N` sets another port. The gate gets the same port with `--port`.
 
 ## serve
 
 `serve` follows the Hermes isolated serve contract (`docs/hermes-protocol.md` section 1):
 
 1. The gate reads the token on stdin. It must be 64 lowercase hex characters. One trailing newline is accepted.
-2. If a server that this gate started is alive, and the token fingerprint matches, the gate prints its port.
-3. Otherwise the gate stops the old server and writes the token to `~/.hermes/desktop-ssh/<slot>/<nonce>.token` (mode 0600, folder 0700).
-4. The gate starts `hermes serve --isolated --host 127.0.0.1 --port 0 --ssh-session-token-file <file> --ssh-owner-nonce <nonce>` in a new session.
-5. The gate waits up to 120 s for `HERMES_BACKEND_READY port=<n>` in `<nonce>.log`, then prints `PORT <n>`.
+2. If a server that this gate started is alive on the slot port, and the token fingerprint matches, the gate prints that port.
+3. If another process uses the slot port, the gate fails with `port-busy`. It does not stop or start a server.
+4. Otherwise the gate stops the old server and writes the token to `~/.hermes/desktop-ssh/<slot>/<nonce>.token` (mode 0600, folder 0700).
+5. The gate starts `hermes serve --isolated --host 127.0.0.1 --port <port> --ssh-session-token-file <file> --ssh-owner-nonce <nonce>` in a new session.
+6. The gate waits up to 120 s for `HERMES_BACKEND_READY port=<n>` in `<nonce>.log`. If `<n>` is not the slot port, the gate stops the server and fails with `port-mismatch`. Else it prints `PORT <port>`.
+
+The app pins the port of a version 2 gate in memory. If a later `serve` prints another port, the app refuses it (`port-changed`). Reset Device Key clears the pin.
 
 The server reads and deletes the token file. The gate stores only `sha256(token)[:32]` in `~/.hermes/hermesconnect/serve-<slot>.json` (mode 0600). The gate never prints or logs the token.
 
@@ -43,6 +47,8 @@ The server reads and deletes the token file. The gate stores only `sha256(token)
 | `update-required` | `hermes serve --help` has no `--ssh-session-token-file`. Update Hermes. |
 | `update-in-progress` | `~/.hermes/.hermes-update-in-progress` exists. Try again later. |
 | `serve-exited`, `serve-timeout`, `profile-missing` | The server did not get ready. Read `~/.hermes/desktop-ssh/<slot>/*.log`. |
+| `port-busy` | Another process listens on the slot port. Stop it, or install the key again with `--port N`. |
+| `port-mismatch` | `hermes serve` reported a port that is not the slot port. The gate stopped it. |
 
 The phone must forward to `127.0.0.1:<n>`. The host name `localhost` does not match `permitopen`.
 
@@ -77,27 +83,33 @@ Requirements: OpenSSH 7.8 or later, `/usr/bin/python3` (3.8 or later), and the `
 
 The script copies the gate to `/usr/local/libexec/hermesconnect/hermesconnect-gate` (root, mode 0755). It replaces older lines for the same key and keeps all other lines. Run it again after a gate update. It prints `unchanged` when nothing changed.
 
-Options: `--user NAME`, `--authorized-keys FILE`, `--gate-dest PATH`, `--no-copy-gate`, `--hermes PATH`, `--dry-run`. Run `install.sh --help` for details.
+Upgrade from gate version 1: run `install.sh` again with the same key line. It replaces the old `permitopen="127.0.0.1:*"` line with the one-port line.
+
+If two phone keys get the same slot port, `install.sh` stops with an error. Install the second key with `--port N` (1024 to 65535).
+
+Options: `--user NAME`, `--authorized-keys FILE`, `--gate-dest PATH`, `--no-copy-gate`, `--hermes PATH`, `--port N`, `--dry-run`. Run `install.sh --help` for details.
 
 To remove a phone key: `sudo ./install.sh --remove '<key line>'`.
 
 ## Verify
 
-Run these commands from a computer that has a test copy of the phone key (`phone_key`). Then remove the test key.
+Run these commands from a computer that has a test copy of the phone key (`phone_key`). Then remove the test key. `<port>` is the port in the `permitopen` of the key line. Run the Serve test before the forward tests.
 
 | Test | Command | Expected result |
 |---|---|---|
-| Gate works | `ssh -i phone_key hermes@<host> ping` | `PONG 1` |
+| Gate works | `ssh -i phone_key hermes@<host> ping` | `PONG 2` |
 | No login shell | `ssh -i phone_key hermes@<host>` | `ERROR not-allowed`, connection closes |
-| No PTY | `ssh -t -i phone_key hermes@<host> ping` | `PTY allocation request failed`, then `PONG 1` |
+| No PTY | `ssh -t -i phone_key hermes@<host> ping` | `PTY allocation request failed`, then `PONG 2` |
 | No command | `ssh -i phone_key hermes@<host> 'id; bash'` | `ERROR not-allowed` |
 | No sftp | `sftp -i phone_key hermes@<host>` | Connection closes |
 | No scp | `scp -i phone_key /etc/hosts hermes@<host>:/tmp/` | Fails |
-| Loopback forward | `ssh -N -L 9000:127.0.0.1:22 -i phone_key hermes@<host>` and `nc 127.0.0.1 9000` | SSH banner |
+| Forward to the slot port | `ssh -N -L 9000:127.0.0.1:<port> -i phone_key hermes@<host>` and `curl http://127.0.0.1:9000/api/health` | `{"ok":true,...}` |
+| No forward to the dashboard | `ssh -N -L 9000:127.0.0.1:9119 -i phone_key hermes@<host>` and `nc 127.0.0.1 9000` | `open failed: administratively prohibited` |
+| No forward to other loopback ports | `ssh -N -L 9000:127.0.0.1:22 -i phone_key hermes@<host>` and `nc 127.0.0.1 9000` | `open failed: administratively prohibited` |
 | Other forward | `ssh -N -L 9000:example.com:80 -i phone_key hermes@<host>` and `nc 127.0.0.1 9000` | `open failed: administratively prohibited` |
 | No reverse forward | `ssh -N -R 9001:127.0.0.1:22 -i phone_key hermes@<host>` | `remote port forwarding failed` |
-| No agent | `ssh -A -i phone_key hermes@<host> ping` | `PONG 1` and no agent on the server |
-| Serve | `openssl rand -hex 32 \| tr -d '\n' \| ssh -i phone_key hermes@<host> serve` | `PORT <n>` |
+| No agent | `ssh -A -i phone_key hermes@<host> ping` | `PONG 2` and no agent on the server |
+| Serve | `openssl rand -hex 32 \| tr -d '\n' \| ssh -i phone_key hermes@<host> serve` | `PORT <port>` |
 | Location | `echo '{"lat":1,"lon":2,"accuracy_m":5,"timestamp":"2026-11-16T12:00:00Z"}' \| ssh -i phone_key hermes@<host> location` | `OK` |
 
 ## phone_location plugin

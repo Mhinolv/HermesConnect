@@ -94,6 +94,31 @@ final class FakeHermesHTTP: HTTPDataLoading, @unchecked Sendable {
         #expect(transport.record.forwardPorts == [41_001, 41_002])
     }
 
+    /// Issue #29: a fixed-port gate always prints the slot port. The app refuses another port and opens no forward.
+    @Test func pinnedPortRefusesADifferentPortAndOpensNoForward() async throws {
+        let transport = ScriptedSSHTransport(hostKey: .sample)
+        let bootstrap = ServeBootstrap(loader: FakeHermesHTTP(), configuration: fast)
+        let first = try await bootstrap.start(on: try await session(transport), reuse: nil)
+        #expect(first.remotePort == 41_001)
+        let same = try await bootstrap.start(on: try await session(transport), reuse: first.token,
+                                             pinnedPort: first.remotePort)
+        #expect(same.remotePort == 41_001)
+
+        transport.serverAlive = false  // The fake gate spawns again on port 41_002.
+        await #expect(throws: SSHConnectionError.gateError("port-changed")) {
+            try await bootstrap.start(on: try await session(transport), reuse: first.token, pinnedPort: 41_001)
+        }
+        #expect(transport.record.spawns == 2)
+        #expect(transport.record.forwardPorts == [41_001, 41_001], "no forward to the changed port")
+    }
+
+    @Test func onlyAFixedPortGateGetsAPin() {
+        #expect(!ServeBootstrap.pinsPort(gateVersion: "1"))
+        #expect(ServeBootstrap.pinsPort(gateVersion: "2"))
+        #expect(ServeBootstrap.pinsPort(gateVersion: "12"))
+        #expect(!ServeBootstrap.pinsPort(gateVersion: "demo"))
+    }
+
     @Test(arguments: [401, 403, 404])
     func staleReuseTokenGetsOneNewToken(status: Int) async throws {
         let transport = ScriptedSSHTransport(hostKey: .sample)

@@ -3,19 +3,21 @@
 import json
 import os
 import re
+import socket
 import stat
+import subprocess
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from support import TOKEN_A, TOKEN_B, GateTestCase
+from support import DEFAULT_SLOT, INSTALL, TOKEN_A, TOKEN_B, GateTestCase, free_port, slot_port
 
 
 class CommandAllowListTests(GateTestCase):
     def test_ping_prints_gate_version(self):
         result = self.gate("ping")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, b"PONG 1\n")
+        self.assertEqual(result.stdout, b"PONG 2\n")
 
     def test_shell_login_without_command_is_refused(self):
         result = self.gate(None)
@@ -33,7 +35,7 @@ class CommandAllowListTests(GateTestCase):
                 result = self.gate(request)
                 if request == "ping ":
                     # Surrounding blanks are not part of the command name.
-                    self.assertEqual(result.stdout, b"PONG 1\n")
+                    self.assertEqual(result.stdout, b"PONG 2\n")
                     continue
                 self.assertEqual(result.returncode, 2, result.stdout)
                 self.assertEqual(result.stdout, b"")
@@ -41,7 +43,9 @@ class CommandAllowListTests(GateTestCase):
         self.assertEqual(self.records(), [])
 
     def test_bad_gate_options_are_refused(self):
-        for options in (["--slot", "xyz"], ["--slot"], ["--other"], ["--slot", "A" * 32]):
+        for options in (["--slot", "xyz"], ["--slot"], ["--other"], ["--slot", "A" * 32],
+                        ["--port"], ["--port", "0"], ["--port", "1023"], ["--port", "65536"],
+                        ["--port", "abc"], ["--port", "+4710"], ["--port", "047100"], ["--port", "4710 0"]):
             with self.subTest(options=options):
                 result = self.gate("ping", options=options)
                 self.assertEqual(result.returncode, 2)
@@ -49,7 +53,11 @@ class CommandAllowListTests(GateTestCase):
 
     def test_slot_option_is_accepted(self):
         result = self.gate("ping", options=["--slot", "0" * 32, "--hermes", self.hermes])
-        self.assertEqual(result.stdout, b"PONG 1\n")
+        self.assertEqual(result.stdout, b"PONG 2\n")
+
+    def test_port_option_is_accepted(self):
+        result = self.gate("ping", options=["--slot", "0" * 32, "--port", "47150", "--hermes", self.hermes])
+        self.assertEqual(result.stdout, b"PONG 2\n", result.stderr)
 
 
 class ServeTests(GateTestCase):
@@ -66,13 +74,13 @@ class ServeTests(GateTestCase):
     def test_serve_spawns_isolated_loopback_server_and_prints_port(self):
         result = self.serve()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, b"PORT 45678\n")
+        self.assertEqual(result.stdout, b"PORT %d\n" % self.port)
         records = self.records()
         self.assertEqual(len(records), 1)
         record = records[0]
         self.assertEqual(record["problems"], [])
         argv = record["argv"]
-        self.assertEqual(argv[:6], ["serve", "--isolated", "--host", "127.0.0.1", "--port", "0"])
+        self.assertEqual(argv[:6], ["serve", "--isolated", "--host", "127.0.0.1", "--port", str(self.port)])
         token_path = argv[argv.index("--ssh-session-token-file") + 1]
         nonce = argv[argv.index("--ssh-owner-nonce") + 1]
         self.assertRegex(nonce, r"^[0-9a-f]{16}$")
@@ -111,17 +119,18 @@ class ServeTests(GateTestCase):
     def test_second_serve_with_same_token_reuses_server(self):
         first = self.serve()
         second = self.serve(TOKEN_A + "\n")
-        self.assertEqual(first.stdout, b"PORT 45678\n")
+        self.assertEqual(first.stdout, b"PORT %d\n" % self.port)
         self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertEqual(second.stdout, b"PORT 45678\n")
+        self.assertEqual(second.stdout, b"PORT %d\n" % self.port)
         self.assertEqual(len(self.records()), 1, "no second spawn")
 
     def test_new_token_replaces_server(self):
         self.assertEqual(self.serve(TOKEN_A).returncode, 0)
         old_pid = self.records()[0]["pid"]
-        result = self.serve(TOKEN_B, extra_env={"FAKE_PORT": "45999"})
+        # The old server holds the slot port. The gate stops it, then the new server gets the same port.
+        result = self.serve(TOKEN_B)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, b"PORT 45999\n")
+        self.assertEqual(result.stdout, b"PORT %d\n" % self.port)
         self.assertTrue(self.wait_dead(old_pid), "the old server is stopped")
         records = self.records()
         self.assertEqual(len(records), 2)
@@ -135,8 +144,8 @@ class ServeTests(GateTestCase):
         _path, state = self.state()
         self.kill(old["pid"])
         self.assertTrue(self.wait_dead(old["pid"]))
-        result = self.serve(extra_env={"FAKE_PORT": "45001"})
-        self.assertEqual(result.stdout, b"PORT 45001\n", result.stderr)
+        result = self.serve()
+        self.assertEqual(result.stdout, b"PORT %d\n" % self.port, result.stderr)
         self.assertEqual(len(self.records()), 2)
         self.assertFalse(os.path.exists(state["logPath"]), "the old log is deleted")
 
@@ -175,7 +184,7 @@ class ServeTests(GateTestCase):
         self.assertEqual(self.records(), [])
 
     def test_crlf_after_token_is_accepted(self):
-        self.assertEqual(self.serve(TOKEN_A + "\r\n").stdout, b"PORT 45678\n")
+        self.assertEqual(self.serve(TOKEN_A + "\r\n").stdout, b"PORT %d\n" % self.port)
 
     def test_server_that_exits_before_ready_fails_and_cleans_up(self):
         result = self.serve(extra_env={"FAKE_MODE": "exit"})
@@ -223,15 +232,15 @@ class ServeTests(GateTestCase):
         local_bin = os.path.join(self.home, ".local", "bin")
         os.makedirs(local_bin)
         os.symlink(self.hermes, os.path.join(local_bin, "hermes"))
-        result = self.serve(options=[])
-        self.assertEqual(result.stdout, b"PORT 45678\n", result.stderr)
+        result = self.serve(options=["--port", str(self.port)])
+        self.assertEqual(result.stdout, b"PORT %d\n" % self.port, result.stderr)
 
     def test_slots_are_independent(self):
         slot_a, slot_b = "1" * 32, "2" * 32
-        a = self.serve(TOKEN_A, options=["--slot", slot_a, "--hermes", self.hermes])
-        b = self.serve(TOKEN_B, options=["--slot", slot_b, "--hermes", self.hermes],
-                       extra_env={"FAKE_PORT": "45002"})
-        self.assertEqual((a.stdout, b.stdout), (b"PORT 45678\n", b"PORT 45002\n"))
+        port_b = free_port()
+        a = self.serve(TOKEN_A, options=["--slot", slot_a, "--hermes", self.hermes, "--port", str(self.port)])
+        b = self.serve(TOKEN_B, options=["--slot", slot_b, "--hermes", self.hermes, "--port", str(port_b)])
+        self.assertEqual((a.stdout, b.stdout), (b"PORT %d\n" % self.port, b"PORT %d\n" % port_b))
         records = self.records()
         self.assertEqual(len(records), 2)
         for record in records:
@@ -247,10 +256,116 @@ class ServeTests(GateTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(b"ERROR unsafe-path", result.stderr)
 
+    # --- Issue #29: one fixed port for each slot ------------------------------------------
+
+    def listen_on(self, port):
+        """Hold ``port`` with a listener that is not a Hermes server (for example the dashboard)."""
+        other = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        other.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        other.bind(("127.0.0.1", port))
+        other.listen(1)
+        self.addCleanup(other.close)
+        return other
+
+    def spawn_ports(self):
+        return [r["argv"][r["argv"].index("--port") + 1] for r in self.records()]
+
+    def test_serve_uses_the_slot_port_when_the_key_line_has_no_port(self):
+        slot = "3" * 32
+        result = self.serve(options=["--slot", slot, "--hermes", self.hermes])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"PORT %d\n" % slot_port(slot))
+        self.assertEqual(self.spawn_ports(), [str(slot_port(slot))])
+        _path, state = self.state()
+        self.assertEqual(state["port"], slot_port(slot))
+
+    def test_default_slot_has_a_fixed_port_in_the_range(self):
+        port = slot_port(DEFAULT_SLOT)
+        self.assertTrue(47100 <= port <= 47199)
+        result = self.serve(options=["--hermes", self.hermes])
+        self.assertEqual(result.stdout, b"PORT %d\n" % port, result.stderr)
+        self.assertEqual(self.spawn_ports(), [str(port)])
+
+    def test_serve_never_asks_for_a_random_port(self):
+        for token in (TOKEN_A, TOKEN_B, TOKEN_A):
+            self.assertEqual(self.serve(token).stdout, b"PORT %d\n" % self.port)
+        self.assertEqual(self.spawn_ports(), [str(self.port)] * 3)
+
+    def test_busy_port_is_refused_and_nothing_starts(self):
+        self.listen_on(self.port)
+        result = self.serve()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, b"")
+        self.assertIn(b"ERROR port-busy", result.stderr)
+        self.assertEqual(self.records(), [], "no hermes serve starts")
+        names = os.listdir(self.path("hermesconnect"))
+        self.assertEqual([n for n in names if n.endswith(".json")], [], "no state file")
+
+    def test_busy_port_does_not_stop_our_live_server(self):
+        self.assertEqual(self.serve(TOKEN_A).stdout, b"PORT %d\n" % self.port)
+        pid = self.records()[0]["pid"]
+        other_port = free_port()
+        self.listen_on(other_port)
+        result = self.serve(TOKEN_A, options=["--hermes", self.hermes, "--port", str(other_port)])
+        self.assertIn(b"ERROR port-busy", result.stderr)
+        self.assertEqual(len(self.records()), 1)
+        os.kill(pid, 0)  # The old server still runs. The gate refused before it stopped anything.
+
+    def test_ready_port_that_differs_from_the_slot_port_fails_and_stops_the_server(self):
+        result = self.serve(extra_env={"FAKE_PORT": str(self.port + 1)})
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, b"")
+        self.assertIn(b"ERROR port-mismatch", result.stderr)
+        pid = self.records()[0]["pid"]
+        self.assertTrue(self.wait_dead(pid), "the server on the wrong port is stopped")
+        names = os.listdir(self.path("hermesconnect"))
+        self.assertEqual([n for n in names if n.endswith(".json")], [], "no state file")
+
+    def test_new_port_in_the_key_line_replaces_the_server(self):
+        self.assertEqual(self.serve(TOKEN_A).stdout, b"PORT %d\n" % self.port)
+        old_pid = self.records()[0]["pid"]
+        new_port = free_port()
+        result = self.serve(TOKEN_A, options=["--hermes", self.hermes, "--port", str(new_port)])
+        self.assertEqual(result.stdout, b"PORT %d\n" % new_port, result.stderr)
+        self.assertTrue(self.wait_dead(old_pid), "the server on the old port is stopped")
+        self.assertEqual(self.spawn_ports(), [str(self.port), str(new_port)])
+
     def default_slot(self):
         names = [n for n in os.listdir(self.path("desktop-ssh"))]
         self.assertEqual(len(names), 1)
         return names[0]
+
+
+class InstallLineServeTests(GateTestCase):
+    """The key line from install.sh and the gate agree on one port (issue #29)."""
+
+    def key_line(self, *install_args):
+        blob = "AAAAC3NzaC1lZDI1NTE5AAAAIAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB"
+        argv = ["bash", INSTALL, "--dry-run", "--gate-dest", "/usr/local/libexec/hermesconnect/hermesconnect-gate",
+                "--hermes", self.hermes] + list(install_args) + ["ssh-ed25519 %s phone" % blob]
+        result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.decode().strip()
+
+    def serve_with(self, line):
+        options = line.split('command="', 1)[1].split('"', 1)[0].split()[1:]
+        return self.gate("serve", stdin=TOKEN_A.encode("ascii"), options=options)
+
+    def test_gate_serves_on_the_one_port_that_permitopen_names(self):
+        for install_args in ((), ("--port", str(self.port))):
+            with self.subTest(install_args=install_args):
+                line = self.key_line(*install_args)
+                opened = re.findall(r'permitopen="([^"]*)"', line)
+                self.assertEqual(len(opened), 1, line)
+                self.assertRegex(opened[0], r"^127\.0\.0\.1:\d+$")
+                port = int(opened[0].split(":")[1])
+                if install_args:
+                    self.assertEqual(port, self.port)
+                result = self.serve_with(line)
+                self.assertEqual(result.stdout, b"PORT %d\n" % port, result.stderr)
+                for record in self.records():
+                    self.kill(record["pid"])
+                    self.wait_dead(record["pid"])
 
 
 def fix(**overrides):
