@@ -56,6 +56,7 @@
 		A71C36521DFAAEC6C670A5A8 /* TranscriptionSettingsDemo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E8938E86160BC92E880BF21 /* TranscriptionSettingsDemo.swift */; };
 		A725F31205078D24423F830F /* MessageKit in Frameworks */ = {isa = PBXBuildFile; productRef = CDED3844474FB97BAA703825 /* MessageKit */; };
 		AE56777FBDA0235B51FB078E /* AttachmentStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E77AC33AF86D6AFE86FDB669 /* AttachmentStripView.swift */; };
+		B045063A252F700E87917772 /* ChatQuoteViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4688CA5C4CFBA1E3A4C7569C /* ChatQuoteViews.swift */; };
 		B08C29548D93122F0AA73C01 /* ReactionBadges.swift in Sources */ = {isa = PBXBuildFile; fileRef = 395F8B4FF8768E18F5789060 /* ReactionBadges.swift */; };
 		B433DA87A9B0ABD221346C7A /* LocalNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 446EDEE4C7998A61822DEA32 /* LocalNotifications.swift */; };
 		B72A042E912127198DCDA854 /* ProtectedStorageAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */; };
@@ -66,6 +67,7 @@
 		C6E22ABC4AAB1EBB9FA45681 /* ReceivedFileViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 125D46AA18FD0FD7BA397180 /* ReceivedFileViews.swift */; };
 		CAEDB91F6D9A79695A449F7B /* AppleSpeechTranscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A8F3C8E414D9F2A690260D6 /* AppleSpeechTranscriber.swift */; };
 		CFB55369F229DCF8B92BA398 /* ChatBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12550753F6EF1111C87EA8A8 /* ChatBubble.swift */; };
+		D05B3CDCC1F08777E64FB0EA /* QuoteReplyUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDE579CB5319529770EC56B9 /* QuoteReplyUITests.swift */; };
 		D079943BAE0C42A8E25FFAB2 /* DeviceKeyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEE713B92846B56241CD9612 /* DeviceKeyView.swift */; };
 		D4366E8BE2F65577400AC2B0 /* AttachmentBubbles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DEAF65581DD2EF4020516B9 /* AttachmentBubbles.swift */; };
 		DC807288C7246595D35CD72E /* LocationSettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E583F634243E84B759FCEC6 /* LocationSettingsSection.swift */; };
@@ -110,6 +112,7 @@
 		4059DBFD119A7D4C760969ED /* ParakeetTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParakeetTranscriber.swift; sourceTree = "<group>"; };
 		40916C67E6E9CDFF43F23AB8 /* LocationControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationControllerTests.swift; sourceTree = "<group>"; };
 		446EDEE4C7998A61822DEA32 /* LocalNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNotifications.swift; sourceTree = "<group>"; };
+		4688CA5C4CFBA1E3A4C7569C /* ChatQuoteViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatQuoteViews.swift; sourceTree = "<group>"; };
 		48519F8E1A8B7BA59F02B2E9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		4E8938E86160BC92E880BF21 /* TranscriptionSettingsDemo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionSettingsDemo.swift; sourceTree = "<group>"; };
 		50D1D3FA38000668A9E6D95A /* JobsDemo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobsDemo.swift; sourceTree = "<group>"; };
@@ -140,6 +143,7 @@
 		A637193173A2CF37B300BC09 /* ReceivedFileDemo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceivedFileDemo.swift; sourceTree = "<group>"; };
 		B3943AD860F04AC733085D8A /* AttachmentComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentComposer.swift; sourceTree = "<group>"; };
 		BDDF85200B57F3AFCAB1552A /* AttachmentUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentUITests.swift; sourceTree = "<group>"; };
+		BDE579CB5319529770EC56B9 /* QuoteReplyUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuoteReplyUITests.swift; sourceTree = "<group>"; };
 		BF8E9D05C49A73D36F5106A7 /* LocationAccessPrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationAccessPrompt.swift; sourceTree = "<group>"; };
 		C41CED143465554FB51CC1FB /* AskHermesAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskHermesAppTests.swift; sourceTree = "<group>"; };
 		C80A034BAA06291CE4BB4106 /* HermesConnectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesConnectTests.swift; sourceTree = "<group>"; };
@@ -275,6 +279,7 @@
 				40916C67E6E9CDFF43F23AB8 /* LocationControllerTests.swift */,
 				A3A9EE461B51E5FCABAF0376 /* MarkdownBlockUITests.swift */,
 				DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */,
+				BDE579CB5319529770EC56B9 /* QuoteReplyUITests.swift */,
 				D2FE4163F13B8D352C47868C /* ReceivedFileUITests.swift */,
 				83E296700CE9EBB2D816E590 /* SessionListTests.swift */,
 				02B9B8909DFDB725CB523CF7 /* TapbackUITests.swift */,
@@ -349,6 +354,7 @@
 				12550753F6EF1111C87EA8A8 /* ChatBubble.swift */,
 				23D8BC56827006B8AA57FFA8 /* ChatCommandCell.swift */,
 				DC3CFB65E5C14E6CFD46E85F /* ChatMarkdownText.swift */,
+				4688CA5C4CFBA1E3A4C7569C /* ChatQuoteViews.swift */,
 				1A26C38F7103D242B9AFB6E1 /* ChatScreen.swift */,
 				71BE1F0BBF1E0DC6C9086E97 /* ChatViewController.swift */,
 				7FB38BCE9C434337D022CF42 /* ChatVoiceCell.swift */,
@@ -501,6 +507,7 @@
 				CFB55369F229DCF8B92BA398 /* ChatBubble.swift in Sources */,
 				17E1339897DD2126DA36CB6A /* ChatCommandCell.swift in Sources */,
 				211CBBF5ADB2917454F96E2C /* ChatMarkdownText.swift in Sources */,
+				B045063A252F700E87917772 /* ChatQuoteViews.swift in Sources */,
 				18787829A672FAE5AA0FBC11 /* ChatScreen.swift in Sources */,
 				117A8219415F89525F20D235 /* ChatViewController.swift in Sources */,
 				8CCAD742FBA2926FF1940B53 /* ChatVoiceCell.swift in Sources */,
@@ -550,6 +557,7 @@
 				74C7DA0960EA120C51C2AF65 /* LocationControllerTests.swift in Sources */,
 				52340B921FD5A48247DE47B4 /* MarkdownBlockUITests.swift in Sources */,
 				B72A042E912127198DCDA854 /* ProtectedStorageAppTests.swift in Sources */,
+				D05B3CDCC1F08777E64FB0EA /* QuoteReplyUITests.swift in Sources */,
 				6CF02420A5CB991263820DB5 /* ReceivedFileUITests.swift in Sources */,
 				005CA6251E125BF95E1E03B3 /* SessionListTests.swift in Sources */,
 				82E8F7FA7611089BA44CFB3A /* TapbackUITests.swift in Sources */,

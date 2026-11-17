@@ -53,9 +53,10 @@ public struct ChatThread: Sendable, Equatable {
 
     // MARK: Outgoing
 
-    public mutating func addOutgoing(id: String, text: String, date: Date, attachments: [ChatAttachment] = []) {
+    public mutating func addOutgoing(id: String, text: String, date: Date, attachments: [ChatAttachment] = [],
+                                     quote: ChatQuote? = nil) {
         messages.append(ChatMessage(id: id, role: .user, text: text, date: date, delivery: .sending,
-                                    attachments: attachments))
+                                    attachments: attachments, quote: quote))
     }
 
     /// Issue #8: the attach state of one attachment of an outgoing message.

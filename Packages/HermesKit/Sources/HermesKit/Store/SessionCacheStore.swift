@@ -37,7 +37,8 @@ public enum SessionCache {
     /// Version 3 (issue #11): agent acks and owner tapbacks.
     /// Version 4 (issue #49): the waveform of a voice reply.
     /// Version 5 (issue #12): the photos, files and location cards of sent messages (metadata and local path).
-    public static let formatVersion = 5
+    /// Version 6 (issue #17): the quote of a reply.
+    public static let formatVersion = 6
     /// Issue #36: the transcript key of the new chat that has no server row yet. Its memos stay here,
     /// so a failed memo survives a quit. No stored id starts with `#`.
     public static let newChatId = "#new-chat"
@@ -144,6 +145,38 @@ struct CachedSpeech: Codable, Equatable {
     }
 }
 
+/// The quote of a reply (format version 6, issue #17).
+struct CachedQuote: Codable, Equatable {
+    var messageId: String?
+    var author: String
+    var time: String
+    var excerpt: String
+
+    init(_ quote: ChatQuote) {
+        messageId = quote.messageId
+        author = quote.author == .user ? "user" : "assistant"
+        time = quote.time
+        excerpt = quote.excerpt
+    }
+
+    /// `nil` for an entry with no excerpt.
+    var quote: ChatQuote? {
+        guard !excerpt.isEmpty else { return nil }
+        return ChatQuote(messageId: messageId, author: author == "user" ? .user : .assistant, time: time,
+                         excerpt: excerpt)
+    }
+
+    private enum CodingKeys: String, CodingKey { case messageId, author, time, excerpt }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        messageId = try container.decodeIfPresent(String.self, forKey: .messageId)
+        author = try container.decodeIfPresent(String.self, forKey: .author) ?? "assistant"
+        time = try container.decodeIfPresent(String.self, forKey: .time) ?? ""
+        excerpt = try container.decodeIfPresent(String.self, forKey: .excerpt) ?? ""
+    }
+}
+
 /// One attachment of a sent message (format version 5, issue #12). The bytes stay in their local file.
 /// A file that the system cleared shows the gray placeholder (photo) or the cell with no preview (file).
 struct CachedAttachment: Codable, Equatable {
@@ -228,6 +261,8 @@ struct CachedMessage: Codable, Equatable {
     var tapback: String?
     /// Version 5 (issue #12): the attachments of a sent message. Older files have no key: none.
     var attachments: [CachedAttachment]
+    /// Version 6 (issue #17): the quote of a reply. Older files have no key: no quote.
+    var quote: CachedQuote?
 
     init(_ message: ChatMessage) {
         id = message.id
@@ -243,6 +278,7 @@ struct CachedMessage: Codable, Equatable {
         ack = message.agentAck?.rawValue
         tapback = message.tapback?.rawValue
         attachments = message.attachments.map(CachedAttachment.init)
+        quote = message.quote.map(CachedQuote.init)
     }
 
     var message: ChatMessage {
@@ -253,7 +289,8 @@ struct CachedMessage: Codable, Equatable {
             let ack = ack.flatMap(AgentAck.init(rawValue:)).flatMap { $0 == .seen ? nil : $0 }
             return ChatMessage(id: id, role: .user, text: memo.map { $0.transcript.text ?? "" } ?? text, date: date,
                                delivery: notDelivered ? .failed : .delivered, userRowId: userRowId, voice: memo,
-                               attachments: attachments.map(\.attachment), agentAck: ack, tapback: tapback)
+                               attachments: attachments.map(\.attachment), agentAck: ack, tapback: tapback,
+                               quote: quote?.quote)
         }
         return ChatMessage(id: id, role: .assistant, text: text, date: date,
                            reply: interrupted ? .interrupted : .complete, promptId: promptId,
@@ -262,7 +299,7 @@ struct CachedMessage: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, role, text, date, userRowId, promptId, interrupted, notDelivered, voice, speech, ack, tapback
-        case attachments
+        case attachments, quote
     }
 
     init(from decoder: any Decoder) throws {
@@ -283,6 +320,8 @@ struct CachedMessage: Codable, Equatable {
         tapback = (try? container.decodeIfPresent(String.self, forKey: .tapback)) ?? nil
         // Version 5. A broken list drops only the attachments: the message shows its text.
         attachments = ((try? container.decodeIfPresent([CachedAttachment].self, forKey: .attachments)) ?? nil) ?? []
+        // Version 6. A broken quote drops only the quote: the message shows its reply text.
+        quote = (try? container.decodeIfPresent(CachedQuote.self, forKey: .quote)) ?? nil
     }
 }
 

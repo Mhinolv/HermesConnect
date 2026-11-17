@@ -139,7 +139,8 @@ public enum ChatTimeline {
         let sender = row.message.role == .user ? "You" : "Hermes"
         let time = row.message.date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, locale: locale,
                                                                calendar: calendar, timeZone: calendar.timeZone))
-        var parts = [sender]
+        // Issue #17: "Reply to Hermes: <excerpt>" first.
+        var parts = row.message.quote.map { [$0.accessibilityText, sender] } ?? [sender]
         if let voice = row.message.voice {
             parts.append("Voice memo, \(VoiceMemoFormat.spokenDuration(voice.duration))")
             switch voice.transcript {

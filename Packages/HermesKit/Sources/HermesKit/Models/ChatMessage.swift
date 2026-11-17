@@ -51,11 +51,14 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
     public var tapback: Tapback?
     /// Issue #67: a local command card (`.assistant`, no `reply`). It never goes to Hermes or to the cache.
     public var command: ChatCommandCard?
+    /// Issue #17: the message that this owner prompt replies to. `text` is the reply only.
+    public var quote: ChatQuote?
 
     public init(id: String, role: Role, text: String, date: Date, delivery: Delivery? = nil,
                 reply: Reply? = nil, userRowId: Int? = nil, promptId: String? = nil, voice: VoiceMemo? = nil,
                 attachments: [ChatAttachment] = [], spokenReply: SpokenReply? = nil,
-                agentAck: AgentAck? = nil, tapback: Tapback? = nil, command: ChatCommandCard? = nil) {
+                agentAck: AgentAck? = nil, tapback: Tapback? = nil, command: ChatCommandCard? = nil,
+                quote: ChatQuote? = nil) {
         self.id = id
         self.role = role
         self.text = text
@@ -70,6 +73,7 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
         self.agentAck = agentAck
         self.tapback = tapback
         self.command = command
+        self.quote = quote
     }
 
     public var isFailed: Bool {

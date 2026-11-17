@@ -60,8 +60,13 @@ enum ChatBubbleText {
             return NSAttributedString(string: "No reply", attributes: [.font: body.adding(.traitItalic),
                                                                         .foregroundColor: UIColor.secondaryLabel])
         }
-        return ChatMarkdownText.make(message.text, style: ChatMarkdownText.Style(traits: traits, outgoing: outgoing),
-                                     width: width, streaming: message.reply == .streaming)
+        let style = ChatMarkdownText.Style(traits: traits, outgoing: outgoing)
+        let body = ChatMarkdownText.make(message.text, style: style, width: width, streaming: message.reply == .streaming)
+        // Issue #17: the quote line at the top of a reply.
+        guard let quote = message.quote else { return body }
+        let text = ChatQuoteText.make(quote, style: style)
+        text.append(body)
+        return text
     }
 
     /// The widest text line of a bubble in a thread of this width: the padding of `ChatViewController`
@@ -75,6 +80,8 @@ enum ChatBubbleText {
 /// A text bubble with tappable links.
 final class ChatTextCell: TextMessageCell {
     var openLink: ((URL) -> Void)?
+    /// Issue #17: a tap on the quote line of a reply.
+    var openQuote: (() -> Void)?
     /// Issue #49 (QA #54): the spinner of the "Preparing audio…" caption row under a reply.
     let captionSpinner = UIActivityIndicatorView(style: .medium)
 
@@ -111,6 +118,7 @@ final class ChatTextCell: TextMessageCell {
         super.prepareForReuse()
         markdownView.attributedText = nil
         openLink = nil
+        openQuote = nil
         captionSpinner.stopAnimating()
     }
 
@@ -137,6 +145,10 @@ final class ChatTextCell: TextMessageCell {
     override func cellContentView(canHandle touchPoint: CGPoint) -> Bool {
         if let url = link(at: touchPoint) {
             openLink?(url)
+            return true
+        }
+        if let openQuote, markdownView.isQuote(at: touchPoint) {
+            openQuote()
             return true
         }
         return super.cellContentView(canHandle: touchPoint)

@@ -38,6 +38,8 @@ public final class ChatViewModel {
     public private(set) var newChatRequest: NewChatRequest?
     /// Issue #67: text for the composer: a `prefill` result, or the typed text of a command that failed.
     public private(set) var composerFill: ComposerFill?
+    /// Issue #17: the message that the next text send quotes. The composer shows it above the text view.
+    public private(set) var replyQuote: ChatQuote?
 
     @ObservationIgnored private var thread = ChatThread()
     @ObservationIgnored private let transport: any ChatTransport
@@ -345,7 +347,8 @@ public final class ChatViewModel {
         guard hasText || !attachments.isEmpty else { return nil }
         if hasText, let command = SlashCommand(text) { return runCommand(command) }
         let id = makeId()
-        thread.addOutgoing(id: id, text: hasText ? text : "", date: now(), attachments: attachments)
+        thread.addOutgoing(id: id, text: hasText ? text : "", date: now(), attachments: attachments, quote: replyQuote)
+        replyQuote = nil
         redrawNow()
         return Task { await deliver(id: id, retryBeforeRowId: nil) }
     }
@@ -378,6 +381,25 @@ public final class ChatViewModel {
         }
         redrawNow()
         return Task { await deliver(id: id, retryBeforeRowId: nil) }
+    }
+
+    /// Issue #17: "Reply" (swipe or menu). The next text send quotes this message. `false` if it cannot be quoted.
+    @discardableResult
+    public func startReply(to id: String) -> Bool {
+        guard let message = thread.message(id: id), let quote = ChatQuote(message: message) else { return false }
+        replyQuote = quote
+        return true
+    }
+
+    /// Issue #17: "Cancel Reply" in the composer.
+    public func cancelReply() {
+        replyQuote = nil
+    }
+
+    /// Issue #17: the bubble that the quote of message `id` points to, or `nil` if it is not loaded.
+    public func quotedMessageId(of id: String) -> String? {
+        guard let quote = thread.message(id: id)?.quote else { return nil }
+        return QuoteReply.target(of: quote, in: thread.messages.filter { $0.id != id })
     }
 
     /// Issue #11: the owner's tapback. The same tapback again, or `nil`, removes it. It stays on the phone:
@@ -477,7 +499,8 @@ public final class ChatViewModel {
             let session = try await currentSession()
             try await uploadAttachments(of: id, to: session.liveId)
             guard let message = thread.message(id: id) else { return }
-            let text = commandPrompts[id] ?? AttachmentPayload.promptText(message.text, attachments: message.attachments)
+            let text = commandPrompts[id] ?? AttachmentPayload.promptText(
+                QuoteReply.promptText(message.text, quote: message.quote), attachments: message.attachments)
             thread.beginTurn(promptId: id)
             redrawNow()
             let row = if isVoice {
