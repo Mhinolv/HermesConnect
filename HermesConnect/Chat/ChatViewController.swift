@@ -37,6 +37,8 @@ final class ChatViewController: MessagesViewController {
     /// The first new message of the catch-up that the screen handled (scrolled to, or showed the pill for).
     private var handledNewMessageId: String?
     private var composerText = ""
+    /// Issue #60: the space under the composer field. `updateComposerBottom()` sets it from the window.
+    private var composerBottom: NSLayoutConstraint?
     /// Issue #8: the `plus` menu and the pending photos and files.
     private let attachments = AttachmentComposer()
     /// Issue #11: the symbol that each badge showed last ("<message id>#ack"), for the `.replace` change.
@@ -72,6 +74,8 @@ final class ChatViewController: MessagesViewController {
         messagesCollectionView.keyboardDismissMode = .interactive
         scrollsToLastItemOnKeyboardBeginsEditing = true
         maintainPositionOnInputBarHeightChanged = true
+        // Issue #60: 10 pt between the last bubble and the composer, keyboard up or down (iMessage).
+        additionalBottomInset = ChatComposerLayout.threadGap
         configureLayout()
         configureComposer()
         configureAttachments()
@@ -157,9 +161,12 @@ final class ChatViewController: MessagesViewController {
         ])
         bar.padding = UIEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
         bar.middleContentViewPadding = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 8)
+        installComposerBottom()
 
         let textView = bar.inputTextView
         textView.placeholder = "Message"
+        // Issue #60: a safe area under the composer does not move the text in the field.
+        textView.contentInsetAdjustmentBehavior = .never
         textView.font = .preferredFont(forTextStyle: .body)
         textView.adjustsFontForContentSizeCategory = true
         textView.placeholderLabel.font = .preferredFont(forTextStyle: .body)
@@ -183,6 +190,41 @@ final class ChatViewController: MessagesViewController {
         bar.setRightStackViewWidthConstant(to: 36, animated: false)
         attachments.install(in: bar, presenter: self)
         updateSendButton()
+    }
+
+    /// Issue #60: the composer does not use its own safe area for the space under the field. With the keyboard up,
+    /// that safe area kept the 34 pt home indicator inset, so the composer had a band on the keyboard.
+    /// The space comes from the window instead (`updateComposerBottom()`).
+    private func installComposerBottom() {
+        let bar = messageInputBar
+        dropSafeAreaBottom()
+        let bottom = bar.contentView.bottomAnchor.constraint(lessThanOrEqualTo: bar.bottomAnchor,
+                                                             constant: -bar.padding.bottom)
+        bottom.isActive = true
+        composerBottom = bottom
+    }
+
+    /// The input bar activates its safe area constraint again each time it moves to a superview.
+    private func dropSafeAreaBottom() {
+        let bar = messageInputBar
+        for constraint in bar.constraints where constraint.isActive && constraint.firstItem === bar.contentView
+            && constraint.firstAttribute == .bottom && constraint.secondItem === bar.safeAreaLayoutGuide {
+            constraint.isActive = false
+        }
+    }
+
+    /// Keyboard down: the padding plus the home indicator. Keyboard up: only the padding. During the keyboard
+    /// animation and the interactive dismissal, the composer frame gives the part over the home indicator.
+    private func updateComposerBottom() {
+        guard let bottom = composerBottom, let window = view.window else { return }
+        dropSafeAreaBottom()
+        let composer = inputContainerView.convert(inputContainerView.bounds, to: window)
+        let space = ChatComposerLayout.bottomSpace(padding: messageInputBar.padding.bottom, composerMaxY: composer.maxY,
+                                                   windowHeight: window.bounds.height,
+                                                   homeIndicator: window.safeAreaInsets.bottom)
+        guard abs(bottom.constant + space) > 0.5 else { return }
+        bottom.constant = -space
+        view.layoutIfNeeded()
     }
 
     private func configureAttachments() {
@@ -518,6 +560,8 @@ final class ChatViewController: MessagesViewController {
         let lift = ChatComposerLayout.controlLift(lineHeight: lineHeight)
         for stack in [bar.leftStackView, bar.rightStackView] {
             stack.isLayoutMarginsRelativeArrangement = true
+            // Issue #60: the lift is the only bottom margin. A safe area under the composer does not move the buttons.
+            stack.insetsLayoutMarginsFromSafeArea = false
             stack.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: lift, trailing: 0)
         }
         messageInputBar.maxTextViewHeight = (lineHeight * 6 + textView.textContainerInset.top
@@ -681,6 +725,7 @@ final class ChatViewController: MessagesViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        updateComposerBottom()
         if pinnedToBottom { scrollToBottom() }
     }
 
@@ -1064,6 +1109,16 @@ enum ChatComposerLayout {
     /// one-line field (large text sizes). 0 at the default sizes.
     static func controlLift(lineHeight: CGFloat) -> CGFloat {
         max(0, (lineHeight + 2 * textInset(lineHeight: lineHeight) - control) / 2)
+    }
+
+    /// Issue #60: the space between the last bubble and the composer.
+    static let threadGap: CGFloat = 10
+
+    /// Issue #60: the space under the field. It is the padding, plus the part of the composer over the home
+    /// indicator. With the keyboard up, the composer ends above the home indicator, so only the padding stays.
+    static func bottomSpace(padding: CGFloat, composerMaxY: CGFloat, windowHeight: CGFloat,
+                            homeIndicator: CGFloat) -> CGFloat {
+        padding + min(homeIndicator, max(0, composerMaxY - (windowHeight - homeIndicator)))
     }
 }
 
