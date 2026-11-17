@@ -130,27 +130,88 @@ private enum Vector {
 }
 
 @Suite struct ServerInstallGuideTests {
-    /// `bash server/install.sh --dry-run "$(cat key.pub)"` from issue #2 prints this line for the RFC 6979 key.
+    /// `bash server/install.sh --dry-run "$(cat key.pub)"` prints this line for the RFC 6979 key (issue #41).
     @Test func authorizedKeysLineMatchesInstallScript() {
         let line = "ecdsa-sha2-nistp256 \(Vector.blobBase64) hermesconnect@iPhone"
         let guide = ServerInstallGuide(publicKeyLine: line)
         #expect(guide.slot == Vector.slot)
         #expect(guide.authorizedKeysLine ==
-            #"restrict,port-forwarding,permitopen="127.0.0.1:*",permitlisten="127.0.0.1:1",command="/usr/local/libexec/hermesconnect/hermesconnect-gate --slot \#(Vector.slot)" "# + line)
+            #"restrict,port-forwarding,permitopen="127.0.0.1:47107",permitlisten="127.0.0.1:1",command="/usr/local/libexec/hermesconnect/hermesconnect-gate --slot \#(Vector.slot) --port 47107" "# + line)
         #expect(guide.authorizedKeysPath == "/home/hermes/.ssh/authorized_keys")
         #expect(guide.installCommand == "sudo /tmp/hermesconnect-server/install.sh '\(line)'")
     }
 
-    @Test func sshdBlockIsForTheUserAndAllowsOnlyLoopbackForwards() {
-        let block = ServerInstallGuide(publicKeyLine: "k", user: "hermes").sshdMatchBlock
-        let lines = block.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-        #expect(lines.first == "Match User hermes")
-        #expect(lines.contains("AllowTcpForwarding local"))
-        #expect(lines.contains("PermitOpen 127.0.0.1:*"))
-        #expect(lines.contains("PermitListen none"))
-        #expect(lines.contains("AllowAgentForwarding no"))
-        #expect(lines.contains("PasswordAuthentication no"))
+    /// Issue #41: the guide line and the `install.sh` line must not drift. Run the real script for some keys.
+    @Test func authorizedKeysLineEqualsInstallScriptDryRun() throws {
+        var lines = ["ecdsa-sha2-nistp256 \(Vector.blobBase64) hermesconnect@iPhone",
+                     "ecdsa-sha2-nistp256 \(Vector.blobBase64)",
+                     "ecdsa-sha2-nistp256 \(Vector.blobBase64) hermesconnect@" + String(repeating: "Long-iPhone-", count: 8)]
+        for index in 0..<8 {
+            let key = P256.Signing.PrivateKey().publicKey
+            lines.append(OpenSSHPublicKey(publicKey: key, comment: "hermesconnect@iPhone-\(index)").line)
+        }
+        for line in lines {
+            let script = try installScriptDryRun(line)
+            let guide = ServerInstallGuide(publicKeyLine: line).authorizedKeysLine
+            #expect(guide == script)
+        }
     }
+
+    /// Issue #41: the guide has no sshd_config step and no reload command. `install.sh` does the server work.
+    @Test func stepsHaveNoSSHDConfigOrReload() {
+        let guide = ServerInstallGuide(publicKeyLine: "ecdsa-sha2-nistp256 \(Vector.blobBase64) hermesconnect@iPhone")
+        #expect(guide.steps.count == 2)
+        #expect(guide.steps.first?.code == guide.installCommand)
+        #expect(guide.steps.last?.code == guide.authorizedKeysLine)
+        let texts = guide.steps.flatMap { [$0.text, $0.code ?? ""] } + [ServerInstallGuide.footnote]
+        for banned in ["sshd_config", "sshd -t", "systemctl", "reload", "Match User", "PermitOpen", "127.0.0.1:*"] {
+            #expect(!texts.contains { $0.contains(banned) }, "\(banned)")
+        }
+    }
+
+    @Test func slotPortUsesTheGateRule() {
+        #expect(ServerInstallGuide(publicKeyLine: "ecdsa-sha2-nistp256 \(Vector.blobBase64)").slotPort == 47107)
+        let ports = (0..<50).compactMap { _ in
+            ServerInstallGuide(publicKeyLine: OpenSSHPublicKey(publicKey: P256.Signing.PrivateKey().publicKey,
+                                                               comment: "x").line).slotPort
+        }
+        #expect(ports.count == 50)
+        #expect(ports.allSatisfy { (47100..<47200).contains($0) })
+    }
+
+    @Test func badKeyLineHasNoAuthorizedKeysLine() {
+        let guide = ServerInstallGuide(publicKeyLine: "k")
+        #expect(guide.slotPort == nil)
+        #expect(guide.authorizedKeysLine == nil)
+        #expect(guide.steps.count == 1)
+    }
+
+    /// The host hint names Tailscale and only a generic example address.
+    @Test func hostHintUsesAGenericTailscaleExample() {
+        #expect(ServerProfile.exampleHost == "100.x.y.z")
+        #expect(ServerProfile.hostHint.contains("Tailscale"))
+        #expect(ServerProfile.hostHint.contains(ServerProfile.exampleHost))
+    }
+}
+
+/// The line that `server/install.sh --dry-run` prints. It changes nothing on the Mac.
+private func installScriptDryRun(_ keyLine: String) throws -> String {
+    let script = URL(filePath: #filePath).deletingLastPathComponent()
+        .appending(path: "../../../../server/install.sh").standardizedFileURL
+    try #require(FileManager.default.fileExists(atPath: script.path), "server/install.sh is missing")
+    let process = Process()
+    process.executableURL = URL(filePath: "/bin/bash")
+    process.arguments = [script.path, "--dry-run", keyLine]
+    process.environment = ["PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"]
+    let output = Pipe(), errors = Pipe()
+    process.standardOutput = output
+    process.standardError = errors
+    try process.run()
+    process.waitUntilExit()
+    let stdout = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    let stderr = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    try #require(process.terminationStatus == 0, "install.sh: \(stderr)")
+    return stdout.trimmingCharacters(in: .newlines)
 }
 
 // MARK: - Helpers

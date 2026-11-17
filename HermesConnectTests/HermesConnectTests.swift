@@ -45,7 +45,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         let line = try #require(model.openSSHKey?.line)
         #expect(line.hasPrefix("ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABB"))
         #expect(line.hasSuffix(" hermesconnect@Test-iPhone"))
-        #expect(model.installGuide?.authorizedKeysLine.hasSuffix(line) == true)
+        #expect(model.installGuide?.authorizedKeysLine?.hasSuffix(line) == true)
     }
 
     @Test func ensureKeyKeepsTheExistingKey() async throws {
