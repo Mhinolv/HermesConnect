@@ -21,6 +21,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case live
         /// Seeded thread, idle.
         case thread
+        /// Issue #60: the seeded thread with the composer focused, so the keyboard shows.
+        case keyboard
         /// Seeded thread plus a reply that streams with a tool line and holds before `message.complete`.
         case streaming
         /// Seeded thread with a failed reply, plus a send that fails ("Not Delivered").
@@ -90,7 +92,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             switch self {
             case .streaming: "What's the weather in Austin this weekend?"
             case .failed: "Can you check the server logs?"
-            case .live, .thread, .empty, .list, .listEmpty, .listLoading, .voice, .recording, .hold, .paused,
+            case .live, .thread, .keyboard, .empty, .list, .listEmpty, .listLoading, .voice, .recording, .hold, .paused,
                  .attachments, .voiceReplies, .voiceRepliesPaused, .voiceReplyText, .tapbacks, .tapbacksPicker, .markdownTable, .markdownTableTop, .markdownSheet, .markdownBlocks,
                  .markdownBlocksTop, .catchUp, .catchUpPill,
                  .notificationSettings, .notificationsOff, .voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading,
