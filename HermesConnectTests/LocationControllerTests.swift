@@ -16,6 +16,9 @@ private final class FakeLocationManager: LocationManaging {
     var locationRequests = 0
     var monitorsSignificantChanges = false
     var monitorsVisits = false
+    var desiredAccuracy: CLLocationAccuracy = kCLLocationAccuracyHundredMeters
+    var distanceFilter: CLLocationDistance = kCLDistanceFilterNone
+    var updatesLocation = false
 
     init(_ status: CLAuthorizationStatus) {
         authorizationStatus = status
@@ -28,6 +31,8 @@ private final class FakeLocationManager: LocationManaging {
     func startMonitoringVisits() { monitorsVisits = true }
     func stopMonitoringVisits() { monitorsVisits = false }
     func requestLocation() { locationRequests += 1 }
+    func startUpdatingLocation() { updatesLocation = true }
+    func stopUpdatingLocation() { updatesLocation = false }
 }
 
 /// A fake iOS background-task runner. Tests fire the expiration handler by hand.
@@ -330,6 +335,94 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0) -> LocationFix {
         rig.manager.accuracyAuthorization = .reducedAccuracy
         rig.controller.authorizationDidChange()
         #expect(!rig.controller.isPreciseAllowed)
+    }
+
+    // MARK: Issue #51: fresh, accurate fixes
+
+    @Test func appOpenRequestsANewFixAndSendsIt() async {
+        let rig = make(.authorizedAlways, enabled: true)
+        rig.controller.appDidBecomeActive()
+        #expect(rig.manager.locationRequests == 1)
+        rig.controller.received([fix()])
+        await rig.controller.waitForUploads()
+        #expect(rig.uploader.payloads.count == 1)
+    }
+
+    @Test func connectRequestsANewFixAndSendsItWithoutTheRateLimit() async {
+        let rig = make(.authorizedAlways, enabled: true)
+        // A coarse background fix went 10 s ago, so the rate limit holds the next nearby fix.
+        rig.controller.received([fix(at: .now.addingTimeInterval(-10))])
+        await rig.controller.waitForUploads()
+        rig.controller.didConnect()
+        #expect(rig.manager.locationRequests == 1)
+        rig.controller.received([fix(37.3350, at: .now)])
+        await rig.controller.waitForUploads()
+        #expect(rig.uploader.payloads.count == 2)
+        // A later fix in the same place obeys the rate limit again.
+        rig.controller.received([fix(37.3351, at: .now)])
+        await rig.controller.waitForUploads()
+        #expect(rig.uploader.payloads.count == 2)
+    }
+
+    @Test func openAndConnectRequestNothingWhenSharingIsOff() {
+        let rig = make(.authorizedAlways)
+        rig.controller.appDidBecomeActive()
+        rig.controller.didConnect()
+        #expect(rig.manager.locationRequests == 0)
+        #expect(!rig.manager.updatesLocation)
+        let denied = make(.denied, enabled: true)
+        denied.controller.appDidBecomeActive()
+        denied.controller.didConnect()
+        #expect(denied.manager.locationRequests == 0)
+        #expect(!denied.manager.updatesLocation)
+    }
+
+    @Test func aSavedFixOlderThanThirtyMinutesIsNotSentOnConnect() async {
+        let old = fix(at: .now.addingTimeInterval(-86 * 60))
+        let store = InMemoryLocationStateStore(LocationShareState(pending: old, lastError: "The server is not reachable."))
+        let rig = make(.authorizedAlways, enabled: true, store: store)
+        rig.controller.didConnect()
+        await rig.controller.waitForUploads()
+        #expect(rig.uploader.payloads.isEmpty)
+        #expect(rig.store.load().pending == nil)
+        #expect(!rig.controller.status.waitingForConnection)
+    }
+
+    @Test func foregroundUsesFullAccuracyAndBackgroundOnlySignificantChangesAndVisits() {
+        let rig = make(.authorizedAlways, enabled: true)
+        // A launch in the background (by a location event) starts no continuous updates.
+        #expect(!rig.manager.updatesLocation)
+        #expect(rig.manager.monitorsSignificantChanges)
+        #expect(rig.manager.monitorsVisits)
+
+        rig.controller.appDidBecomeActive()
+        #expect(rig.manager.updatesLocation)
+        #expect(rig.manager.desiredAccuracy == kCLLocationAccuracyBest)
+        #expect(rig.manager.distanceFilter == 50)
+        #expect(rig.manager.monitorsSignificantChanges)
+        #expect(rig.manager.monitorsVisits)
+
+        rig.controller.appDidEnterBackground()
+        #expect(!rig.manager.updatesLocation)
+        #expect(rig.manager.monitorsSignificantChanges)
+        #expect(rig.manager.monitorsVisits)
+    }
+
+    @Test func foregroundUpdatesFollowTheToggleAndAccess() {
+        let rig = make(.authorizedAlways)
+        rig.controller.appDidBecomeActive()
+        #expect(!rig.manager.updatesLocation)
+        rig.controller.setEnabled(true)
+        #expect(rig.manager.updatesLocation)
+        rig.manager.authorizationStatus = .denied
+        rig.controller.authorizationDidChange()
+        #expect(!rig.manager.updatesLocation)
+        rig.manager.authorizationStatus = .authorizedWhenInUse
+        rig.controller.authorizationDidChange()
+        #expect(rig.manager.updatesLocation)
+        rig.controller.setEnabled(false)
+        #expect(!rig.manager.updatesLocation)
+        #expect(!rig.manager.monitorsSignificantChanges)
     }
 
     @Test func accessTitlesMatchTheDesign() {

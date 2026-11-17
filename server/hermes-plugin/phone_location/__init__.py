@@ -7,8 +7,10 @@ The gate stores the newest fix in ``$HOME/.hermes/hermesconnect/location.json`` 
      "timestamp": "2026-11-16T12:00:00.000Z", "speed": 1.5, "course": 90.0,
      "received_at": "2026-11-16T12:00:03.120Z", "source": "hermesconnect"}
 
-If the fix is missing or older than STALE_MINUTES, the tool calls the findmy plugin
-(``findmy_location``) in this process when that plugin is installed. The phone gets no
+The app sends a fix only when the owner moves (about 500 m) or arrives at a place, so a valid fix
+older than STALE_MINUTES means "not moved" (issue #51). The tool returns it with its real age and
+accuracy. Only if the fix is missing or not valid does the tool call the findmy plugin
+(``findmy_location``) in this process, when that plugin is installed. The phone gets no
 command channel: this plugin only reads the file. It never logs coordinates.
 """
 from __future__ import annotations
@@ -28,6 +30,8 @@ TOOLSET = "phone_location"
 STALE_MINUTES = 30
 MAX_FILE_BYTES = 65536
 FUTURE_SLACK_MINUTES = 5
+# A fix from before HermesConnect existed is not valid. Any later valid fix counts, however old.
+EARLIEST_FIX = datetime(2025, 1, 1, tzinfo=timezone.utc)
 
 SETUP_HINT = (
     "Ask the owner to turn on location sharing in the HermesConnect app on their iPhone "
@@ -40,8 +44,10 @@ SCHEMA = {
         "Get the owner's current location from their iPhone (the HermesConnect app): latitude, "
         "longitude, accuracy, when it was located, how many minutes ago, and an Apple Maps link. "
         "Use it when the owner asks about places near them, distance, directions, travel time, or "
-        "weather where they are. If the phone fix is missing or more than 30 minutes old, the tool "
-        "uses Find My (findmy_location) when it can. If 'stale' is true, say how old the location is. "
+        "weather where they are. If the phone fix is missing or not valid, the tool uses Find My "
+        "(findmy_location) when it can. If 'not_moved' is true, no newer fix came from the phone, so the "
+        "owner most likely did not move: use the location, and say how old it is and how exact it is "
+        "(accuracy_m). If 'stale' is true, say how old the location is. "
         "Do not repeat exact coordinates unless the owner asks for them."
     ),
     "parameters": {"type": "object", "properties": {}, "required": []},
@@ -118,7 +124,7 @@ def _read_fix(path: str, now: datetime) -> Tuple[Optional[dict], str]:
     lat, lon, accuracy = data.get("lat"), data.get("lon"), data.get("accuracy_m")
     when = _parse_time(data.get("timestamp"))
     if (not _finite(lat) or not -90 <= lat <= 90 or not _finite(lon) or not -180 <= lon <= 180
-            or not _finite(accuracy) or accuracy < 0 or when is None):
+            or not _finite(accuracy) or accuracy < 0 or when is None or when < EARLIEST_FIX):
         return None, "the phone location file is not valid"
     if (when - now).total_seconds() > FUTURE_SLACK_MINUTES * 60:
         return None, "the phone location time is in the future (clock skew)"
@@ -153,6 +159,12 @@ def _phone_result(fix: dict, now: datetime, note: Optional[str] = None) -> dict:
         result["speed_mps"] = round(fix["speed"], 1)
     if fix["course"] is not None:
         result["course_deg"] = round(fix["course"])
+    if age > STALE_MINUTES:
+        result["not_moved"] = True
+        if note is None:
+            note = (f"No newer fix came from the phone. This location is {round(age)} minutes old, "
+                    f"accurate to about {round(fix['accuracy_m'])} m. The phone sends a new fix when the "
+                    "owner moves about 500 m or arrives at a place, so the owner most likely did not move.")
     if note:
         result["note"] = note
     return result
@@ -204,28 +216,19 @@ def handle(args: dict, **kw: Any) -> str:
 def _handle() -> str:
     now = datetime.now(timezone.utc)
     fix, problem = _read_fix(_location_path(), now)
-    if fix is not None and (now - fix["when"]).total_seconds() <= STALE_MINUTES * 60:
+    if fix is not None:
+        # Any valid fix wins over Find My. An old fix means "not moved" (issue #51).
         return tool_result(_phone_result(fix, now))
 
     found, findmy_problem = _findmy()
-    phone_age = None if fix is None else max(0.0, (now - fix["when"]).total_seconds() / 60)
     if found is not None:
-        findmy_age = found.get("minutes_ago")
-        if phone_age is not None and _finite(findmy_age) and findmy_age > phone_age:
-            return tool_result(_phone_result(
-                fix, now, note="The phone fix is old, and Find My is older. " + SETUP_HINT))
         result = dict(found)
         result["source"] = "findmy"
+        findmy_age = found.get("minutes_ago")
         if _finite(findmy_age):
             result["stale"] = findmy_age > STALE_MINUTES
-        result["phone_fix"] = ("missing: " + problem) if fix is None else (
-            f"stale: {round(phone_age)} minutes old")
+        result["phone_fix"] = "missing: " + problem
         return tool_result(result)
-
-    if fix is not None:
-        return tool_result(_phone_result(
-            fix, now, note=f"This location is {round(phone_age)} minutes old. "
-                           f"{findmy_problem}. {SETUP_HINT}"))
     return tool_error(f"No current location: {problem}. {findmy_problem}. {SETUP_HINT}")
 
 

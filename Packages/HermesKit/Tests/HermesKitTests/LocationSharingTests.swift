@@ -357,6 +357,51 @@ private extension LocationFix {
         #expect(last["lat"] as? Double == 37.355)
     }
 
+    // Issue #51: the `phone_location` plugin refuses a fix older than 30 min, so the app never sends one.
+
+    @Test func aSavedFixOlderThanThirtyMinutesIsDroppedOnFlush() async {
+        let uploader = ScriptedLocationUploader()
+        // The VPS test: an unsent fix from 86 min ago waits for the next connect.
+        let store = InMemoryLocationStateStore(LocationShareState(pending: fix(), lastError: "The server is not reachable."))
+        let sharing = make(uploader: uploader, store: store, clock: TestClock(t0.addingTimeInterval(86 * 60)))
+        #expect(await sharing.flush(precision: .precise) == .nothing)
+        #expect(uploader.payloads.isEmpty)
+        #expect(store.load().pending == nil)
+        #expect(await sharing.status.waitingForConnection == false)
+    }
+
+    @Test func aSavedFixYoungerThanThirtyMinutesIsSent() async {
+        let uploader = ScriptedLocationUploader()
+        let store = InMemoryLocationStateStore(LocationShareState(pending: fix()))
+        let sharing = make(uploader: uploader, store: store, clock: TestClock(t0.addingTimeInterval(29 * 60)))
+        #expect(await sharing.flush(precision: .precise) == .sent)
+        #expect(uploader.payloads.count == 1)
+    }
+
+    @Test func anOldFixFromCoreLocationIsNotSentEvenWhenForced() async {
+        let uploader = ScriptedLocationUploader()
+        let store = InMemoryLocationStateStore()
+        let sharing = make(uploader: uploader, store: store, clock: TestClock(t0.addingTimeInterval(31 * 60)))
+        #expect(await sharing.submit(fix(), precision: .precise) == .nothing)
+        #expect(await sharing.submit(fix(), precision: .precise, force: true) == .nothing)
+        #expect(uploader.payloads.isEmpty)
+        #expect(store.load().pending == nil)
+    }
+
+    @Test func aFixThatAgesWhileItWaitsIsDropped() async {
+        let uploader = ScriptedLocationUploader(failure: .connection(.unreachable))
+        let store = InMemoryLocationStateStore()
+        let clock = TestClock(t0)
+        let sharing = make(uploader: uploader, store: store, clock: clock)
+        _ = await sharing.submit(fix(), precision: .precise)
+        #expect(store.load().pending == fix())
+        uploader.failure = nil
+        clock.advance(31 * 60)
+        #expect(await sharing.flush(precision: .precise) == .nothing)
+        #expect(uploader.payloads.count == 1)
+        #expect(store.load().pending == nil)
+    }
+
     @Test func oldStateFilesDecodeWithDefaults() throws {
         let state = try JSONDecoder().decode(LocationShareState.self, from: Data(#"{"lastError":"x","extra":1}"#.utf8))
         #expect(state.version == 1)

@@ -10,6 +10,8 @@ protocol LocationManaging: AnyObject {
     var delegate: (any CLLocationManagerDelegate)? { get set }
     var authorizationStatus: CLAuthorizationStatus { get }
     var accuracyAuthorization: CLAccuracyAuthorization { get }
+    var desiredAccuracy: CLLocationAccuracy { get set }
+    var distanceFilter: CLLocationDistance { get set }
     func requestWhenInUseAuthorization()
     func requestAlwaysAuthorization()
     func startMonitoringSignificantLocationChanges()
@@ -17,6 +19,8 @@ protocol LocationManaging: AnyObject {
     func startMonitoringVisits()
     func stopMonitoringVisits()
     func requestLocation()
+    func startUpdatingLocation()
+    func stopUpdatingLocation()
 }
 
 extension CLLocationManager: LocationManaging {}
@@ -44,6 +48,10 @@ struct BackgroundTasks {
 /// When sharing is on and iOS gives access, Core Location reports significant location changes and visits.
 /// These also wake the app after iOS ended it. Each fix goes to `LocationSharing`, which sends it through the
 /// gate `location` command. The controller never logs a fix.
+///
+/// Issue #51: in the foreground, full-accuracy updates also run (`kCLLocationAccuracyBest`, every 50 m).
+/// App open and connect each request one new fix, which goes without the rate limit. The background uses only
+/// significant changes and visits (battery). The app has no `location` background mode.
 @MainActor @Observable
 final class LocationController: NSObject {
     /// The access that iOS gives. Settings > Location > Access.
@@ -100,6 +108,10 @@ final class LocationController: NSObject {
     @ObservationIgnored private let background: BackgroundTasks
     /// The owner tapped "Send Location Now". The next fix goes at once, without the rate limit.
     @ObservationIgnored private var oneShotPending = false
+    /// The app asked for a new fix on open or on connect. The next fix goes without the rate limit.
+    @ObservationIgnored private var freshFixPending = false
+    /// True while the app is active. A launch in the background (by a location event) starts as false.
+    @ObservationIgnored private var isForeground = false
     /// The uploads that run now. Tests wait for them.
     @ObservationIgnored private var uploads: [UUID: Task<Void, Never>] = [:]
     /// The iOS background task of each upload. An entry is removed when the task ends, so it ends only once.
@@ -109,6 +121,8 @@ final class LocationController: NSObject {
     static let precisionKey = "locationPrecision"
     static let promptShownKey = "locationPromptShown"
     static let alwaysAskedKey = "locationAlwaysAsked"
+    /// The distance filter of the foreground updates, in meters.
+    static let foregroundDistanceFilter: CLLocationDistance = 50
 
     init(manager: any LocationManaging, sharing: LocationSharing, defaults: UserDefaults = .standard,
          background: BackgroundTasks = .none) {
@@ -122,6 +136,9 @@ final class LocationController: NSObject {
         precision = defaults.string(forKey: Self.precisionKey).flatMap(LocationPrecision.init(rawValue:)) ?? .precise
         super.init()
         manager.delegate = self
+        // `requestLocation` and the foreground updates use this. Significant changes and visits do not.
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.distanceFilter = Self.foregroundDistanceFilter
         // After a relaunch in the background, monitoring must start again to get the event that woke the app.
         updateMonitoring()
         Task { await refreshStatus() }
@@ -182,15 +199,31 @@ final class LocationController: NSObject {
         defaults.set(true, forKey: Self.promptShownKey)
     }
 
-    /// The app connected to Hermes. The first time, ask the owner about location. Then send the waiting fix.
+    /// The app connected to Hermes. The first time, ask the owner about location. Then request a new fix and
+    /// send the waiting fix.
     func didConnect() {
         if !defaults.bool(forKey: Self.promptShownKey), access == .notDetermined, !isEnabled {
             wantsPrompt = true
         }
+        requestFreshFix()
         flush()
     }
 
-    /// Send the waiting fix, if the rate limit allows it. The app calls it when it opens and on connect.
+    /// The app is active: start the full-accuracy updates, request a new fix, and send the waiting fix.
+    func appDidBecomeActive() {
+        isForeground = true
+        updateMonitoring()
+        requestFreshFix()
+        flush()
+    }
+
+    /// The app is in the background: only significant changes and visits run.
+    func appDidEnterBackground() {
+        isForeground = false
+        updateMonitoring()
+    }
+
+    /// Send the waiting fix, if the rate limit allows it. `LocationSharing` drops a fix older than 30 min.
     func flush() {
         run { sharing, precision in _ = await sharing.flush(precision: precision) }
     }
@@ -232,6 +265,8 @@ final class LocationController: NSObject {
 
     func received(_ fixes: [LocationFix]) {
         guard let latest = fixes.max(by: { $0.timestamp < $1.timestamp }) else { return }
+        let fresh = freshFixPending
+        freshFixPending = false
         if oneShotPending {
             oneShotPending = false
             run { [weak self] sharing, precision in
@@ -239,12 +274,13 @@ final class LocationController: NSObject {
                 self?.manualSend = result == .sent ? .sent : .notDelivered
             }
         } else if isEnabled {
-            run { sharing, precision in _ = await sharing.submit(latest, precision: precision) }
+            run { sharing, precision in _ = await sharing.submit(latest, precision: precision, force: fresh) }
         }
     }
 
     /// Core Location could not get a fix. Only a "Send Location Now" tap shows it.
     func locationFailed() {
+        freshFixPending = false
         guard oneShotPending else { return }
         oneShotPending = false
         manualSend = .notDelivered
@@ -262,6 +298,18 @@ final class LocationController: NSObject {
             manager.stopMonitoringSignificantLocationChanges()
             manager.stopMonitoringVisits()
         }
+        if monitors, isForeground {
+            manager.startUpdatingLocation()
+        } else {
+            manager.stopUpdatingLocation()
+        }
+    }
+
+    /// Ask Core Location for one new full-accuracy fix (issue #51). Only when automatic sharing is on.
+    private func requestFreshFix() {
+        guard monitors else { return }
+        freshFixPending = true
+        manager.requestLocation()
     }
 
     /// iOS shows the "Always" question once. Ask after the owner gave "While Using".
@@ -390,4 +438,8 @@ final class PreviewLocationManager: LocationManaging {
     func startMonitoringVisits() {}
     func stopMonitoringVisits() {}
     func requestLocation() {}
+    var desiredAccuracy: CLLocationAccuracy = kCLLocationAccuracyBest
+    var distanceFilter: CLLocationDistance = kCLDistanceFilterNone
+    func startUpdatingLocation() {}
+    func stopUpdatingLocation() {}
 }

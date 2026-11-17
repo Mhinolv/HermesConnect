@@ -67,8 +67,13 @@ public enum LocationSendResult: Sendable, Equatable {
 /// - Only the latest unsent fix is kept. A new fix replaces an older pending fix.
 /// - At most one upload per 2 minutes, unless the owner moved more than 500 m (`LocationRateLimit`).
 /// - If the upload fails, the fix stays pending. `flush` sends it on the next connect or app start.
+/// - A fix older than `maxFixAge` is never sent, also when forced. It is dropped (issue #51).
 /// - One upload runs at a time. A fix that comes during an upload waits as the pending fix.
 public actor LocationSharing {
+    /// Owner decision on issue #51: never send a saved fix older than 30 min. The app requests a new fix on open
+    /// and on connect instead.
+    public static let maxFixAge: TimeInterval = 30 * 60
+
     private let store: any LocationStateStore
     private let uploader: any LocationUploading
     private let rateLimit: LocationRateLimit
@@ -124,6 +129,12 @@ public actor LocationSharing {
         defer { uploading = false }
         var result = LocationSendResult.nothing
         while let fix = state.pending {
+            if now().timeIntervalSince(fix.timestamp) > Self.maxFixAge {
+                state.pending = nil
+                forceNext = false
+                save()
+                break
+            }
             let forced = forceNext
             guard forced || rateLimit.allows(fix, lastSent: state.lastSent, lastSentAt: state.lastSentAt, now: now()) else {
                 return result == .sent ? .sent : .deferred
