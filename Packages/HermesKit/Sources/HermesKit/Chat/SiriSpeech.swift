@@ -336,7 +336,8 @@ public enum SiriAsk {
     }
 
     /// 1. Wait for the link until the deadline. No link: "I can't reach Hermes right now." Nothing is sent.
-    /// 2. The session: the cached active session, else `session.most_recent`, else a new chat.
+    /// 2. The session: the cached active session (issue #78: never a cron run), else `session.most_recent`,
+    ///    else the newest cached chat, else a new chat.
     /// 3. Send, then wait for the reply until the deadline. If Siri cancels the run first, nothing is sent.
     ///    If Siri cancels the reply wait, the run ends at once with "still working".
     /// 4. A list refresh. A reply that Siri reads in full marks the session read. A cut reply stays unread.
@@ -352,12 +353,12 @@ public enum SiriAsk {
         _ = await SiriTiming.finishes(within: timeout) { ready = await linkReady(SiriTiming.remaining(until: deadline)) }
         guard ready, !trimmed.isEmpty else { return .unreachable }
         let chat: ChatViewModel
-        if let id = sessions.cachedActiveSessionId {
+        if let id = sessions.cachedActiveChatId {
             chat = sessions.chat(for: id)
         } else {
             var mostRecent: String?
             _ = await SiriTiming.finishes(within: SiriTiming.remaining(until: deadline)) {
-                mostRecent = await sessions.mostRecentSessionId()
+                mostRecent = await sessions.mostRecentChatId()
             }
             chat = mostRecent.map(sessions.chat(for:)) ?? sessions.newChat(key: UUID().uuidString)
         }

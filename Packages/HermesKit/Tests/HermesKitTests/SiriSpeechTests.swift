@@ -402,6 +402,24 @@ private func ev(_ json: String) -> GatewayClientEvent {
         #expect(chats.submits.isEmpty)
     }
 
+    /// Issue #78: an older build saved a cron run as the active session. Siri asks in the newest chat.
+    @Test func aCachedCronRunIsSkippedForTheNewestChat() async throws {
+        let chats = FakeChatTransport()
+        let rows = [SessionListItem(id: "cron_a1_1", source: "cron"), SessionListItem(id: "k2", title: "Plans")]
+        let sessions = SessionListModel(transport: FakeSessionsTransport(rows: rows), chatTransport: chats,
+                                        cache: InMemorySessionCacheStore(sessions: rows, activeSessionId: "cron_a1_1"))
+        Task { @MainActor in
+            await waitForSubmit(chats)
+            chats.input.yield(ev(
+                #"{"type":"message.complete","session_id":"s2","payload":{"text":"Done.","status":"complete"}}"#))
+        }
+        let outcome = await SiriAsk.run(text: "Hi", sessions: sessions, timeout: .seconds(5),
+                                        poll: .milliseconds(5)) { _ in true }
+        #expect(outcome == .reply(SiriSpokenText(text: "Done.", isComplete: true), sessionId: "k2"))
+        #expect(chats.resumes == ["k2"])
+        #expect(sessions.chat(for: "cron_a1_1").messages.isEmpty)
+    }
+
     @Test func noSessionStartsANewChat() async throws {
         let chats = FakeChatTransport()
         let sessions = SessionListModel(transport: FakeSessionsTransport(), chatTransport: chats,
