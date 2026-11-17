@@ -18,11 +18,12 @@ public struct SSHEndpoint: Sendable, Equatable {
 }
 
 /// A command that the server gate accepts (`server/README.md`). The gate refuses all other commands.
-/// Issue #13 adds `location`.
 public enum GateCommand: String, Sendable, CaseIterable {
     case ping
     /// Start or reuse `hermes serve` on the server loopback. stdin: the session token. stdout: `PORT <n>` (issue #4).
     case serve
+    /// Store one location fix. stdin: one JSON object (`LocationPayload`). stdout: `OK` (issue #13).
+    case location
 }
 
 /// One open SSH connection. It has no PTY, no agent forwarding and no remote forwards.
@@ -202,6 +203,8 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
     private var _connectFailure: SSHConnectionError?
     private var _serveFailure: SSHConnectionError?
     private var _forwardFailure: SSHConnectionError?
+    private var _locationFailure: SSHConnectionError?
+    private var _locationReply = "OK\n"
     private var _serverAlive = false
     private var liveToken: Data?
     private var livePort = 0
@@ -241,6 +244,18 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
     public var forwardFailure: SSHConnectionError? {
         get { lock.withLock { _forwardFailure } }
         set { lock.withLock { _forwardFailure = newValue } }
+    }
+
+    /// The error that the gate `location` gives (for example `.gateError("bad-location")`), or nil.
+    public var locationFailure: SSHConnectionError? {
+        get { lock.withLock { _locationFailure } }
+        set { lock.withLock { _locationFailure = newValue } }
+    }
+
+    /// The stdout of the gate `location` when it does not fail.
+    public var locationReply: String {
+        get { lock.withLock { _locationReply } }
+        set { lock.withLock { _locationReply = newValue } }
     }
 
     /// `false` simulates a server that exited. The next `serve` spawns a new one.
@@ -285,6 +300,9 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
                     _serverAlive = true
                 }
                 return "PORT \(livePort)\n"
+            case .location:
+                if let failure = _locationFailure { throw failure }
+                return _locationReply
             }
         }
     }

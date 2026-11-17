@@ -46,6 +46,7 @@ struct SettingsView: View {
                 } footer: {
                     if let reason = connectionReason { Text(reason) }
                 }
+                LocationSettingsSection()
                 Section {
                     Toggle(Authenticator.appLockToggleTitle, isOn: Binding(
                         get: { model.lock.isEnabled },
@@ -131,6 +132,6 @@ struct SettingsView: View {
 
 struct SettingsView_Previews: PreviewProvider {
     static var previews: some View {
-        SettingsView().environment(AppModel.preview(setUp: true))
+        SettingsView().environment(AppModel.preview(setUp: true)).environment(LocationController.preview())
     }
 }

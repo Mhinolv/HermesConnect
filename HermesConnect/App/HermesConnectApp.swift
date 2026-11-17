@@ -4,11 +4,14 @@ import HermesKit
 @main
 struct HermesConnectApp: App {
     @State private var model = AppModel.live()
+    /// Made at launch, also for a relaunch in the background by a location event (issue #13).
+    @State private var location = LocationController.live()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(model)
+                .environment(location)
                 .appLock(model)
         }
     }
@@ -49,6 +52,7 @@ struct RootView: View {
         .sheet(isPresented: $showSetup) { SetupFlowView() }
         .sheet(isPresented: $showSettings) { SettingsView() }
         .hostTrustPresenter(enabled: !showSetup && !showSettings)
+        .locationAccessPrompt(enabled: !showSetup && !showSettings && model.pendingTrust == nil)
         .task(id: model.isSetUp) {
             if model.isSetUp { await model.connect() }
         }
@@ -61,7 +65,7 @@ struct RootView: View {
 
 struct RootView_Previews: PreviewProvider {
     static var previews: some View {
-        RootView().environment(AppModel.preview(setUp: false))
-        RootView().environment(AppModel.preview(setUp: true))
+        RootView().environment(AppModel.preview(setUp: false)).environment(LocationController.preview())
+        RootView().environment(AppModel.preview(setUp: true)).environment(LocationController.preview())
     }
 }
