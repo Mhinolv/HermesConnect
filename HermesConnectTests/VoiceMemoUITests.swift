@@ -267,7 +267,9 @@ private final class VoiceHarness {
         let font = UIFont.preferredFont(forTextStyle: .footnote, compatibleWith: traits)
         let collapsed = ChatVoiceLayout.transcriptHeight(text, width: 240, expanded: false)
         let expanded = ChatVoiceLayout.transcriptHeight(text, width: 240, expanded: true)
-        #expect(collapsed <= (font.lineHeight * 3 + 6).rounded(.up) + 1)
+        // Issue #49: a label measures the 3 lines, so they need a little more than 3 * lineHeight. Not 4 lines.
+        #expect(collapsed > font.lineHeight * 3)
+        #expect(collapsed < font.lineHeight * 4 + 6)
         #expect(expanded > collapsed)
         #expect(ChatVoiceLayout.isTruncated(text, width: 240))
 

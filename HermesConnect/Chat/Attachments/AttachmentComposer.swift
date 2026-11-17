@@ -37,13 +37,13 @@ final class AttachmentComposer: NSObject {
         config.cornerStyle = .capsule
         config.contentInsets = .zero
         plusButton.configuration = config
-        plusButton.setSize(CGSize(width: 36, height: 36), animated: false)
+        // Issue #49: 44 pt, the height of the one-line field and the mic, so all three share one center line.
+        plusButton.setSize(CGSize(width: ChatComposerLayout.control, height: ChatComposerLayout.control),
+                           animated: false)
         plusButton.accessibilityLabel = "Attach"
         plusButton.showsMenuAsPrimaryAction = true
         plusButton.menu = makeMenu()
-        bar.setLeftStackViewWidthConstant(to: 36, animated: false)
-        bar.setStackViewItems([plusButton], forStack: .left, animated: false)
-        bar.middleContentViewPadding.left = 8
+        setPlusShown(true)
         strip.onRemove = { [weak self] id in self?.remove(id: id) }
         bar.topStackView.addArrangedSubview(strip)
         bar.inputPlugins.append(self)
@@ -54,6 +54,15 @@ final class AttachmentComposer: NSObject {
         #if DEBUG
         if AttachmentDemo.isActive { add(AttachmentDemo.pendingItems()) }
         #endif
+    }
+
+    /// Issue #49: the `plus` button hides while a memo records, and the recording bar takes its space.
+    func setPlusShown(_ shown: Bool) {
+        guard let bar else { return }
+        plusButton.isHidden = !shown
+        bar.setStackViewItems(shown ? [plusButton] : [], forStack: .left, animated: false)
+        bar.setLeftStackViewWidthConstant(to: shown ? ChatComposerLayout.control : 0, animated: false)
+        bar.middleContentViewPadding.left = shown ? 8 : 0
     }
 
     /// Send: the pending items go with the message, and the strip clears.

@@ -132,7 +132,8 @@ final class ChatViewController: MessagesViewController {
         let header = LabelAlignment(textAlignment: .center, textInsets: .zero)
         layout.setMessageIncomingCellTopLabelAlignment(header)
         layout.setMessageOutgoingCellTopLabelAlignment(header)
-        layout.sectionInset = UIEdgeInsets(top: 1, left: 0, bottom: 1, right: 0)
+        // Issue #49: the space between bubbles comes from `insetForSectionAt` (2 pt in a group, 10 pt between groups).
+        layout.sectionInset = .zero
         let voiceCalculator = ChatVoiceSizeCalculator(layout: layout, copying: layout.attributedTextMessageSizeCalculator)
         voiceCalculator.bubbleSize = { [weak self] _, maxWidth in
             ChatVoiceLayout.bubbleSize(traits: self?.traitCollection ?? .current, maxWidth: maxWidth)
@@ -166,8 +167,6 @@ final class ChatViewController: MessagesViewController {
         textView.backgroundColor = .clear
         textView.layer.cornerRadius = 18
         textView.layer.borderWidth = 1
-        textView.textContainerInset = UIEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
-        textView.placeholderLabelInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
         textView.accessibilityLabel = "Message"
         updateComposerBorder()
 
@@ -204,7 +203,7 @@ final class ChatViewController: MessagesViewController {
     private func configureVoice() {
         let symbol = UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
         micButton.setImage(UIImage(systemName: "mic.fill", withConfiguration: symbol), for: .normal)
-        micButton.setSize(CGSize(width: 44, height: 44), animated: false)
+        micButton.setSize(CGSize(width: ChatComposerLayout.control, height: ChatComposerLayout.control), animated: false)
         micButton.tintColor = .white
         micButton.backgroundColor = .systemBlue
         micButton.layer.cornerRadius = 22
@@ -266,6 +265,7 @@ final class ChatViewController: MessagesViewController {
         let capture = voice.capture
         guard capture.isActive else {
             if bar.middleContentView === recordingBar {
+                attachments.setPlusShown(true)
                 bar.setMiddleContentView(bar.inputTextView, animated: false)
                 updateSendButton()
                 UIAccessibility.post(notification: .layoutChanged, argument: micButton)
@@ -277,6 +277,8 @@ final class ChatViewController: MessagesViewController {
             bar.inputTextView.resignFirstResponder()
             bar.setStackViewItems([], forStack: .right, animated: false)
             bar.setRightStackViewWidthConstant(to: 0, animated: false)
+            // Issue #49: like iMessage, the `+` button hides while a memo records.
+            attachments.setPlusShown(false)
             bar.setMiddleContentView(recordingBar, animated: false)
             UIAccessibility.post(notification: .layoutChanged, argument: recordingBar.sendButton)
         }
@@ -394,14 +396,29 @@ final class ChatViewController: MessagesViewController {
         if let voice = row.message.voice {
             text = ChatVoiceLayout.transcriptText(for: voice, traits: traitCollection)
         } else if (message as? ChatBubble)?.part.content == .spokenReply, let spoken = row.message.spokenReply {
-            text = ChatVoiceLayout.replyCaption(for: spoken, traits: traitCollection)
+            text = ChatVoiceLayout.replyCaption(for: spoken, text: row.message.text, traits: traitCollection)
         } else {
             return nil
         }
         let maxWidth = calculator.messageContainerMaxWidth(for: message, at: indexPath)
         let width = ChatVoiceLayout.bubbleSize(traits: traitCollection, maxWidth: maxWidth).width
-        let height = ChatVoiceLayout.transcriptHeight(text, width: width, expanded: expandedTranscripts.contains(row.id))
+        let lines = row.message.voice == nil ? ChatVoiceLayout.replyLines : ChatVoiceLayout.collapsedLines
+        let height = ChatVoiceLayout.transcriptHeight(text, width: width, expanded: expandedTranscripts.contains(row.id),
+                                                      lines: lines)
         return (text, height, width)
+    }
+
+    /// Issue #49: the full reply text of a voice bubble, with Markdown, in a sheet. The text selects and copies.
+    func showReplyText(id: String) {
+        guard presentedViewController == nil, let message = model.messages.first(where: { $0.id == id }),
+              !message.text.isEmpty else { return }
+        let sheet = ReplyTextViewController(text: ChatBubbleText.make(message, traits: traitCollection))
+        let navigation = UINavigationController(rootViewController: sheet)
+        if let presentation = navigation.sheetPresentationController {
+            presentation.detents = [.medium(), .large()]
+            presentation.prefersGrabberVisible = true
+        }
+        present(navigation, animated: !UIAccessibility.isReduceMotionEnabled)
     }
 
     /// The draft of this session (issue #7) goes back into the composer.
@@ -490,8 +507,19 @@ final class ChatViewController: MessagesViewController {
     }
 
     private func updateMaxTextViewHeight() {
-        let textView = messageInputBar.inputTextView
+        let bar = messageInputBar
+        let textView = bar.inputTextView
         let lineHeight = (textView.font ?? .preferredFont(forTextStyle: .body)).lineHeight
+        // Issue #49: one line of text sits on the center line of the 44 pt `+` and mic. With large text the
+        // field is taller, so the `+` and the mic move up to its center. More lines grow up, the buttons stay.
+        let inset = ChatComposerLayout.textInset(lineHeight: lineHeight)
+        textView.textContainerInset = UIEdgeInsets(top: inset, left: 12, bottom: inset, right: 12)
+        textView.placeholderLabelInsets = UIEdgeInsets(top: inset, left: 16, bottom: inset, right: 16)
+        let lift = ChatComposerLayout.controlLift(lineHeight: lineHeight)
+        for stack in [bar.leftStackView, bar.rightStackView] {
+            stack.isLayoutMarginsRelativeArrangement = true
+            stack.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: lift, trailing: 0)
+        }
         messageInputBar.maxTextViewHeight = (lineHeight * 6 + textView.textContainerInset.top
             + textView.textContainerInset.bottom).rounded(.up)
     }
@@ -707,6 +735,18 @@ final class ChatViewController: MessagesViewController {
 
     // MARK: Rows
 
+    /// Issue #49: about 2 pt between the bubbles of one sender, about 10 pt when the sender changes or a time
+    /// header shows (iMessage). The typing indicator starts a new group.
+    @objc func collectionView(_: UICollectionView, layout _: UICollectionViewLayout,
+                              insetForSectionAt section: Int) -> UIEdgeInsets {
+        guard bubbles.indices.contains(section) else {
+            return UIEdgeInsets(top: ChatBubbleParts.Spacing.betweenGroups, left: 0, bottom: 0, right: 0)
+        }
+        let previous = section > 0 ? bubbles[section - 1].part : nil
+        return UIEdgeInsets(top: ChatBubbleParts.spaceAbove(bubbles[section].part, after: previous), left: 0,
+                            bottom: 0, right: 0)
+    }
+
     private func bubble(at indexPath: IndexPath) -> ChatBubble? {
         bubbles.indices.contains(indexPath.section) ? bubbles[indexPath.section] : nil
     }
@@ -731,14 +771,25 @@ final class ChatViewController: MessagesViewController {
         var actions: [UIAccessibilityCustomAction] = []
         if part.content == .spokenReply {
             let id = row.id
-            cell.accessibilityCustomActions = row.message.spokenReply?.audio.map { audio in
-                [UIAccessibilityCustomAction(name: player.isPlaying(audio.fileURL) ? "Pause" : "Play") { [weak self] _ in
-                    self?.togglePlay(id: id)
-                    return true
-                }]
-            } ?? []
             cell.accessibilityHint = row.message.spokenReply == .failed ? "Double-tap to retry." : nil
-            return cell
+            guard let audio = row.message.spokenReply?.audio else {
+                cell.accessibilityCustomActions = []
+                return cell
+            }
+            actions.append(UIAccessibilityCustomAction(name: player.isPlaying(audio.fileURL) ? "Pause" : "Play") {
+                [weak self] _ in
+                self?.togglePlay(id: id)
+                return true
+            })
+            // Issue #49: the voice bubble is the whole reply. Its text opens in full, copies, and takes a tapback.
+            guard row.showsReactions, !row.message.text.isEmpty else {
+                cell.accessibilityCustomActions = actions
+                return cell
+            }
+            actions.append(UIAccessibilityCustomAction(name: "Show Full Text") { [weak self] _ in
+                self?.showReplyText(id: id)
+                return true
+            })
         }
         if let memo = row.message.voice {
             let id = row.id
@@ -997,6 +1048,25 @@ final class ChatViewController: MessagesViewController {
     }
 }
 
+// MARK: - Composer
+
+/// Issue #49: the `+` button, a one-line field and the mic share one center line, like iMessage.
+enum ChatComposerLayout {
+    /// The size of the `+` button and the mic, and the height of a one-line field.
+    static let control: CGFloat = 44
+
+    /// The top and bottom text inset that puts one line in the middle of a 44 pt field. 8 pt at the least.
+    static func textInset(lineHeight: CGFloat) -> CGFloat {
+        max(8, (control - lineHeight) / 2)
+    }
+
+    /// The space under the `+` button and the mic, so that they stay on the center line of a taller
+    /// one-line field (large text sizes). 0 at the default sizes.
+    static func controlLift(lineHeight: CGFloat) -> CGFloat {
+        max(0, (lineHeight + 2 * textInset(lineHeight: lineHeight) - control) / 2)
+    }
+}
+
 // MARK: - Scroll math
 
 /// Where "the bottom" of the thread is. Plain math, so tests cover every inset and text size.
@@ -1080,6 +1150,7 @@ extension ChatViewController: MessagesDataSource {
                 guard let self, !self.voice.isActive, let url else { return }
                 self.player.seek(url, to: time)
             }
+            cell.onTranscriptTap = { [weak self] in self?.showReplyText(id: id) }
             return cell
         }
         guard let memo = row.message.voice else { return cell }

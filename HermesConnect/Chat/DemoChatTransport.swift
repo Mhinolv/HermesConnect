@@ -48,6 +48,8 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case voiceReplies = "voice-replies"
         /// Issue #10: the same thread with the first voice reply paused part way.
         case voiceRepliesPaused = "voice-replies-paused"
+        /// Issue #49: the same thread with the full text of the first voice reply open in a sheet.
+        case voiceReplyText = "voice-reply-text"
         /// Issue #11: each agent ack, owner tapbacks, and one bubble with both.
         case tapbacks
         /// Issue #11: the same thread with the tapback capsule open on a reply.
@@ -71,7 +73,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             case .streaming: "What's the weather in Austin this weekend?"
             case .failed: "Can you check the server logs?"
             case .live, .thread, .empty, .list, .listEmpty, .listLoading, .voice, .recording, .hold, .paused,
-                 .attachments, .voiceReplies, .voiceRepliesPaused, .tapbacks, .tapbacksPicker, .catchUp, .catchUpPill,
+                 .attachments, .voiceReplies, .voiceRepliesPaused, .voiceReplyText, .tapbacks, .tapbacksPicker, .catchUp, .catchUpPill,
                  .notificationSettings, .notificationsOff: nil
             }
         }
@@ -88,7 +90,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         var recordsAtLaunch: Bool { self == .recording || self == .hold || self == .paused }
 
         /// `true` for the voice reply scenarios (issue #10).
-        var showsVoiceReplies: Bool { self == .voiceReplies || self == .voiceRepliesPaused }
+        var showsVoiceReplies: Bool { self == .voiceReplies || self == .voiceRepliesPaused || self == .voiceReplyText }
 
         /// `true` for the tapback scenarios (issue #11).
         var showsTapbacks: Bool { self == .tapbacks || self == .tapbacksPicker }
@@ -173,7 +175,10 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         append(UInt32(rate)); append(UInt32(rate * 2)); append(UInt16(2)); append(UInt16(16))
         data.append(contentsOf: Array("data".utf8)); append(UInt32(count * 2))
         for index in 0..<count {
-            let sample = sin(Double(index) * 2 * .pi * 220 / Double(rate)) * 1200
+            // Issue #49: the loudness rises and falls like speech, so the reply waveform has shape.
+            let time = Double(index) / Double(rate)
+            let envelope = 0.15 + 0.85 * abs(sin(time * 2.3) * sin(time * 0.9 + 0.6))
+            let sample = sin(Double(index) * 2 * .pi * 220 / Double(rate)) * 4000 * envelope
             append(Int16(sample))
         }
         return data
@@ -181,9 +186,9 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
 
     /// The saved demo reply file of the voice reply scenarios.
     static func demoReplyAudio(seconds: Double) -> VoiceReplyAudio {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("demo-reply-\(Int(seconds)).wav")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("demo-reply-v49-\(Int(seconds)).wav")
         if !FileManager.default.fileExists(atPath: url.path) { try? toneWAV(seconds: seconds).write(to: url) }
-        return VoiceReplyAudio(fileURL: url, duration: seconds)
+        return VoiceReplyAudio(fileURL: url, duration: seconds, waveform: VoiceWaveform.bars(contentsOf: url) ?? [])
     }
 
     static let memoTranscript = "Remind me to call Sam at three about the lease, and ask whether the movers can come "
@@ -416,11 +421,13 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         let ask3 = "Remind me to pack the charger."
         return [
             ChatMessage(id: "r1", role: .user, text: ask1, date: late, delivery: .delivered, userRowId: 111,
-                        voice: memo("r1", 3, ask1)),
+                        voice: memo("r1", 3, ask1), agentAck: .done),
             ChatMessage(id: "r2", role: .assistant,
-                        text: "You have two meetings tomorrow: the design review at 10 and the call with Sam at 2:30.",
+                        text: "You have two meetings tomorrow: the **design review** at 10 and the call with Sam "
+                            + "at 2:30. The review room changed to *Juniper*, and Sam asked to move the call if the "
+                            + "review runs long.",
                         date: late.addingTimeInterval(6), reply: .complete, promptId: "r1",
-                        spokenReply: .ready(demoReplyAudio(seconds: 24))),
+                        spokenReply: .ready(demoReplyAudio(seconds: 24)), tapback: .heart),
             ChatMessage(id: "r3", role: .user, text: ask2, date: late.addingTimeInterval(40), delivery: .delivered,
                         userRowId: 113, voice: memo("r3", 2, ask2)),
             ChatMessage(id: "r4", role: .assistant, text: "Done. The call with Sam is now at 3:00 PM.",

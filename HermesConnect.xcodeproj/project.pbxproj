@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		005CA6251E125BF95E1E03B3 /* SessionListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83E296700CE9EBB2D816E590 /* SessionListTests.swift */; };
+		0106964C809B96A3721F8C1A /* ChatLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 374BF43FD2955A3BD85FD6CE /* ChatLayoutTests.swift */; };
 		01B54B7A5360786DFF684DFE /* AskHermesIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EA999FDF121C5949048BC7C /* AskHermesIntent.swift */; };
 		04DC34168B66E6DCE7820198 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D3CB166FF51053854FFDA4B /* SettingsView.swift */; };
 		0AA71132C6D0F9DF6AD60D27 /* SessionListScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0EA96A6753C403E6A93EDFD /* SessionListScreen.swift */; };
@@ -44,6 +45,7 @@
 		B08C29548D93122F0AA73C01 /* ReactionBadges.swift in Sources */ = {isa = PBXBuildFile; fileRef = 395F8B4FF8768E18F5789060 /* ReactionBadges.swift */; };
 		B433DA87A9B0ABD221346C7A /* LocalNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 446EDEE4C7998A61822DEA32 /* LocalNotifications.swift */; };
 		B72A042E912127198DCDA854 /* ProtectedStorageAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */; };
+		B8046371D0B18C3B3CBD738B /* ReplyTextViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D003F7A6181C707046BE5DD7 /* ReplyTextViewController.swift */; };
 		B97FEBCCFBBC2C3312E79743 /* AppLockCover.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D5500FE30849A059FC03DF0 /* AppLockCover.swift */; };
 		C3C3F39DCFB1663A359F94F1 /* BackgroundRefresh.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B47554FAB736FCFE8A2DAA6 /* BackgroundRefresh.swift */; };
 		CFB55369F229DCF8B92BA398 /* ChatBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12550753F6EF1111C87EA8A8 /* ChatBubble.swift */; };
@@ -76,6 +78,7 @@
 		27E6BC84392DF022945BB39D /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
 		2A8691638CC5B4480E12DCC9 /* VoiceMemoUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceMemoUITests.swift; sourceTree = "<group>"; };
 		2D3CB166FF51053854FFDA4B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		374BF43FD2955A3BD85FD6CE /* ChatLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatLayoutTests.swift; sourceTree = "<group>"; };
 		37EF80F3762ADA518CD0BE72 /* VoiceRecordingBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecordingBar.swift; sourceTree = "<group>"; };
 		395F8B4FF8768E18F5789060 /* ReactionBadges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionBadges.swift; sourceTree = "<group>"; };
 		3B47554FAB736FCFE8A2DAA6 /* BackgroundRefresh.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundRefresh.swift; sourceTree = "<group>"; };
@@ -109,6 +112,7 @@
 		C80A034BAA06291CE4BB4106 /* HermesConnectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesConnectTests.swift; sourceTree = "<group>"; };
 		C8A48996F2DE819FC34FF0CA /* CatchUpAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatchUpAppTests.swift; sourceTree = "<group>"; };
 		CEE713B92846B56241CD9612 /* DeviceKeyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceKeyView.swift; sourceTree = "<group>"; };
+		D003F7A6181C707046BE5DD7 /* ReplyTextViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplyTextViewController.swift; sourceTree = "<group>"; };
 		DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtectedStorageAppTests.swift; sourceTree = "<group>"; };
 		E77AC33AF86D6AFE86FDB669 /* AttachmentStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentStripView.swift; sourceTree = "<group>"; };
 		F0EA96A6753C403E6A93EDFD /* SessionListScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListScreen.swift; sourceTree = "<group>"; };
@@ -203,6 +207,7 @@
 				C41CED143465554FB51CC1FB /* AskHermesAppTests.swift */,
 				BDDF85200B57F3AFCAB1552A /* AttachmentUITests.swift */,
 				C8A48996F2DE819FC34FF0CA /* CatchUpAppTests.swift */,
+				374BF43FD2955A3BD85FD6CE /* ChatLayoutTests.swift */,
 				C80A034BAA06291CE4BB4106 /* HermesConnectTests.swift */,
 				40916C67E6E9CDFF43F23AB8 /* LocationControllerTests.swift */,
 				DC5CF42453CBE58E4B81EE7C /* ProtectedStorageAppTests.swift */,
@@ -277,6 +282,7 @@
 				7FB38BCE9C434337D022CF42 /* ChatVoiceCell.swift */,
 				F3C4E1EC060A41E57D2B774C /* DemoChatTransport.swift */,
 				395F8B4FF8768E18F5789060 /* ReactionBadges.swift */,
+				D003F7A6181C707046BE5DD7 /* ReplyTextViewController.swift */,
 				F0EA96A6753C403E6A93EDFD /* SessionListScreen.swift */,
 				27E6BC84392DF022945BB39D /* VoiceRecorder.swift */,
 				37EF80F3762ADA518CD0BE72 /* VoiceRecordingBar.swift */,
@@ -432,6 +438,7 @@
 				0C197036101D133537EA865D /* LocationController.swift in Sources */,
 				DC807288C7246595D35CD72E /* LocationSettingsSection.swift in Sources */,
 				B08C29548D93122F0AA73C01 /* ReactionBadges.swift in Sources */,
+				B8046371D0B18C3B3CBD738B /* ReplyTextViewController.swift in Sources */,
 				0AA71132C6D0F9DF6AD60D27 /* SessionListScreen.swift in Sources */,
 				04DC34168B66E6DCE7820198 /* SettingsView.swift in Sources */,
 				5C009257C4A6066ED63FC699 /* SetupFlowView.swift in Sources */,
@@ -447,6 +454,7 @@
 				6A7098936BAA4D4EF4A49086 /* AskHermesAppTests.swift in Sources */,
 				43E9BA6A1999EA550F1BE33C /* AttachmentUITests.swift in Sources */,
 				15447B7300590146E9C01520 /* CatchUpAppTests.swift in Sources */,
+				0106964C809B96A3721F8C1A /* ChatLayoutTests.swift in Sources */,
 				E230335998617506596F1F26 /* HermesConnectTests.swift in Sources */,
 				74C7DA0960EA120C51C2AF65 /* LocationControllerTests.swift in Sources */,
 				B72A042E912127198DCDA854 /* ProtectedStorageAppTests.swift in Sources */,

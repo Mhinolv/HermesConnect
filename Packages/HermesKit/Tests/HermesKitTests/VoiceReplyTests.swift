@@ -359,6 +359,10 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
 
         try await waitUntil { vm.messages.last?.spokenReply?.audio != nil }
         #expect(vm.messages.last?.spokenReply == .ready(VoiceReplyAudio(fileURL: replyURL, duration: 24)))
+        // Issue #49: with ready audio the reply is one voice bubble with the row id, so the row reloads in place.
+        let ready = ChatBubbleParts.parts(for: ChatTimeline.rows(for: vm.messages))
+        #expect(ready.last?.content == .spokenReply)
+        #expect(ready.last?.id == id)
         #expect(transport.spoken == ["Done. The call is at 3."])
         #expect(vm.autoPlayReplyId == id)
     }
@@ -487,10 +491,11 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         let reply = ChatMessage(id: "r", role: .assistant, text: "Hi", date: Date(), reply: .complete,
                                 spokenReply: .ready(VoiceReplyAudio(fileURL: replyURL, duration: 24)))
         let parts = ChatBubbleParts.parts(for: ChatTimeline.rows(for: [reply]))
-        #expect(parts.map(\.id) == ["r", "r#speech"])
-        #expect(parts[0].row.hasTail == false)
-        #expect(parts[1].row.hasTail)
-        #expect(ChatBubbleParts.accessibilityLabel(for: parts[1]) == "Hermes voice reply, 0:24")
+        // Issue #49: one voice bubble. VoiceOver reads the length, then the text.
+        #expect(parts.map(\.id) == ["r"])
+        #expect(parts[0].content == .spokenReply)
+        #expect(parts[0].row.hasTail)
+        #expect(ChatBubbleParts.accessibilityLabel(for: parts[0]) == "Hermes voice reply, 0:24, Hi")
         #expect(ChatBubbleParts.spokenReplyLabel(.preparing) == "Hermes voice reply, Preparing audio")
     }
 
