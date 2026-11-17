@@ -16,6 +16,17 @@ public protocol SessionCacheStore: Sendable {
     /// The stored id of the session that the owner opened last.
     func loadActiveSessionId() -> String?
     func saveActiveSessionId(_ id: String?)
+    /// Issue #64: drops the transcript, the draft and the active id of a deleted session.
+    /// The list row goes with the next `saveSessions`. The file format does not change.
+    func removeSession(sessionId: String)
+}
+
+extension SessionCacheStore {
+    public func removeSession(sessionId: String) {
+        saveTranscript([], sessionId: sessionId)
+        saveDraft("", sessionId: sessionId)
+        if loadActiveSessionId() == sessionId { saveActiveSessionId(nil) }
+    }
 }
 
 public enum SessionCache {
@@ -383,6 +394,18 @@ public final class FileSessionCacheStore: SessionCacheStore, @unchecked Sendable
         }
     }
 
+    public func removeSession(sessionId: String) {
+        lock.withLock {
+            try? FileManager.default.removeItem(at: transcriptURL(sessionId: sessionId))
+            var state = state()
+            let active = state.activeSessionId == sessionId ? nil : state.activeSessionId
+            guard state.drafts[sessionId] != nil || active != state.activeSessionId else { return }
+            state.drafts[sessionId] = nil
+            state.activeSessionId = active
+            write(state, to: stateURL)
+        }
+    }
+
     // MARK: Files
 
     private func state() -> CacheState {
@@ -453,4 +476,15 @@ public final class InMemorySessionCacheStore: SessionCacheStore, @unchecked Send
 
     public func loadActiveSessionId() -> String? { lock.withLock { activeId } }
     public func saveActiveSessionId(_ id: String?) { lock.withLock { activeId = id } }
+
+    public func removeSession(sessionId: String) {
+        lock.withLock {
+            transcripts[sessionId] = nil
+            drafts[sessionId] = nil
+            if activeId == sessionId { activeId = nil }
+        }
+    }
+
+    /// The ids that have a transcript (tests).
+    public var transcriptIds: Set<String> { lock.withLock { Set(transcripts.keys) } }
 }

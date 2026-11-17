@@ -107,3 +107,67 @@ import UIKit
         #expect(list.newChat(key: "a").storedSessionId == nil)
     }
 }
+
+/// Issue #64: the texts and states of rename, archive and delete.
+@MainActor
+@Suite struct SessionActionsUITests {
+    @Test func archivedRowShowsOnlyWithArchivedChatsAndNoSearch() {
+        #expect(!SessionRowText.showsArchivedRow(count: 0, query: ""))
+        #expect(SessionRowText.showsArchivedRow(count: 2, query: ""))
+        #expect(SessionRowText.showsArchivedRow(count: 2, query: "  "))
+        #expect(!SessionRowText.showsArchivedRow(count: 2, query: "trip"))
+        #expect(SessionRowText.archivedLabel(1) == "Archived, 1 chat")
+        #expect(SessionRowText.archivedLabel(3) == "Archived, 3 chats")
+    }
+
+    @Test func noChatsGivesWayToTheArchivedRow() {
+        #expect(SessionRowText.overlay(hasLoaded: true, total: 0, matches: 0, query: "", archived: 0) == .noChats)
+        #expect(SessionRowText.overlay(hasLoaded: true, total: 0, matches: 0, query: "", archived: 4) == nil)
+        #expect(SessionRowText.overlay(hasLoaded: true, total: 0, matches: 0, query: "zebra", archived: 4) == .noChats)
+    }
+
+    @Test func saveIsOffForAnEmptyOrUnchangedTitle() {
+        #expect(!SessionActionText.canSave("", current: "Trip"))
+        #expect(!SessionActionText.canSave("   \n", current: "Trip"))
+        #expect(!SessionActionText.canSave(" Trip ", current: "Trip"))
+        #expect(SessionActionText.canSave("Trip to Denver", current: "Trip"))
+        #expect(SessionActionText.canSave("Trip", current: ""))
+    }
+
+    @Test func renameStartsWithTheCurrentTitleAllSelected() {
+        let state = SessionActionState()
+        state.startRename(SessionActionTarget(SessionListItem(id: "k1", title: " Trip ")))
+        #expect(state.renameTarget == SessionActionTarget(id: "k1", title: "Trip"))
+        #expect(state.renameText == "Trip")
+        #expect(state.renameSelection != nil)
+        #expect(!state.canSave)
+        state.renameText = "Trip to Denver"
+        #expect(state.canSave)
+    }
+
+    @Test func dialogTextsMatchTheDesignNotes() {
+        #expect(SessionActionText.renameTitle == "Rename Chat")
+        #expect(SessionActionText.deleteTitle == "Delete This Chat?")
+        #expect(SessionActionText.deleteMessage
+            == "This deletes the chat on all your devices and apps, including Hermes on your Mac. You can't undo this.")
+        #expect(SessionActionText.deleteButton == "Delete Chat")
+        #expect(SessionActionText.failureTitle(.rename) == "Couldn't Rename Chat")
+        #expect(SessionActionText.failureTitle(.archive) == "Couldn't Archive Chat")
+        #expect(SessionActionText.failureTitle(.delete) == "Couldn't Delete Chat")
+    }
+
+    /// The offline transport has no session actions: the error alert shows and the row stays.
+    @Test func aFailedActionShowsTheAlertAndKeepsTheRow() async throws {
+        let rows = [SessionListItem(id: "k1", title: "Trip")]
+        let model = SessionListModel(transport: OfflineChatTransport(), chatTransport: OfflineChatTransport(),
+                                     cache: InMemorySessionCacheStore(sessions: rows))
+        let state = SessionActionState()
+        state.deleteTarget = SessionActionTarget(rows[0])
+        state.confirmDelete(model)
+        #expect(state.deleteTarget == nil)
+        for _ in 0..<200 where state.failure == nil { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(state.failure?.title == "Couldn't Delete Chat")
+        #expect(state.failure?.message == "Hermes is not connected. Try again when the connection is back.")
+        #expect(model.sessions == rows)
+    }
+}

@@ -139,24 +139,11 @@ struct RootView: View {
             }
             .navigationTitle("Hermes")
             .navigationDestination(for: ChatRoute.self) { route in
-                let chat = switch route {
-                case .session(let id): sessions.chat(for: id)
-                case .new(let key): sessions.newChat(key: key)
-                }
-                ChatScreen(model: chat, link: link) {
-                    // A dead id (QA #27 defect 1): drop it and show the list, never an empty chat.
-                    if let id = chat.storedSessionId { sessions.forget(id) }
-                    path.removeAll()
-                }
-                // Issue #15: the open session loses its blue dot and gets no new one.
-                // The list follows the chat, so a New Chat counts once it gets its id (QA #38 defect 2).
-                .onAppear { sessions.openChat(chat) }
-                .onDisappear { sessions.closeChat(chat) }
-                // Issue #67: `/new` pushes a new chat.
-                .onChange(of: chat.newChatRequest) { _, request in
-                    guard let request else { return }
-                    chat.clearNewChatRequest(request)
-                    path.append(.new(UUID().uuidString))
+                switch route {
+                case .session(let id): chatScreen(sessions.chat(for: id))
+                case .new(let key): chatScreen(sessions.newChat(key: key))
+                // Issue #64: the Archived list.
+                case .archived: ArchivedSessionsScreen(model: sessions)
                 }
             }
             .hermesStartAlert()
@@ -213,6 +200,25 @@ struct RootView: View {
 }
 
 extension RootView {
+    /// The screen of a stored session or a new chat.
+    private func chatScreen(_ chat: ChatViewModel) -> some View {
+        ChatScreen(model: chat, link: link, sessions: sessions) {
+            // A dead id (QA #27 defect 1): drop it and show the list, never an empty chat.
+            if let id = chat.storedSessionId { sessions.forget(id) }
+            path.removeAll()
+        }
+        // Issue #15: the open session loses its blue dot and gets no new one.
+        // The list follows the chat, so a New Chat counts once it gets its id (QA #38 defect 2).
+        .onAppear { sessions.openChat(chat) }
+        .onDisappear { sessions.closeChat(chat) }
+        // Issue #67: `/new` pushes a new chat.
+        .onChange(of: chat.newChatRequest) { _, request in
+            guard let request else { return }
+            chat.clearNewChatRequest(request)
+            path.append(.new(UUID().uuidString))
+        }
+    }
+
     /// Issue #16: run the "Ask Hermes" request that waits. App Lock covers the app until Face ID, so the
     /// text never goes before an unlock. No setup: show the setup screen and drop the text.
     private func askHermes() {

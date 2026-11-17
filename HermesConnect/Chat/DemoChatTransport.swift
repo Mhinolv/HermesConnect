@@ -88,6 +88,12 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case voiceSettingsDamaged = "voice-settings-damaged"
         /// Issue #67: a `/usage` output card and an unknown command error card.
         case slashCommands = "slash-commands"
+        /// Issue #64: the session list with the rename alert open on "Trip to Denver".
+        case listRename = "list-rename"
+        /// Issue #64: the session list with the delete dialog open on "Trip to Denver".
+        case listDelete = "list-delete"
+        /// Issue #64: the Archived list.
+        case archived
 
         static var current: Scenario? {
             ProcessInfo.processInfo.environment["HERMES_DEMO"].flatMap(Scenario.init(rawValue:))
@@ -102,12 +108,17 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                  .attachments, .voiceReplies, .voiceRepliesPaused, .voiceReplyText, .tapbacks, .tapbacksPicker, .receivedFiles, .receivedFilesPreview, .markdownTable, .markdownTableTop, .markdownSheet, .markdownBlocks,
                  .markdownBlocksTop, .catchUp, .catchUpPill,
                  .notificationSettings, .notificationsOff, .voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading,
-                 .voiceSettingsReady, .voiceSettingsDamaged, .slashCommands: nil
+                 .voiceSettingsReady, .voiceSettingsDamaged, .slashCommands, .listRename, .listDelete, .archived: nil
             }
         }
 
         /// The list scenarios show the session list. The others push the demo chat at launch.
-        var showsList: Bool { self == .list || self == .listEmpty || self == .listLoading }
+        var showsList: Bool {
+            [.list, .listEmpty, .listLoading, .listRename, .listDelete, .archived].contains(self)
+        }
+
+        /// The list scenarios with the fixture rows.
+        var hasListRows: Bool { [.list, .listRename, .listDelete, .archived].contains(self) }
 
         /// The text in the search field of the list (`HERMES_DEMO_SEARCH`).
         static var search: String? {
@@ -269,6 +280,24 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         }
         try await Task.sleep(for: .milliseconds(300))
         return scenario == .listEmpty ? [] : Self.sessionRows()
+    }
+
+    /// Issue #64: the archived fixture rows.
+    static func archivedRows(now: Date = Date()) -> [SessionListItem] {
+        let calendar = Calendar.current
+        let month = calendar.date(byAdding: .day, value: -31, to: now) ?? now
+        let spring = calendar.date(byAdding: .day, value: -190, to: now) ?? now
+        return [
+            SessionListItem(id: "20261016_100000_arch01", title: "Moving checklist",
+                            preview: "The movers confirmed Saturday at 9 AM. Boxes arrive Thursday.",
+                            startedAt: month, messageCount: 22, source: ChatSource.iOS),
+            SessionListItem(id: "20260510_080000_arch02", title: "Tax documents",
+                            preview: "All 1099 forms are in the shared folder.",
+                            startedAt: spring, messageCount: 9, source: "desktop"),
+            SessionListItem(id: "20260502_190000_arch03", title: "Book club",
+                            preview: "Next meeting is at Ana's place on the 14th.",
+                            startedAt: spring, messageCount: 5, source: "photon"),
+        ]
     }
 
     func fetchMostRecentSessionId() async throws -> String? {
@@ -582,6 +611,42 @@ extension DemoChatTransport: ReceivedFileDownloading {
     func downloadReceivedFile(path: String, storedSessionId _: String?, maxBytes: Int?,
                               progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
         try await ReceivedFileDemo.download(path: path, maxBytes: maxBytes, progress: progress)
+    }
+}
+
+/// Issue #64: each action succeeds after a short wait. Nothing is saved.
+extension DemoChatTransport: SessionActionsTransport {
+    func renameSession(storedId _: String, title _: String) async throws {
+        try await Task.sleep(for: .milliseconds(300))
+    }
+
+    func setSessionArchived(storedId _: String, archived _: Bool) async throws {
+        try await Task.sleep(for: .milliseconds(300))
+    }
+
+    func closeSession(liveId _: String) async throws {}
+
+    func deleteSession(storedId _: String) async throws {
+        try await Task.sleep(for: .milliseconds(300))
+    }
+
+    func fetchArchivedSessions(limit: Int) async throws -> ArchivedSessions {
+        let rows = scenario.hasListRows ? Self.archivedRows() : []
+        return ArchivedSessions(sessions: Array(rows.prefix(limit)), total: rows.count)
+    }
+}
+
+/// Issue #64: the list scenarios that open a dialog at launch, for the screenshots.
+@MainActor
+enum SessionActionDemo {
+    static func present(on actions: SessionActionState, model: SessionListModel) {
+        guard let scenario = DemoChatTransport.Scenario.current,
+              let item = model.session(id: "20261112_090000_trip01") else { return }
+        switch scenario {
+        case .listRename: actions.startRename(SessionActionTarget(item))
+        case .listDelete: actions.deleteTarget = SessionActionTarget(item)
+        default: break
+        }
     }
 }
 #endif

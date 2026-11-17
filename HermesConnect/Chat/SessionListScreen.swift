@@ -5,6 +5,8 @@ import SwiftUI
 enum ChatRoute: Hashable {
     case session(String)
     case new(String)
+    /// Issue #64: the Archived list.
+    case archived
 
     /// Issue #16: the chat that "Ask Hermes" opens.
     init(_ route: AskHermesRoute) {
@@ -22,6 +24,8 @@ struct SessionListScreen: View {
     var onSettings: () -> Void = {}
     var onNewChat: () -> Void = {}
     @State private var query: String
+    /// Issue #64: rename, archive and delete.
+    @State private var actions = SessionActionState()
 
     init(model: SessionListModel, link: LiveChatTransport? = nil, query: String = "",
          onSettings: @escaping () -> Void = {}, onNewChat: @escaping () -> Void = {}) {
@@ -40,6 +44,26 @@ struct SessionListScreen: View {
                     NavigationLink(value: ChatRoute.session(item.id)) {
                         SessionRow(item: item)
                     }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button("Archive", systemImage: "archivebox") { actions.archive(item.id, model) }
+                            .tint(.indigo)
+                        // No destructive role: that role removes the row before the dialog answers.
+                        Button("Delete", systemImage: "trash") { actions.deleteTarget = SessionActionTarget(item) }
+                            .tint(.red)
+                    }
+                    .contextMenu {
+                        Button("Rename", systemImage: "pencil") { actions.startRename(SessionActionTarget(item)) }
+                        Button("Archive", systemImage: "archivebox") { actions.archive(item.id, model) }
+                        Divider()
+                        Button("Delete", systemImage: "trash", role: .destructive) {
+                            actions.deleteTarget = SessionActionTarget(item)
+                        }
+                    }
+                }
+                if SessionRowText.showsArchivedRow(count: model.archivedCount, query: query) {
+                    NavigationLink(value: ChatRoute.archived) {
+                        ArchivedRow(count: model.archivedCount)
+                    }
                 }
             } else {
                 ForEach(0..<5, id: \.self) { index in
@@ -50,9 +74,10 @@ struct SessionListScreen: View {
             }
         }
         .listStyle(.plain)
+        .animation(.default, value: rows.map(\.id))
         .overlay {
             switch SessionRowText.overlay(hasLoaded: model.hasLoaded, total: model.sessions.count,
-                                          matches: rows.count, query: query) {
+                                          matches: rows.count, query: query, archived: model.archivedCount) {
             case .noChats:
                 ContentUnavailableView {
                     Label("No Chats", systemImage: "bubble.left.and.bubble.right")
@@ -79,7 +104,28 @@ struct SessionListScreen: View {
                 Button("New Chat", systemImage: "square.and.pencil", action: onNewChat)
             }
         }
+        .sessionActionDialogs(actions, model: model)
         .task { await model.refresh() }
+        #if DEBUG
+        .onAppear { SessionActionDemo.present(on: actions, model: model) }
+        #endif
+    }
+}
+
+/// Issue #64: the last row of the list. It opens the Archived list.
+struct ArchivedRow: View {
+    let count: Int
+
+    var body: some View {
+        HStack {
+            Label(SessionActionText.archivedTitle, systemImage: "archivebox")
+            Spacer()
+            Text(count, format: .number)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(SessionRowText.archivedLabel(count))
     }
 }
 
@@ -140,11 +186,25 @@ enum SessionRowText {
         case noResults
     }
 
-    static func overlay(hasLoaded: Bool, total: Int, matches: Int, query: String) -> Overlay? {
+    /// `archived`: issue #64. With no chats but archived chats, the list shows the "Archived" row, not "No Chats".
+    static func overlay(hasLoaded: Bool, total: Int, matches: Int, query: String, archived: Int = 0) -> Overlay? {
         guard hasLoaded else { return nil }
-        if total == 0 { return .noChats }
-        if matches == 0, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .noResults }
+        if total == 0 { return archived > 0 && isEmptyQuery(query) ? nil : .noChats }
+        if matches == 0, !isEmptyQuery(query) { return .noResults }
         return nil
+    }
+
+    private static func isEmptyQuery(_ query: String) -> Bool {
+        query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Issue #64: the "Archived" row shows when there are archived chats, and not in search results.
+    static func showsArchivedRow(count: Int, query: String) -> Bool {
+        count > 0 && isEmptyQuery(query)
+    }
+
+    static func archivedLabel(_ count: Int) -> String {
+        count == 1 ? "Archived, 1 chat" : "Archived, \(count) chats"
     }
 
     /// Like Messages: the time today, "Yesterday", the weekday in the last week, else the date.

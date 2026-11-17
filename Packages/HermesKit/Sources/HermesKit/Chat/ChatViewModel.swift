@@ -239,6 +239,21 @@ public final class ChatViewModel {
         }
     }
 
+    /// Issue #64: the live id of the session, if this chat opened one. A delete closes it first.
+    public var liveSessionId: String? { session?.liveId }
+
+    /// Issue #64: the server closed the live session. The next send or open resumes the stored id.
+    func liveSessionClosed() {
+        session = nil
+        sessionIsStale = false
+        if storedSessionId != nil { needsOpen = true }
+    }
+
+    /// Issue #64: a rename from the list or the title menu, or the old title after a failed rename.
+    func applyTitle(_ newTitle: String?) {
+        if title != newTitle { title = newTitle }
+    }
+
     /// The screen showed the new messages (the owner tapped the pill or scrolled to them).
     public func clearNewMessages() {
         if !newMessageIds.isEmpty { newMessageIds = [] }
