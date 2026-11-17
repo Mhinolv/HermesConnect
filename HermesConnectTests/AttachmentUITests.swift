@@ -117,11 +117,14 @@ import UniformTypeIdentifiers
         let model = ChatViewModel(transport: OfflineChatTransport())
         let vc = controller(model)
         let send = vc.messageInputBar.sendButton
-        #expect(!send.isEnabled)
+        // Issue #9: an empty composer shows the mic. Pending items bring Send back.
+        #expect(vc.showsMic)
         let composer = try #require(vc.attachmentComposer)
         let photo = try AttachmentImport.photo(from: try gpsPhoto())
         let doc = try AttachmentImport.file(at: try pdf(pages: 2))
         composer.add([photo, doc])
+        #expect(!vc.showsMic)
+        #expect(vc.messageInputBar.rightStackViewItems.first as? UIView === send)
         #expect(send.isEnabled)
         #expect(!composer.strip.isHidden)
         #expect(send.accessibilityLabel == "Send")
@@ -132,7 +135,7 @@ import UniformTypeIdentifiers
         #expect(model.messages[0].text == "")
         #expect(!composer.hasPending)
         #expect(composer.strip.isHidden)
-        #expect(!send.isEnabled)
+        #expect(vc.showsMic)
         // One photo bubble and one file cell, no text bubble.
         for _ in 0..<100 where vc.messagesCollectionView.numberOfSections != 2 {
             try await Task.sleep(for: .milliseconds(10))
@@ -147,7 +150,7 @@ import UniformTypeIdentifiers
         composer.add([doc])
         composer.remove(id: doc.id)
         #expect(!composer.hasPending)
-        #expect(!vc.messageInputBar.sendButton.isEnabled)
+        #expect(vc.showsMic)
         #expect(!FileManager.default.fileExists(atPath: doc.fileURL.path))
     }
 
