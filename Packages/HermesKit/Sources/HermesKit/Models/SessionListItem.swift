@@ -45,6 +45,14 @@ public struct SessionListItem: Identifiable, Sendable, Equatable, Codable {
         return SourceBadge(symbol: "bubble.left", text: name)
     }
 
+    /// Issue #73: a cron run. The Jobs tab shows it, the chats list does not.
+    public var isCronRun: Bool { source == "cron" }
+
+    /// Issue #73: the rows of the chats list. Cron runs go to the Jobs tab.
+    public static func chats(_ rows: [SessionListItem]) -> [SessionListItem] {
+        rows.filter { !$0.isCronRun }
+    }
+
     /// `true` when `query` is in the title or the preview. An empty query matches every row.
     public func matches(_ query: String) -> Bool {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)

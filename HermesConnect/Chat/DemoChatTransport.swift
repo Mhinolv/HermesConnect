@@ -314,7 +314,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
             SessionListItem(id: storedId, title: "Calendar and logs",
                             preview: "Run this on the server: journalctl --user -u hermes-gateway -f",
                             startedAt: now.addingTimeInterval(-6 * 60), messageCount: 6, source: ChatSource.iOS),
-            SessionListItem(id: "cron_digest_1763280000", title: "Morning digest",
+            SessionListItem(id: "cron_a1_20261117_080000", title: "Morning Zillow new rental watch",
                             preview: "3 new issues, 2 merged PRs and a calendar change for Thursday.",
                             startedAt: now.addingTimeInterval(-3 * 3600), messageCount: 2, source: "cron",
                             isUnread: true),

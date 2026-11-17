@@ -244,7 +244,7 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
 @Suite(.timeLimit(.minutes(1))) struct SessionListModelTests {
     private let rows = [
         SessionListItem(id: "k3", title: "Newest", preview: "Latest reply", startedAt: base.addingTimeInterval(30), source: "ios"),
-        SessionListItem(id: "k2", title: "", preview: "Daily digest", startedAt: base.addingTimeInterval(20), source: "cron"),
+        SessionListItem(id: "k2", title: "", preview: "Daily digest", startedAt: base.addingTimeInterval(20), source: "telegram"),
         SessionListItem(id: "k1", title: "Trip plan", preview: "Book the hotel", startedAt: base, source: "photon"),
     ]
 

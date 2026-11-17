@@ -74,10 +74,13 @@ final class ChatViewController: MessagesViewController {
     private var filePreview: ReceivedFilePreview?
     /// Issue #12: `true` while bubbles are built. A state change in that time is part of the same render.
     private var buildingBubbles = false
+    /// Issue #73: the cron run screen. No composer and no tapbacks. "Copy" stays.
+    let readOnly: Bool
 
     init(model: ChatViewModel, recorder: any VoiceRecording = AVVoiceRecorder(),
-         voiceFolder: URL = VoiceMemoFiles.directory()) {
+         voiceFolder: URL = VoiceMemoFiles.directory(), readOnly: Bool = false) {
         self.model = model
+        self.readOnly = readOnly
         self.voice = VoiceMemoController(recorder: recorder, folder: voiceFolder)
         super.init(nibName: nil, bundle: nil)
     }
@@ -102,13 +105,24 @@ final class ChatViewController: MessagesViewController {
         // Issue #60: 10 pt between the last bubble and the composer, keyboard up or down (iMessage).
         additionalBottomInset = ChatComposerLayout.threadGap
         configureLayout()
-        configureComposer()
-        configureAttachments()
-        configureVoice()
-        restoreDraft()
+        if readOnly {
+            // Issue #73: an empty input bar of no height, so the thread goes to the bottom of the screen.
+            // MessageKit swaps the bar on the next main queue turn. Take the composer out now, so it never shows.
+            let empty = UIView(frame: .zero)
+            empty.heightAnchor.constraint(equalToConstant: 0).isActive = true
+            inputBarType = .custom(empty)
+            messageInputBar.removeFromSuperview()
+        } else {
+            configureComposer()
+            configureAttachments()
+            configureVoice()
+            restoreDraft()
+        }
         configureScrollButton()
-        configureTapbacks()
-        configureKeyboardDismiss()
+        if !readOnly {
+            configureTapbacks()
+            configureKeyboardDismiss()
+        }
         configureNewMessagesButton()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, _) in
             self.textSizeChanged()
@@ -128,7 +142,7 @@ final class ChatViewController: MessagesViewController {
         super.viewDidAppear(animated)
         // Empty session: no placeholder, the composer has focus. Not while the history loads (issue #7)
         // or while a memo records (issue #9).
-        if bubbles.isEmpty, !model.isLoadingHistory, !voice.isActive {
+        if !readOnly, bubbles.isEmpty, !model.isLoadingHistory, !voice.isActive {
             messageInputBar.inputTextView.becomeFirstResponder()
         }
         if let first = onFirstAppear {
@@ -1000,7 +1014,7 @@ final class ChatViewController: MessagesViewController {
         return UIContextMenuConfiguration(identifier: indexPath as NSIndexPath, previewProvider: nil) { [weak self] _ in
             var actions: [UIMenuElement] = []
             // Issue #11: the six tapbacks in one row above the other actions.
-            if Self.canReact(row.message), let self { actions.append(self.tapbackMenu(for: row)) }
+            if let self, !self.readOnly, Self.canReact(row.message) { actions.append(self.tapbackMenu(for: row)) }
             if let file = part.receivedFile, let self {
                 // Issue #12: "Save to Files", "Share", and "Copy" for images. A file that is not here downloads first.
                 let source = collectionView.cellForItem(at: indexPath) ?? self.view!
@@ -1098,7 +1112,7 @@ final class ChatViewController: MessagesViewController {
 
     /// VoiceOver: "React Heart" … "React Question", plus "Remove Reaction".
     private func tapbackActions(for row: ChatRow) -> [UIAccessibilityCustomAction] {
-        guard Self.canReact(row.message) else { return [] }
+        guard !readOnly, Self.canReact(row.message) else { return [] }
         let id = row.id
         var actions = Tapback.allCases.map { tapback in
             UIAccessibilityCustomAction(name: "React \(tapback.title)") { [weak self] _ in
@@ -1125,7 +1139,7 @@ final class ChatViewController: MessagesViewController {
 
     /// Shows the glass capsule above the bubble at `indexPath` (double-tap, and the DEBUG demo).
     func showTapbackPicker(at indexPath: IndexPath) {
-        guard let row = bubble(at: indexPath)?.row, Self.canReact(row.message),
+        guard !readOnly, let row = bubble(at: indexPath)?.row, Self.canReact(row.message),
               let cell = messagesCollectionView.cellForItem(at: indexPath) as? MessageContentCell else { return }
         closeTapbackPicker()
         // The model is newer than the drawn rows when a redraw waits.

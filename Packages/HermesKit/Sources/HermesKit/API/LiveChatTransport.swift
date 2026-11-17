@@ -246,4 +246,31 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
     public func fetchMostRecentSessionId() async throws -> String? {
         try await readyClient().fetchMostRecentSessionId()
     }
+
+    // MARK: CronTransport (issue #73)
+
+    public func fetchCronJobs() async throws -> [CronJob] {
+        try await cronREST { try await $0.cronJobs() }
+    }
+
+    public func fetchCronRuns(jobId: String, limit: Int) async throws -> [CronRun] {
+        try await cronREST { try await $0.cronRuns(jobId: jobId, limit: limit) }
+    }
+
+    public func fetchRunTranscript(sessionId: String) async throws -> [TranscriptMessage] {
+        try await cronREST {
+            try await $0.messages(storedSessionId: sessionId, limit: CronAPI.transcriptLimit, order: "oldest").messages
+        }
+    }
+
+    /// REST on the forwarded port, as `transcribe`. A refused token asks for a new session once.
+    private func cronREST<Output>(_ body: (HermesRESTClient) async throws -> Output) async throws -> Output {
+        guard let endpoint else { throw GatewayError.notConnected }
+        do {
+            return try await body(makeREST(endpoint))
+        } catch {
+            if Self.isStaleToken(error), endpoint == self.endpoint, status == .ready { staleToken() }
+            throw error
+        }
+    }
 }

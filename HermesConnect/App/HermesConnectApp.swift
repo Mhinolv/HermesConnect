@@ -6,6 +6,8 @@ import UserNotifications
 struct HermesConnectApp: App {
     @State private var model: AppModel
     @State private var sessions: SessionListModel
+    /// Issue #73: the job list of the Jobs tab.
+    @State private var jobs: JobsModel
     /// Made at launch, also for a relaunch in the background by a location event (issue #13).
     @State private var location: LocationController
     /// Issue #15: permission, badge and the tap route of local notifications.
@@ -20,6 +22,7 @@ struct HermesConnectApp: App {
         #if DEBUG
         if ChatLaunch.isDemo {
             sessions = ChatLaunch.makeDemoSessions()
+            jobs = JobsDemo.makeJobs() ?? ChatLaunch.makeOfflineJobs()
             link = nil
             // The DEBUG demo conversation: no server, no App Lock, so screenshots show the chat.
             let demo = AppModel.preview(setUp: true, hostKey: .sample)
@@ -40,6 +43,7 @@ struct HermesConnectApp: App {
         self.link = link
         let sessions = ChatLaunch.makeSessions(link: link)
         self.sessions = sessions
+        jobs = ChatLaunch.makeJobs(link: link)
         let notifications = NotificationController()
         self.notifications = notifications
         UNUserNotificationCenter.current().delegate = notifications
@@ -85,13 +89,13 @@ struct HermesConnectApp: App {
     @ViewBuilder private var scene: some View {
         Group {
             if usesAppLock {
-                RootView(sessions: sessions, link: link)
+                RootView(sessions: sessions, jobs: jobs, link: link)
                     .environment(model)
                     .environment(location)
                     .environment(notifications)
                     .appLock(model)
             } else {
-                RootView(sessions: sessions, link: link)
+                RootView(sessions: sessions, jobs: jobs, link: link)
                     .environment(model)
                     .environment(location)
                     .environment(notifications)
@@ -108,18 +112,93 @@ struct RootView: View {
     @State private var backgroundedAt: Date?
     /// The session list and the chats of this window (issue #7). The app owns it, so it lives across view updates.
     var sessions = ChatLaunch.makeOfflineSessions()
+    /// Issue #73: the job list of the Jobs tab.
+    var jobs = ChatLaunch.makeOfflineJobs()
     /// The chat link. It follows the #4 endpoint ("Hermes ready").
     var link: LiveChatTransport?
     @State private var showSetup = false
     @State private var showSettings = false
     /// The list is the root. A chat is pushed on top of it.
     @State private var path: [ChatRoute] = []
+    /// Issue #73: Chats or Jobs. Launch, notifications and "Ask Hermes" select Chats.
+    @State private var tab = JobsDemo.initialTab
+    @State private var jobsPath = JobsDemo.initialPath
     /// `true` after the launch push, or after the owner moved in the stack. Then launch pushes nothing more.
     @State private var launchDone = false
     /// Issue #16: the "Ask Hermes" shortcut puts its request here.
     var ask = AskHermesInbox.shared
 
     var body: some View {
+        TabView(selection: $tab) {
+            Tab("Chats", systemImage: "bubble.left.and.bubble.right", value: RootTab.chats) { chats }
+                .badge(sessions.chatsUnreadCount)
+            Tab("Jobs", systemImage: "clock.arrow.circlepath", value: RootTab.jobs) {
+                JobsTab(model: jobs, sessions: sessions, link: link, path: $jobsPath,
+                        onSettings: { showSettings = true })
+            }
+            .badge(sessions.unreadCronRuns.count)
+        }
+        .sheet(isPresented: $showSetup) { SetupFlowView() }
+        .sheet(isPresented: $showSettings) { SettingsView() }
+        .hostTrustPresenter(enabled: !showSetup && !showSettings)
+        .locationAccessPrompt(enabled: !showSetup && !showSettings && model.pendingTrust == nil)
+        .onChange(of: model.hermesEndpoint, initial: true) { _, endpoint in
+            link?.setEndpoint(endpoint)
+        }
+        .onAppear {
+            sessions.startEvents()
+            // Launch pushes the last session at once, from the cache. No cache: wait for `session.most_recent`.
+            guard model.isSetUp, !launchDone, path.isEmpty else { return }
+            if let route = ChatLaunch.cachedLaunchRoute(sessions) {
+                path = [route]
+                launchDone = true
+            }
+        }
+        .onChange(of: path) { launchDone = true }
+        // Issue #73: launch does not take the owner back from the Jobs tab.
+        .onChange(of: tab) { launchDone = true }
+        .onChange(of: model.connection, initial: true) { _, connection in
+            guard case .connected = connection, model.isSetUp, !launchDone, path.isEmpty else { return }
+            Task {
+                let id = await sessions.mostRecentSessionId()
+                guard !launchDone, path.isEmpty else { return }
+                launchDone = true
+                if let id { path = [.session(id)] }
+            }
+        }
+        .task(id: model.isSetUp) {
+            if model.isSetUp, !ChatLaunch.isDemo { await model.connect() }
+        }
+        .onChange(of: scenePhase) { _, phase in foregroundChange(phase) }
+        // Issue #15: a tap on a notification opens that session. App Lock stays on top until unlock.
+        .onChange(of: notifications?.pendingSessionId) { _, id in
+            guard let id, model.isSetUp else { return }
+            notifications?.pendingSessionId = nil
+            launchDone = true
+            // Issue #73: a cron run opens read-only in the Jobs tab, never as a chat.
+            if let runPath = JobsRouting.path(forSession: id, sessions: sessions, jobs: jobs) {
+                tab = .jobs
+                jobsPath = runPath
+                return
+            }
+            tab = .chats
+            path = [.session(id)]
+        }
+        // Issue #16: "Ask Hermes" waits for setup and App Lock, then sends the text at once.
+        .onChange(of: ask.pending, initial: true) { askHermes() }
+        .onChange(of: model.lock) { askHermes() }
+        .onChange(of: scenePhase) { askHermes() }
+        .onChange(of: sessions.unreadCount, initial: true) { _, count in
+            if !ChatLaunch.isDemo { notifications?.setBadge(count) }
+        }
+        .onChange(of: showSettings) { _, shown in
+            // A new server or a forgotten host key leaves the status idle. Connect when Settings closes.
+            if !shown, model.isSetUp, model.connection == .idle { Task { await model.connect() } }
+        }
+    }
+
+    /// The chats list with the pushed chats (issue #7). Issue #73: the Chats tab.
+    private var chats: some View {
         NavigationStack(path: $path) {
             Group {
                 if model.isSetUp {
@@ -147,54 +226,8 @@ struct RootView: View {
                 }
             }
             .hermesStartAlert()
-        }
-        .sheet(isPresented: $showSetup) { SetupFlowView() }
-        .sheet(isPresented: $showSettings) { SettingsView() }
-        .hostTrustPresenter(enabled: !showSetup && !showSettings)
-        .locationAccessPrompt(enabled: !showSetup && !showSettings && model.pendingTrust == nil)
-        .onChange(of: model.hermesEndpoint, initial: true) { _, endpoint in
-            link?.setEndpoint(endpoint)
-        }
-        .onAppear {
-            sessions.startEvents()
-            // Launch pushes the last session at once, from the cache. No cache: wait for `session.most_recent`.
-            guard model.isSetUp, !launchDone, path.isEmpty else { return }
-            if let route = ChatLaunch.cachedLaunchRoute(sessions) {
-                path = [route]
-                launchDone = true
-            }
-        }
-        .onChange(of: path) { launchDone = true }
-        .onChange(of: model.connection, initial: true) { _, connection in
-            guard case .connected = connection, model.isSetUp, !launchDone, path.isEmpty else { return }
-            Task {
-                let id = await sessions.mostRecentSessionId()
-                guard !launchDone, path.isEmpty else { return }
-                launchDone = true
-                if let id { path = [.session(id)] }
-            }
-        }
-        .task(id: model.isSetUp) {
-            if model.isSetUp, !ChatLaunch.isDemo { await model.connect() }
-        }
-        .onChange(of: scenePhase) { _, phase in foregroundChange(phase) }
-        // Issue #15: a tap on a notification opens that session. App Lock stays on top until unlock.
-        .onChange(of: notifications?.pendingSessionId) { _, id in
-            guard let id, model.isSetUp else { return }
-            notifications?.pendingSessionId = nil
-            launchDone = true
-            path = [.session(id)]
-        }
-        // Issue #16: "Ask Hermes" waits for setup and App Lock, then sends the text at once.
-        .onChange(of: ask.pending, initial: true) { askHermes() }
-        .onChange(of: model.lock) { askHermes() }
-        .onChange(of: scenePhase) { askHermes() }
-        .onChange(of: sessions.unreadCount, initial: true) { _, count in
-            if !ChatLaunch.isDemo { notifications?.setBadge(count) }
-        }
-        .onChange(of: showSettings) { _, shown in
-            // A new server or a forgotten host key leaves the status idle. Connect when Settings closes.
-            if !shown, model.isSetUp, model.connection == .idle { Task { await model.connect() } }
+            // Issue #73: no tab bar before setup.
+            .toolbarVisibility(model.isSetUp ? .automatic : .hidden, for: .tabBar)
         }
     }
 }
@@ -211,6 +244,8 @@ extension RootView {
         // The list follows the chat, so a New Chat counts once it gets its id (QA #38 defect 2).
         .onAppear { sessions.openChat(chat) }
         .onDisappear { sessions.closeChat(chat) }
+        // Issue #73: a pushed chat has no tab bar.
+        .toolbarVisibility(.hidden, for: .tabBar)
         // Issue #67: `/new` pushes a new chat.
         .onChange(of: chat.newChatRequest) { _, request in
             guard let request else { return }
@@ -239,6 +274,7 @@ extension RootView {
                                     linkReady: { await AskHermes.waitUntilReady { link?.status } },
                                     show: { route in
                                         launchDone = true
+                                        tab = .chats
                                         path = [ChatRoute(route)]
                                     })
             }

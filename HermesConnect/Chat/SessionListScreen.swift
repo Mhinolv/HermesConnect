@@ -76,7 +76,7 @@ struct SessionListScreen: View {
         .listStyle(.plain)
         .animation(.default, value: rows.map(\.id))
         .overlay {
-            switch SessionRowText.overlay(hasLoaded: model.hasLoaded, total: model.sessions.count,
+            switch SessionRowText.overlay(hasLoaded: model.hasLoaded, total: model.chatRows.count,
                                           matches: rows.count, query: query, archived: model.archivedCount) {
             case .noChats:
                 ContentUnavailableView {

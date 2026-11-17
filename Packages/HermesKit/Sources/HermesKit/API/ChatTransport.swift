@@ -115,8 +115,10 @@ extension GatewayClient: SessionsTransport {
         try await listSessions().map(SessionListItem.init(row:))
     }
 
+    /// Issue #73: a cron run is not a chat, so launch does not open it.
     public func fetchMostRecentSessionId() async throws -> String? {
-        let id = try await mostRecentSession().sessionId
-        return id?.isEmpty == false ? id : nil
+        let result = try await mostRecentSession()
+        guard let id = result.sessionId, !id.isEmpty, result.source != "cron" else { return nil }
+        return id
     }
 }
