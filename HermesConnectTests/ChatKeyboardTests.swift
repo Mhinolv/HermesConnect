@@ -1,0 +1,171 @@
+import Foundation
+import HermesKit
+import InputBarAccessoryView
+import MessageKit
+import Testing
+import UIKit
+@testable import HermesConnect
+
+/// Issue #60: the composer sits on the keyboard with only its padding, and the last bubble has 10 pt to the composer.
+/// The tests post the keyboard notifications. The real keyboard does not show in a test run.
+@MainActor
+@Suite(.serialized) struct ChatKeyboardTests {
+    private let date = Date(timeIntervalSince1970: 1_763_290_000)
+    private let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ChatKeyboardTests")
+    private let keyboardHeight: CGFloat = 336
+
+    /// A thread that is taller than the screen. The last message is from Hermes, with no footnote under it.
+    private func messages(_ count: Int = 30) -> [ChatMessage] {
+        (0..<count).map { index in
+            let role: ChatMessage.Role = index % 2 == 0 ? .user : .assistant
+            return ChatMessage(id: "m\(index)", role: role, text: "Message \(index)",
+                               date: date.addingTimeInterval(Double(index)), delivery: role == .user ? .delivered : nil,
+                               reply: role == .user ? nil : .complete, userRowId: index)
+        }
+    }
+
+    /// The controller in a window of the test app scene, so that the window has the home indicator inset.
+    private func show(_ messages: [ChatMessage]) throws -> (ChatViewController, UIWindow) {
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let model = ChatViewModel(transport: OfflineChatTransport(), messages: messages)
+        let controller = ChatViewController(model: model, recorder: FakeVoiceRecorder(), voiceFolder: folder)
+        controller.autoPlayEnabled = { false }
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        window.layoutIfNeeded()
+        return (controller, window)
+    }
+
+    private func settle(_ window: UIWindow) async throws {
+        // MessageKit sets the thread inset and the pinned scroll on the next turns of the main queue.
+        for _ in 0..<3 {
+            try await Task.sleep(for: .milliseconds(80))
+            window.layoutIfNeeded()
+        }
+    }
+
+    private func postKeyboard(_ names: [Notification.Name], top: CGFloat, in window: UIWindow) {
+        let bounds = window.bounds
+        let end = CGRect(x: 0, y: top, width: bounds.width, height: bounds.height - top)
+        for name in names {
+            NotificationCenter.default.post(name: name, object: nil, userInfo: [
+                UIResponder.keyboardFrameBeginUserInfoKey: NSValue(cgRect: end.offsetBy(dx: 0, dy: end.height)),
+                UIResponder.keyboardFrameEndUserInfoKey: NSValue(cgRect: end),
+                UIResponder.keyboardAnimationDurationUserInfoKey: 0.0,
+                UIResponder.keyboardAnimationCurveUserInfoKey: 7,
+                UIResponder.keyboardIsLocalUserInfoKey: true,
+            ])
+        }
+    }
+
+    /// Opens the keyboard. `hostCountsKeyboard`: the safe area of the composer keeps the 34 pt home indicator inset
+    /// with the keyboard up, as the app log showed in the SwiftUI host (owner screenshot: a band under the field).
+    private func openKeyboard(_ controller: ChatViewController, _ window: UIWindow, hostCountsKeyboard: Bool) {
+        let top = window.bounds.height - keyboardHeight
+        if hostCountsKeyboard { controller.additionalSafeAreaInsets.bottom = keyboardHeight }
+        postKeyboard([UIResponder.keyboardWillShowNotification, UIResponder.keyboardWillChangeFrameNotification],
+                     top: top, in: window)
+        window.layoutIfNeeded()
+    }
+
+    private func closeKeyboard(_ controller: ChatViewController, _ window: UIWindow) {
+        controller.additionalSafeAreaInsets.bottom = 0
+        postKeyboard([UIResponder.keyboardWillHideNotification, UIResponder.keyboardDidHideNotification],
+                     top: window.bounds.height, in: window)
+        window.layoutIfNeeded()
+    }
+
+    private func frame(_ view: UIView, in window: UIWindow) -> CGRect {
+        view.convert(view.bounds, to: window)
+    }
+
+    /// The bubble of the last message, in window points.
+    private func lastBubble(_ controller: ChatViewController, in window: UIWindow) throws -> CGRect {
+        let collection = controller.messagesCollectionView
+        let section = collection.numberOfSections - 1
+        let cell = try #require(collection.cellForItem(at: IndexPath(item: 0, section: section)) as? MessageContentCell,
+                                "the last bubble is not on the screen")
+        return cell.messageContainerView.convert(cell.messageContainerView.bounds, to: window)
+    }
+
+    private func centerY(_ view: UIView, in window: UIWindow) -> CGFloat { frame(view, in: window).midY }
+
+    // MARK: Composer padding
+
+    @Test(arguments: [true, false])
+    func composerSitsOnTheKeyboardWithOnlyItsPadding(hostCountsKeyboard: Bool) async throws {
+        let (controller, window) = try show(messages())
+        defer { window.isHidden = true }
+        try await settle(window)
+        openKeyboard(controller, window, hostCountsKeyboard: hostCountsKeyboard)
+        try await settle(window)
+        let bar = controller.messageInputBar
+        let keyboardTop = window.bounds.height - keyboardHeight
+        let field = frame(bar.inputTextView, in: window)
+        #expect(abs(frame(bar, in: window).maxY - keyboardTop) <= 1, "bar \(frame(bar, in: window))")
+        // Only the normal 8 pt padding under the field. No home indicator band.
+        let band = keyboardTop - field.maxY
+        #expect(abs(band - bar.padding.bottom) <= 1, "space under the field: \(band)")
+        // Issue #49: `+`, field and mic stay on one center line.
+        let plus = try #require(bar.leftStackView.arrangedSubviews.first)
+        let mic = try #require(bar.rightStackView.arrangedSubviews.first)
+        #expect(abs(centerY(plus, in: window) - field.midY) <= 1)
+        #expect(abs(centerY(mic, in: window) - field.midY) <= 1)
+        closeKeyboard(controller, window)
+    }
+
+    @Test func composerClearsTheHomeIndicatorWithTheKeyboardDownAndAfterTheKeyboard() async throws {
+        let (controller, window) = try show(messages())
+        defer { window.isHidden = true }
+        try await settle(window)
+        let bar = controller.messageInputBar
+        let home = window.safeAreaInsets.bottom
+        #expect(home > 0, "the test window has no home indicator inset")
+        func check(_ moment: String) {
+            let field = frame(bar.inputTextView, in: window)
+            let space = window.bounds.height - home - field.maxY
+            #expect(abs(space - bar.padding.bottom) <= 1, "\(moment): space above the home indicator \(space)")
+            #expect(abs(frame(bar, in: window).maxY - window.bounds.height) <= 1, "\(moment): bar \(frame(bar, in: window))")
+        }
+        check("before the keyboard")
+        openKeyboard(controller, window, hostCountsKeyboard: true)
+        try await settle(window)
+        closeKeyboard(controller, window)
+        try await settle(window)
+        check("after the keyboard")
+    }
+
+    // MARK: Gap to the last bubble
+
+    @Test(arguments: [false, true])
+    func lastBubbleHas10PointsToTheComposer(keyboardUp: Bool) async throws {
+        let (controller, window) = try show(messages())
+        defer { window.isHidden = true }
+        try await settle(window)
+        if keyboardUp {
+            openKeyboard(controller, window, hostCountsKeyboard: true)
+            try await settle(window)
+        }
+        // The thread stays at the bottom, so the last message shows above the composer.
+        #expect(controller.isPinnedToBottom)
+        let bar = frame(controller.messageInputBar, in: window)
+        let bubble = try lastBubble(controller, in: window)
+        let gap = bar.minY - bubble.maxY
+        #expect(abs(gap - ChatComposerLayout.threadGap) <= 1, "keyboard up \(keyboardUp): gap \(gap)")
+        if keyboardUp { closeKeyboard(controller, window) }
+    }
+
+    // MARK: Space math
+
+    @Test func bottomSpaceIsThePaddingPlusTheComposerPartOverTheHomeIndicator() {
+        let space = { (maxY: CGFloat, home: CGFloat) in
+            ChatComposerLayout.bottomSpace(padding: 8, composerMaxY: maxY, windowHeight: 956, homeIndicator: home)
+        }
+        #expect(space(956, 34) == 42) // keyboard down
+        #expect(space(620, 34) == 8) // keyboard up
+        #expect(space(939, 34) == 25) // keyboard half way down: part of the home indicator
+        #expect(space(980, 34) == 42) // never more than the home indicator
+        #expect(space(956, 0) == 8) // no home indicator (iPhone SE, landscape)
+    }
+}

@@ -13,8 +13,9 @@ struct ChatScreen: View {
 
     var body: some View {
         ChatThreadView(model: model)
-            .ignoresSafeArea(.container, edges: .bottom)
-            .ignoresSafeArea(.keyboard)
+            // Issue #60: one modifier for both regions. With two modifiers, SwiftUI made the view end at the home
+            // indicator line while the keyboard was up, and the composer sat 34 pt above the keyboard.
+            .ignoresSafeArea([.container, .keyboard], edges: .bottom)
             .overlay {
                 if model.isLoadingHistory {
                     ProgressView()
@@ -128,6 +129,12 @@ struct ChatThreadView: UIViewControllerRepresentable {
                     controller.tapAudio(id: "r2")
                 }
             }
+            return controller
+        }
+        if DemoChatTransport.Scenario.current == .keyboard {
+            // Issue #60: the keyboard is up over the thread.
+            let controller = ChatViewController(model: model)
+            controller.onFirstAppear = { _ = $0.messageInputBar.inputTextView.becomeFirstResponder() }
             return controller
         }
         if DemoChatTransport.Scenario.current == .tapbacksPicker {
