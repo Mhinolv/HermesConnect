@@ -152,10 +152,10 @@ final class LocationController: NSObject {
     /// The app on a device. Each upload loads the saved profile and the device key, so it also works after a
     /// relaunch in the background. It opens its own SSH connection with the pinned host key.
     static func live() -> LocationController {
-        let profiles = try? FileServerProfileStore.applicationSupport()
+        let servers = try? FileServerListStore.applicationSupport()
         let keys = KeychainDeviceKeyStore.system()
         let uploader = GateLocationUploader(connector: HostConnector(transport: CitadelSSHTransport())) {
-            guard let profile = try? profiles?.load(), let key = try? keys.loadKey() else { return nil }
+            guard let profile = (try? servers?.load())?.active, let key = try? keys.loadKey() else { return nil }
             return LocationCredentials(profile: profile, key: key)
         }
         let store: any LocationStateStore = (try? FileLocationStateStore.applicationSupport()) ?? InMemoryLocationStateStore()

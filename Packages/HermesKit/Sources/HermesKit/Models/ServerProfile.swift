@@ -1,9 +1,12 @@
 import Foundation
 
-/// The one Hermes server of the owner.
-public struct ServerProfile: Codable, Sendable, Equatable {
-    /// Version 3 (issue #18) adds `servePort` and `lastAlgorithms`.
-    public static let currentVersion = 3
+/// One Hermes server of the owner. Issue #66: the owner can save more than one (`ServerList`).
+public struct ServerProfile: Codable, Sendable, Equatable, Identifiable {
+    /// Version 3 (issue #18) adds `servePort` and `lastAlgorithms`. Version 4 (issue #66) adds `id`.
+    public static let currentVersion = 4
+    /// Issue #66: the id of a profile saved before version 4. It is fixed, so each migration of the old
+    /// `server-profile.json` gives the same id, also when two parts of the app migrate at the same time.
+    public static let legacyID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
     public static let defaultPort = 22
     public static let defaultUser = "hermes"
     /// The example in the Host field: a Tailscale address (issue #41).
@@ -13,6 +16,8 @@ public struct ServerProfile: Codable, Sendable, Equatable {
         + "A server firewall can block port 22 on cellular data."
 
     public var version: Int
+    /// The stable id of the server (issue #66). An edit of the host keeps it.
+    public var id: UUID
     public var host: String
     public var port: Int
     public var user: String
@@ -25,10 +30,11 @@ public struct ServerProfile: Codable, Sendable, Equatable {
     /// The cipher and key exchange of the last connection that succeeded (issue #18).
     public var lastAlgorithms: SSHNegotiatedAlgorithms?
 
-    public init(host: String, port: Int = ServerProfile.defaultPort,
+    public init(id: UUID = UUID(), host: String, port: Int = ServerProfile.defaultPort,
                 user: String = ServerProfile.defaultUser, displayName: String? = nil, hostKey: HostKey? = nil,
                 servePort: Int? = nil, lastAlgorithms: SSHNegotiatedAlgorithms? = nil) {
         self.version = Self.currentVersion
+        self.id = id
         self.host = host.trimmingCharacters(in: .whitespacesAndNewlines)
         self.port = port
         self.user = user
@@ -42,6 +48,8 @@ public struct ServerProfile: Codable, Sendable, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decodeIfPresent(Int.self, forKey: .version) ?? Self.currentVersion
+        // Files before version 4 have no id. A value that does not parse also gets the fixed legacy id.
+        id = ((try? container.decodeIfPresent(UUID.self, forKey: .id)) ?? nil) ?? Self.legacyID
         host = try container.decodeIfPresent(String.self, forKey: .host) ?? ""
         port = try container.decodeIfPresent(Int.self, forKey: .port) ?? Self.defaultPort
         user = try container.decodeIfPresent(String.self, forKey: .user) ?? Self.defaultUser
@@ -58,6 +66,12 @@ public struct ServerProfile: Codable, Sendable, Equatable {
     /// True when `other` names a different server (host, port or user). A new server needs a new pin.
     public func isDifferentServer(from other: ServerProfile) -> Bool {
         host.caseInsensitiveCompare(other.host) != .orderedSame || port != other.port || user != other.user
+    }
+
+    /// The name in Settings. An empty name shows the host.
+    public var name: String {
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? host : trimmed
     }
 
     public var isValid: Bool {
