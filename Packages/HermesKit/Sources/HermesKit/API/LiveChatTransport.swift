@@ -21,7 +21,7 @@ public enum ChatLinkStatus: Sendable, Equatable {
 ///   A second refusal before a good connect is `.failed`.
 /// - A send on a dropped socket reconnects once when the reason allows it.
 @MainActor @Observable
-public final class LiveChatTransport: ChatTransport, SessionsTransport {
+public final class LiveChatTransport: ChatTransport, SessionsTransport, ReceivedFileDownloading {
     public private(set) var status: ChatLinkStatus = .notConnected
 
     /// Each read gives a new stream, so the session list and each chat read every event (issue #7).
@@ -211,6 +211,19 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport {
 
     public func history(sessionId: String) async throws -> [TranscriptMessage] {
         try await readyClient().history(sessionId: sessionId)
+    }
+
+    /// Issue #12: `GET /api/fs/download` on the forwarded port, as `transcribe`. No new network path.
+    public func downloadReceivedFile(path: String, storedSessionId: String?, maxBytes: Int?,
+                                     progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
+        guard let endpoint else { throw ReceivedFileError.offline }
+        do {
+            return try await makeREST(endpoint).downloadFile(path: path, storedSessionId: storedSessionId,
+                                                             maxBytes: maxBytes, progress: progress)
+        } catch {
+            if Self.isStaleToken(error), endpoint == self.endpoint, status == .ready { staleToken() }
+            throw error
+        }
     }
 
     // MARK: SessionsTransport

@@ -2,6 +2,7 @@ import HermesKit
 import InputBarAccessoryView
 import MessageKit
 import Observation
+import QuickLook
 import UIKit
 
 /// The text thread (issue #6) with voice memos (issue #9). A thin MessageKit view of `ChatViewModel`:
@@ -63,6 +64,12 @@ final class ChatViewController: MessagesViewController {
     /// Issue #65: a single tap on the thread hides the keyboard. It waits for the double-tap.
     private lazy var hideKeyboardTap = UITapGestureRecognizer(target: self, action: #selector(threadTapped))
     private let hideKeyboardTapDelegate = HideKeyboardTapDelegate()
+    /// Issue #12: what to do with a received file when its download ends (a tap or a menu action started it).
+    private var pendingFileActions: [String: ReceivedFileAction] = [:]
+    /// Issue #12: the Quick Look data source. Quick Look keeps only a weak reference.
+    private var filePreview: ReceivedFilePreview?
+    /// Issue #12: `true` while bubbles are built. A state change in that time is part of the same render.
+    private var buildingBubbles = false
 
     init(model: ChatViewModel, recorder: any VoiceRecording = AVVoiceRecorder(),
          voiceFolder: URL = VoiceMemoFiles.directory()) {
@@ -242,6 +249,7 @@ final class ChatViewController: MessagesViewController {
     }
 
     private func configureAttachments() {
+        model.receivedFiles.onChange = { [weak self] file in self?.receivedFileChanged(file) }
         attachments.onChange = { [weak self] in self?.updateSendButton() }
         attachments.sendNow = { [weak self] text, items in self?.model.send(text, attachments: items) }
         AttachmentThumbnails.onReady[ObjectIdentifier(self)] = { [weak self] in self?.thumbnailsReady() }
@@ -250,9 +258,14 @@ final class ChatViewController: MessagesViewController {
     /// A photo thumbnail finished decoding: put it in the visible photo bubbles.
     private func thumbnailsReady() {
         for case let cell as MediaMessageCell in messagesCollectionView.visibleCells {
-            guard let indexPath = messagesCollectionView.indexPath(for: cell),
-                  let item = bubble(at: indexPath)?.part.attachment else { continue }
-            cell.imageView.image = AttachmentThumbnails.image(for: item)
+            guard let indexPath = messagesCollectionView.indexPath(for: cell), let part = bubble(at: indexPath)?.part
+            else { continue }
+            if let item = part.attachment {
+                cell.imageView.image = AttachmentThumbnails.image(for: item)
+            } else if let file = part.receivedFile, let url = model.receivedFiles.state(for: file).fileURL {
+                // Issue #12: a downloaded image. Its bubble already has the right size.
+                cell.imageView.image = AttachmentThumbnails.image(for: ReceivedPhotoItem.thumbnailItem(file, url: url))
+            }
         }
     }
 
@@ -392,9 +405,12 @@ final class ChatViewController: MessagesViewController {
         model.speechDidNotPlay(id: reply.id)
     }
 
-    /// The file of the audio bubble of a row: a memo or a voice reply.
+    /// The file of the audio bubble of a row: a memo, a voice reply or a received audio file (issue #12).
     private func audioURL(of part: ChatBubblePart) -> URL? {
         if let memo = part.row.message.voice { return memo.fileURL }
+        if let file = part.receivedFile, file.kind == .audio, model.receivedFiles.state(for: file).fileURL != nil {
+            return model.receivedFiles.audio(for: file).audio?.fileURL
+        }
         guard part.content == .spokenReply else { return nil }
         return part.row.message.spokenReply?.audio?.fileURL
     }
@@ -671,6 +687,7 @@ final class ChatViewController: MessagesViewController {
     }
 
     private func makeBubble(_ part: ChatBubblePart) -> ChatBubble {
+        if let file = part.receivedFile { return receivedBubble(part, file: file) }
         guard let item = part.attachment else { return ChatBubble(part: part, text: styledText(for: part.row.message)) }
         if item.showsAsImage {
             return ChatBubble(part: part, text: NSAttributedString(), thumbnail: AttachmentThumbnails.image(for: item))
@@ -682,7 +699,9 @@ final class ChatViewController: MessagesViewController {
     private func render() {
         guard isViewLoaded else { return }
         let rows = ChatTimeline.rows(for: model.messages, statusLine: model.statusLine)
+        buildingBubbles = true
         let next = ChatBubbleParts.parts(for: rows).map(makeBubble)
+        buildingBubbles = false
         let old = bubbles
         let newOutgoing = next.last.map { last in
             last.row.message.role == .user && !old.contains { $0.row.id == last.row.id }
@@ -696,7 +715,7 @@ final class ChatViewController: MessagesViewController {
 
         bubbles = next
         if old.map(\.messageId) == next.map(\.messageId) {
-            let changed = next.indices.filter { old[$0].row != next[$0].row }
+            let changed = next.indices.filter { old[$0].row != next[$0].row || old[$0].received != next[$0].received }
             if !changed.isEmpty {
                 UIView.performWithoutAnimation {
                     messagesCollectionView.reloadSections(IndexSet(changed))
@@ -723,8 +742,11 @@ final class ChatViewController: MessagesViewController {
         guard let id = model.completedReplyId, id != announcedReplyId else { return }
         announcedReplyId = id
         guard UIAccessibility.isVoiceOverRunning,
-              let message = model.messages.first(where: { $0.id == id }), !message.text.isEmpty else { return }
-        UIAccessibility.post(notification: .announcement, argument: "Hermes, \(message.text)")
+              let message = model.messages.first(where: { $0.id == id }) else { return }
+        // Issue #12: VoiceOver does not read the `MEDIA:` paths. The file bubbles have their own labels.
+        let text = MediaTags.visibleText(message.text)
+        guard !text.isEmpty else { return }
+        UIAccessibility.post(notification: .announcement, argument: "Hermes, \(text)")
     }
 
     private func updateScrollButton() {
@@ -858,6 +880,27 @@ final class ChatViewController: MessagesViewController {
         default: nil
         }
         var actions: [UIAccessibilityCustomAction] = []
+        if let file = part.receivedFile {
+            // Issue #12: "Hermes sent a file, report.pdf, 2 MB" with "Open", "Save to Files" and "Share".
+            let state = model.receivedFiles.state(for: file)
+            let stateText: String? = switch state {
+            case .ready, .idle: nil
+            default: ReceivedFileText.detail(for: state, byteCount: nil)
+            }
+            cell.accessibilityLabel = ChatBubbleParts.receivedFileLabel(file, byteCount: model.receivedFiles.byteCount(for: file),
+                                                                        row: row, state: stateText)
+            cell.accessibilityHint = nil
+            for (name, action) in [("Open", ReceivedFileAction.open), ("Save to Files", .saveToFiles), ("Share", .share)] {
+                actions.append(UIAccessibilityCustomAction(name: name) { [weak self, weak cell] _ in
+                    guard let self else { return false }
+                    self.perform(action, on: file, from: cell ?? self.view)
+                    return true
+                })
+            }
+            if row.showsReactions { actions += tapbackActions(for: row) }
+            cell.accessibilityCustomActions = actions
+            return cell
+        }
         if part.content == .spokenReply {
             let id = row.id
             cell.accessibilityHint = row.message.spokenReply == .failed ? "Double-tap to retry." : nil
@@ -930,7 +973,21 @@ final class ChatViewController: MessagesViewController {
             var actions: [UIMenuElement] = []
             // Issue #11: the six tapbacks in one row above the other actions.
             if Self.canReact(row.message), let self { actions.append(self.tapbackMenu(for: row)) }
-            if let item = part.attachment {
+            if let file = part.receivedFile, let self {
+                // Issue #12: "Save to Files", "Share", and "Copy" for images. A file that is not here downloads first.
+                let source = collectionView.cellForItem(at: indexPath) ?? self.view!
+                actions.append(UIAction(title: "Save to Files", image: UIImage(systemName: "folder")) { [weak self] _ in
+                    self?.perform(.saveToFiles, on: file, from: source)
+                })
+                actions.append(UIAction(title: "Share", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
+                    self?.perform(.share, on: file, from: source)
+                })
+                if file.kind == .image {
+                    actions.append(UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in
+                        self?.perform(.copy, on: file, from: source)
+                    })
+                }
+            } else if let item = part.attachment {
                 actions.append(UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in
                     if item.showsAsImage {
                         UIPasteboard.general.image = UIImage(contentsOfFile: item.fileURL.path)
@@ -1123,6 +1180,11 @@ final class ChatViewController: MessagesViewController {
         guard let indexPath = messagesCollectionView.indexPath(for: cell), let row = bubble(at: indexPath)?.row else {
             return
         }
+        // Issue #12: a received file opens, downloads, or asks before a large download.
+        if let file = bubble(at: indexPath)?.part.receivedFile {
+            perform(.open, on: file, from: cell)
+            return
+        }
         // Issue #8: each part of a message that was not delivered opens the options.
         if row.message.delivery == .failed {
             showSendFailureOptions(for: row, from: cell)
@@ -1237,6 +1299,24 @@ extension ChatViewController: MessagesDataSource {
                     in messagesCollectionView: MessagesCollectionView) -> UICollectionViewCell {
         let cell = messagesCollectionView.dequeueReusableCell(ChatVoiceCell.self, for: indexPath)
         cell.configure(with: message, at: indexPath, and: messagesCollectionView)
+        // Issue #12: a received audio file uses the #10 audio bubble, with no auto-play.
+        if let file = (message as? ChatBubble)?.part.receivedFile {
+            let spoken = model.receivedFiles.audio(for: file)
+            let url = spoken.audio?.fileURL
+            let loaded = url != nil && player.playingURL == url
+            cell.configure(reply: spoken, playing: url.map(player.isPlaying) ?? false,
+                           time: loaded ? player.currentTime : 0, caption: nil, captionHeight: 0, traits: traitCollection)
+            cell.onPlay = { [weak self, weak cell] in
+                guard let self else { return }
+                self.perform(.open, on: file, from: cell ?? self.view)
+            }
+            cell.onSeek = { [weak self] time in
+                guard let self, !self.voice.isActive, let url else { return }
+                self.player.seek(url, to: time)
+            }
+            cell.onTranscriptTap = nil
+            return cell
+        }
         guard let row = row(for: message), let info = transcript(for: row, message: message, at: indexPath) else {
             return cell
         }
@@ -1355,7 +1435,17 @@ extension ChatViewController: MessagesDisplayDelegate {
     /// Issue #8: the progress ring on a photo bubble until its attach call returns.
     func configureMediaMessageImageView(_ imageView: UIImageView, for message: MessageType, at _: IndexPath,
                                         in _: MessagesCollectionView) {
-        guard let bubble = message as? ChatBubble, let item = bubble.part.attachment else { return }
+        guard let bubble = message as? ChatBubble else { return }
+        // Issue #12: a received image: the gray box with a `ProgressView`, or its state, until the image is here.
+        ReceivedImageOverlay.clear(on: imageView)
+        if bubble.part.receivedFile != nil {
+            ReceivedImageOverlay.update(on: imageView, state: bubble.received)
+            imageView.contentMode = .scaleAspectFill
+            imageView.backgroundColor = .secondarySystemFill
+            AttachmentProgressRing.update(on: imageView, uploading: false, failed: false)
+            return
+        }
+        guard let item = bubble.part.attachment else { return }
         imageView.contentMode = .scaleAspectFill
         imageView.backgroundColor = .secondarySystemFill
         AttachmentProgressRing.update(on: imageView, uploading: Self.isUploading(item, in: bubble.row),
@@ -1464,4 +1554,149 @@ private final class MicPressDelegate: NSObject, UIGestureRecognizerDelegate {
     func gestureRecognizer(_: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         shouldReceive(touch)
     }
+}
+
+// MARK: - Received files (issue #12)
+
+/// What the owner asked for on a received file.
+enum ReceivedFileAction: Equatable {
+    /// Quick Look (images, PDFs, most documents), the share sheet for other types, play for audio.
+    case open
+    case saveToFiles
+    case share
+    case copy
+}
+
+extension ChatViewController {
+    fileprivate func receivedBubble(_ part: ChatBubblePart, file: ReceivedFile) -> ChatBubble {
+        let files = model.receivedFiles
+        // Images and audio load when their bubble shows. Other files wait for a tap.
+        if files.state(for: file) == .idle, file.kind != .file { files.load(file) }
+        let state = files.state(for: file)
+        switch file.kind {
+        case .image:
+            let thumbnail = state.fileURL.flatMap { url in
+                AttachmentThumbnails.image(for: ReceivedPhotoItem.thumbnailItem(file, url: url))
+            }
+            return ChatBubble(part: part, text: NSAttributedString(), thumbnail: thumbnail, received: state)
+        case .audio, .file:
+            let text = ReceivedFileText.make(file, state: state, byteCount: files.byteCount(for: file),
+                                             traits: traitCollection)
+            return ChatBubble(part: part, text: text, received: state)
+        }
+    }
+
+    /// A download state changed: rebuild the bubbles of the file, then run the action that waited for it.
+    fileprivate func receivedFileChanged(_ file: ReceivedFile) {
+        guard isViewLoaded, !buildingBubbles else { return }
+        let sections = bubbles.indices.filter { bubbles[$0].part.receivedFile == file }
+        buildingBubbles = true
+        for index in sections { bubbles[index] = makeBubble(bubbles[index].part) }
+        buildingBubbles = false
+        if !sections.isEmpty {
+            UIView.performWithoutAnimation {
+                messagesCollectionView.reloadSections(IndexSet(sections))
+            }
+            if pinnedToBottom { scrollToBottom() }
+        }
+        guard let action = pendingFileActions[file.path] else { return }
+        switch model.receivedFiles.state(for: file) {
+        case .downloading, .idle:
+            return
+        case .ready:
+            pendingFileActions[file.path] = nil
+            // Audio gets ready twice (file, then its length). Only "open" waits for the second step.
+            perform(action, on: file, from: sections.first.flatMap {
+                messagesCollectionView.cellForItem(at: IndexPath(item: 0, section: $0))
+            } ?? view)
+        case .needsConfirmation, .notAvailable, .offline, .failed:
+            pendingFileActions[file.path] = nil
+            // The cell shows the reason. A large file asks once: the alert came from the tap.
+            if case .needsConfirmation(let bytes) = model.receivedFiles.state(for: file) {
+                confirmDownload(file, byteCount: bytes, then: action)
+            }
+        }
+    }
+
+    /// Runs `action` on the downloaded file, or downloads it first.
+    func perform(_ action: ReceivedFileAction, on file: ReceivedFile, from source: UIView) {
+        let files = model.receivedFiles
+        switch files.state(for: file) {
+        case .ready(let url):
+            run(action, on: file, url: url, from: source)
+        case .downloading:
+            pendingFileActions[file.path] = action
+        case .needsConfirmation(let bytes):
+            confirmDownload(file, byteCount: bytes, then: action)
+        case .idle, .notAvailable, .offline, .failed:
+            pendingFileActions[file.path] = action
+            files.load(file)
+        }
+    }
+
+    /// The design notes alert: "Download 120 MB?" with "Download" and "Cancel".
+    private func confirmDownload(_ file: ReceivedFile, byteCount: Int, then action: ReceivedFileAction) {
+        guard presentedViewController == nil else { return }
+        let alert = UIAlertController(title: "Download \(AttachmentPayload.sizeText(byteCount))?", message: nil,
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Download", style: .default) { [weak self] _ in
+            self?.pendingFileActions[file.path] = action
+            self?.model.receivedFiles.load(file, confirmed: true)
+        })
+        present(alert, animated: true)
+    }
+
+    private func run(_ action: ReceivedFileAction, on file: ReceivedFile, url: URL, from source: UIView) {
+        switch action {
+        case .open:
+            if file.kind == .audio {
+                switch model.receivedFiles.audio(for: file) {
+                case .ready(let audio):
+                    guard !voice.isActive else { return }
+                    player.toggle(audio.fileURL)
+                    return
+                case .preparing:
+                    pendingFileActions[file.path] = .open
+                    return
+                case .failed:
+                    break // It does not play on iOS: the share sheet still saves it.
+                }
+            }
+            if file.kind != .audio, ReceivedFilePreview.canPreview(url) {
+                showPreview(url)
+            } else {
+                share(url, from: source)
+            }
+        case .saveToFiles:
+            let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+            present(picker, animated: true)
+        case .share:
+            share(url, from: source)
+        case .copy:
+            if let image = UIImage(contentsOfFile: url.path) { UIPasteboard.general.image = image }
+        }
+    }
+
+    private func showPreview(_ url: URL) {
+        guard presentedViewController == nil else { return }
+        let preview = ReceivedFilePreview(url: url)
+        filePreview = preview
+        let controller = QLPreviewController()
+        controller.dataSource = preview
+        controller.modalPresentationStyle = .fullScreen
+        present(controller, animated: true)
+    }
+
+    /// The share sheet: "Save Image" for images, "Save to Files", and the other apps.
+    private func share(_ url: URL, from source: UIView) {
+        guard presentedViewController == nil else { return }
+        let sheet = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        sheet.popoverPresentationController?.sourceView = source
+        sheet.popoverPresentationController?.sourceRect = source.bounds
+        present(sheet, animated: true)
+    }
+
+    /// The bubbles of received files (tests).
+    var receivedFileBubbles: [ChatBubble] { bubbles.filter { $0.part.receivedFile != nil } }
 }

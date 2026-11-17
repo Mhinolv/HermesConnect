@@ -63,16 +63,19 @@ final class AttachmentStripView: UIView {
         tile.translatesAutoresizingMaskIntoConstraints = false
         let content: UIView = item.showsAsImage ? thumbnail(for: item) : chip(for: item)
         tile.addSubview(content)
+        // Issue #12 (QA #31 follow-up): a 44 pt hit area. The 24 pt circle stays in the top corner of it.
         let remove = UIButton(type: .system)
         remove.translatesAutoresizingMaskIntoConstraints = false
         var config = UIButton.Configuration.plain()
         config.image = UIImage(systemName: "xmark.circle.fill",
-                               withConfiguration: UIImage.SymbolConfiguration(pointSize: 18))
-        config.baseForegroundColor = .white
-        config.background.backgroundColor = UIColor.black.withAlphaComponent(0.55)
-        config.background.cornerRadius = 12
-        config.contentInsets = .zero
+                               withConfiguration: UIImage.SymbolConfiguration(pointSize: 22)
+                                   .applying(UIImage.SymbolConfiguration(paletteColors: [
+                                       .white, UIColor.black.withAlphaComponent(0.55),
+                                   ])))
+        config.contentInsets = NSDirectionalEdgeInsets(top: 2, leading: 0, bottom: 0, trailing: 2)
         remove.configuration = config
+        remove.contentHorizontalAlignment = .trailing
+        remove.contentVerticalAlignment = .top
         remove.accessibilityLabel = "Remove"
         let id = item.id
         remove.addAction(UIAction { [weak self] _ in self?.onRemove?(id) }, for: .touchUpInside)
@@ -82,10 +85,10 @@ final class AttachmentStripView: UIView {
             content.bottomAnchor.constraint(equalTo: tile.bottomAnchor),
             content.leadingAnchor.constraint(equalTo: tile.leadingAnchor),
             content.trailingAnchor.constraint(equalTo: tile.trailingAnchor),
-            remove.topAnchor.constraint(equalTo: tile.topAnchor, constant: 2),
-            remove.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -2),
-            remove.widthAnchor.constraint(equalToConstant: 24),
-            remove.heightAnchor.constraint(equalToConstant: 24),
+            remove.topAnchor.constraint(equalTo: tile.topAnchor),
+            remove.trailingAnchor.constraint(equalTo: tile.trailingAnchor),
+            remove.widthAnchor.constraint(equalToConstant: Self.removeHitSize),
+            remove.heightAnchor.constraint(equalToConstant: Self.removeHitSize),
         ])
         // VoiceOver: one element per item, with "Remove" as an action.
         tile.isAccessibilityElement = true
@@ -96,6 +99,9 @@ final class AttachmentStripView: UIView {
         }]
         return tile
     }
+
+    /// The Human Interface Guidelines minimum hit area.
+    static let removeHitSize: CGFloat = 44
 
     static func accessibilityLabel(for item: ChatAttachment) -> String {
         switch item.kind {

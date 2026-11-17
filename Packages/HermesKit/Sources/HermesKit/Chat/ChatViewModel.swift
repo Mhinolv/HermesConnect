@@ -66,6 +66,8 @@ public final class ChatViewModel {
     /// accepted. Before that the server has no row, so launch cannot find the chat by its stored id.
     /// One new chat at a time holds it (`SessionListModel.newChat`).
     @ObservationIgnored private(set) var keepsNewChat: Bool
+    /// Issue #12: the downloads of the `MEDIA:` files of this chat.
+    @ObservationIgnored public let receivedFiles: ReceivedFileLoader
     /// Metadata only: ids, counts and states. Never the text of a message (issue #18).
     @ObservationIgnored private let log = HermesLog(category: "chat")
 
@@ -81,8 +83,10 @@ public final class ChatViewModel {
                 loadAudio: @escaping @Sendable (URL) throws -> Data = { try Data(contentsOf: $0) },
                 removeAudio: @escaping @Sendable (URL) -> Void = { try? FileManager.default.removeItem(at: $0) },
                 saveSpeech: @escaping @Sendable (SpokenAudio) throws -> VoiceReplyAudio = { try VoiceReplyFiles.save($0) },
-                transcription: VoiceTranscription = .server) {
+                transcription: VoiceTranscription = .server,
+                receivedFiles: ReceivedFileLoader? = nil) {
         self.transport = transport
+        self.receivedFiles = receivedFiles ?? ReceivedFileLoader(transport: transport, storedSessionId: { nil })
         self.transcription = transcription
         self.saveSpeech = saveSpeech
         self.loadAudio = loadAudio
@@ -105,6 +109,7 @@ public final class ChatViewModel {
         }
         self.thread = ChatThread(messages: initial)
         self.messages = initial
+        self.receivedFiles.storedSessionId = { [weak self] in self?.storedSessionId }
     }
 
     /// The composer text that the owner did not send. One draft per session.

@@ -94,18 +94,22 @@ enum AttachmentFileText {
         result.append(NSAttributedString(string: twoLineName(item.name), attributes: [
             .font: body, .foregroundColor: color, .paragraphStyle: paragraph,
         ]))
-        var detail = AttachmentPayload.sizeText(item.byteCount)
+        // Issue #12: a cell from a server `@file:` ref has no local bytes, so it has no size.
+        var details = item.byteCount > 0 ? [AttachmentPayload.sizeText(item.byteCount)] : []
         switch item.upload {
-        case .uploading: detail += " · Uploading…"
-        case .failed: detail += " · Upload failed"
+        case .uploading: details.append("Uploading…")
+        case .failed: details.append("Upload failed")
         case .pending, .attached: break
         }
-        result.append(NSAttributedString(string: "\n" + detail, attributes: [.font: caption, .foregroundColor: secondary]))
+        if !details.isEmpty {
+            result.append(NSAttributedString(string: "\n" + details.joined(separator: " · "),
+                                             attributes: [.font: caption, .foregroundColor: secondary]))
+        }
         return result
     }
 
     /// The label has no per-run line limit, so a long name is cut to about 2 lines here.
-    private static func twoLineName(_ name: String, limit: Int = 60) -> String {
+    static func twoLineName(_ name: String, limit: Int = 60) -> String {
         guard name.count > limit else { return name }
         return String(name.prefix(limit / 2 - 1)) + "…" + String(name.suffix(limit / 2 - 1))
     }
