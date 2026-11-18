@@ -20,6 +20,12 @@ final class ChatViewController: MessagesViewController {
     private var voiceCalculator: ChatVoiceSizeCalculator?
     /// Issue #67: the size of a command card.
     private var commandCalculator: ChatVoiceSizeCalculator?
+    /// Issue #104: the size of an approval card.
+    private var approvalCalculator: ChatVoiceSizeCalculator?
+    /// Issue #104: the approval cards whose command shows in full.
+    private var expandedApprovals: Set<String> = []
+    /// Issue #104: the last approval card that played the haptic.
+    private var handledApprovalAlertId: String?
     /// Issue #67: the last composer text that the model gave.
     private var handledComposerFillId: String?
     /// Memos whose transcript shows all lines.
@@ -111,6 +117,7 @@ final class ChatViewController: MessagesViewController {
         messagesCollectionView.register(ChatTextCell.self)
         messagesCollectionView.register(ChatVoiceCell.self)
         messagesCollectionView.register(ChatCommandCell.self)
+        messagesCollectionView.register(ChatApprovalCell.self)
         messagesCollectionView.keyboardDismissMode = .interactive
         scrollsToLastItemOnKeyboardBeginsEditing = true
         maintainPositionOnInputBarHeightChanged = true
@@ -149,6 +156,8 @@ final class ChatViewController: MessagesViewController {
         // A reply that got its audio before this screen opened does not play now.
         handledAutoPlayId = model.autoPlayReplyId
         handledComposerFillId = model.composerFill?.id
+        // Issue #104: a card that showed before this screen opened plays no haptic now.
+        handledApprovalAlertId = model.approvalAlert?.id
         render()
         observeModel()
     }
@@ -214,6 +223,14 @@ final class ChatViewController: MessagesViewController {
             return ChatCommandCardLayout.size(card, traits: self?.traitCollection ?? .current, maxWidth: maxWidth)
         }
         self.commandCalculator = commandCalculator
+        let approvalCalculator = ChatVoiceSizeCalculator(layout: layout,
+                                                         copying: layout.attributedTextMessageSizeCalculator)
+        approvalCalculator.bubbleSize = { [weak self] message, maxWidth in
+            guard let row = (message as? ChatBubble)?.row, let card = row.message.approval else { return .zero }
+            return ChatApprovalCardLayout.size(card, expanded: self?.expandedApprovals.contains(row.id) ?? false,
+                                               traits: self?.traitCollection ?? .current, maxWidth: maxWidth)
+        }
+        self.approvalCalculator = approvalCalculator
     }
 
     private func configureComposer() {
@@ -733,6 +750,7 @@ final class ChatViewController: MessagesViewController {
             _ = model.newMessageIds
             _ = model.composerFill
             _ = model.replyQuote
+            _ = model.approvalAlert
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
                 self?.applyComposerFill()
@@ -820,6 +838,27 @@ final class ChatViewController: MessagesViewController {
         updateSendButton()
         announceCompletedReply()
         autoPlayVoiceReply()
+        playApprovalHaptic()
+    }
+
+    /// Issue #104: a new approval card plays the `.warning` haptic once. VoiceOver reads the title.
+    private func playApprovalHaptic() {
+        guard let alert = model.approvalAlert, alert.id != handledApprovalAlertId else { return }
+        handledApprovalAlertId = alert.id
+        guard view.window != nil else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        if UIAccessibility.isVoiceOverRunning {
+            UIAccessibility.post(notification: .announcement, argument: ChatApprovalCard.title)
+        }
+    }
+
+    /// Issue #104: a tap on the cut command of an approval card shows all of it, and a second tap cuts it again.
+    private func toggleApprovalCommand(id: String) {
+        if expandedApprovals.remove(id) == nil { expandedApprovals.insert(id) }
+        guard let index = bubbles.firstIndex(where: { $0.row.id == id }) else { return }
+        UIView.performWithoutAnimation {
+            messagesCollectionView.reloadSections(IndexSet(integer: index))
+        }
     }
 
     /// VoiceOver reads a reply once, when it ends.
@@ -1070,6 +1109,8 @@ final class ChatViewController: MessagesViewController {
                               point _: CGPoint) -> UIContextMenuConfiguration? {
         guard let indexPath = indexPaths.first, let part = bubble(at: indexPath)?.part else { return nil }
         let row = part.row
+        // Issue #104: an approval card has its own buttons and no menu.
+        if row.message.approval != nil { return nil }
         return UIContextMenuConfiguration(identifier: indexPath as NSIndexPath, previewProvider: nil) { [weak self] _ in
             var actions: [UIMenuElement] = []
             // Issue #11: the six tapbacks in one row above the other actions.
@@ -1137,7 +1178,7 @@ final class ChatViewController: MessagesViewController {
 
     /// A bubble that still sends or streams takes no tapback.
     static func canReact(_ message: ChatMessage) -> Bool {
-        message.delivery != .sending && message.reply != .streaming
+        message.delivery != .sending && message.reply != .streaming && message.approval == nil
     }
 
     private func showBadges(on cell: UICollectionViewCell, row: ChatRow) {
@@ -1437,6 +1478,19 @@ extension ChatViewController: MessagesDataSource {
 
     func customCell(for message: MessageType, at indexPath: IndexPath,
                     in messagesCollectionView: MessagesCollectionView) -> UICollectionViewCell {
+        if let row = row(for: message), let card = row.message.approval {
+            let cell = messagesCollectionView.dequeueReusableCell(ChatApprovalCell.self, for: indexPath)
+            cell.configure(with: message, at: indexPath, and: messagesCollectionView)
+            let id = row.id
+            let width = messagesCollectionView.bounds.width
+            cell.configure(card: card, expanded: expandedApprovals.contains(id), traits: traitCollection)
+            cell.onChoice = readOnly ? nil : { [weak self] choice in self?.model.answerApproval(id: id, choice: choice) }
+            let cut = ChatApprovalCardLayout.commandIsCut(card, traits: traitCollection, width: width)
+            cell.onToggleCommand = cut || expandedApprovals.contains(id) ? { [weak self] in
+                self?.toggleApprovalCommand(id: id)
+            } : nil
+            return cell
+        }
         if let card = row(for: message)?.message.command {
             let cell = messagesCollectionView.dequeueReusableCell(ChatCommandCell.self, for: indexPath)
             cell.configure(with: message, at: indexPath, and: messagesCollectionView)
@@ -1543,6 +1597,7 @@ extension ChatViewController: MessagesLayoutDelegate {
 
     func customCellSizeCalculator(for message: MessageType, at _: IndexPath,
                                   in _: MessagesCollectionView) -> CellSizeCalculator {
+        if row(for: message)?.message.approval != nil, let approvalCalculator { return approvalCalculator }
         if row(for: message)?.message.command != nil, let commandCalculator { return commandCalculator }
         return voiceCalculator ?? MessageSizeCalculator(layout: flowLayout)
     }
@@ -1562,7 +1617,7 @@ extension ChatViewController: MessagesLayoutDelegate {
 
 extension ChatViewController: MessagesDisplayDelegate {
     func messageStyle(for message: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> MessageStyle {
-        if row(for: message)?.message.command != nil {
+        if row(for: message)?.message.isLocalCard == true {
             return .custom { $0.layer.cornerRadius = ChatCommandCardLayout.cornerRadius }
         }
         guard let row = row(for: message), row.hasTail else { return .bubble }
@@ -1570,7 +1625,7 @@ extension ChatViewController: MessagesDisplayDelegate {
     }
 
     func backgroundColor(for message: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> UIColor {
-        if row(for: message)?.message.command != nil { return .secondarySystemBackground }
+        if row(for: message)?.message.isLocalCard == true { return .secondarySystemBackground }
         return row(for: message)?.message.role == .user ? .systemBlue : .systemGray5
     }
 

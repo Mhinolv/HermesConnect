@@ -21,7 +21,8 @@ public enum ChatLinkStatus: Sendable, Equatable {
 ///   A second refusal before a good connect is `.failed`.
 /// - A send on a dropped socket reconnects once when the reason allows it.
 @MainActor @Observable
-public final class LiveChatTransport: ChatTransport, SessionsTransport, ReceivedFileDownloading, VoiceStreamTransport {
+public final class LiveChatTransport: ChatTransport, SessionsTransport, ReceivedFileDownloading, VoiceStreamTransport,
+    ServerRequestTransport {
     public private(set) var status: ChatLinkStatus = .notConnected
 
     /// Each read gives a new stream, so the session list and each chat read every event (issue #7).
@@ -272,6 +273,30 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
 
     private func speechRefused(_ refused: GatewayEndpoint) {
         if refused == endpoint, status == .ready { staleToken() }
+    }
+
+    // MARK: ServerRequestTransport (issue #104)
+
+    /// The answer goes on the current socket. The server takes it on any socket: approvals are not pinned
+    /// (`server_requests.py:302-346`).
+    public func answerApproval(requestId: JSONRPCID, choice: ApprovalChoice) async throws {
+        try await readyClient().answerApproval(requestId: requestId, choice: choice)
+    }
+
+    public func rejectServerRequest(_ id: JSONRPCID, code: Int, message: String) async throws {
+        try await readyClient().rejectServerRequest(id, code: code, message: message)
+    }
+
+    public func respondApproval(sessionId: String, choice: ApprovalChoice, requestId: String?) async throws -> Int {
+        try await readyClient().respondApproval(sessionId: sessionId, choice: choice, requestId: requestId)
+    }
+
+    public func acknowledgeApproval(sessionId: String, requestId: String) async throws {
+        try await readyClient().acknowledgeApproval(sessionId: sessionId, requestId: requestId)
+    }
+
+    public func pendingApprovals(sessionId: String) async throws -> [ApprovalRequest] {
+        try await readyClient().pendingApprovals(sessionId: sessionId)
     }
 
     // MARK: SessionsTransport

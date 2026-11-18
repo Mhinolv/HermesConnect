@@ -66,7 +66,7 @@ public enum ChatTimeline {
             let next = index + 1 < messages.count ? messages[index + 1] : nil
             // Issue #67: a command card is a run of its own, so the bubbles next to it keep their tails.
             let nextStartsRun = next.map {
-                $0.role != message.role || ($0.command == nil) != (message.command == nil)
+                $0.role != message.role || $0.isLocalCard || message.isLocalCard
                     || $0.date.timeIntervalSince(message.date) > headerGap
             }
             rows.append(ChatRow(message: message, timeHeader: header ? message.date : nil,
@@ -135,6 +135,7 @@ public enum ChatTimeline {
     /// The VoiceOver label of a bubble: "You, <text>, 9:41 AM" or "Hermes, <text>, 9:41 AM".
     public static func accessibilityLabel(for row: ChatRow, calendar: Calendar = .current,
                                           locale: Locale = .current) -> String {
+        if let card = row.message.approval { return card.accessibilityLabel }
         if let card = row.message.command {
             // Issue #67: "Command output, /usage, <output>". An error card says "Command failed".
             let kind = card.isError ? "Command failed" : "Command output"

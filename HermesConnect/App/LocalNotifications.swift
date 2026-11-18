@@ -191,6 +191,31 @@ final class NotificationController: NSObject, UNUserNotificationCenterDelegate {
         pendingSessionId = id
     }
 
+    /// Issue #104: "Hermes asks for approval" when the app is not active. A tap opens the chat. The body has no
+    /// command text. The socket is open, or the request did not come, so no remote push is in use.
+    func postApproval(_ alert: ApprovalAlert, server: NotificationServer?,
+                      isActive: Bool = UIApplication.shared.applicationState == .active) {
+        guard !isActive else { return }
+        let center = self.center
+        Task { try? await center.add(Self.approvalRequest(alert, server: server)) }
+    }
+
+    nonisolated static func approvalRequest(_ alert: ApprovalAlert, server: NotificationServer?) -> UNNotificationRequest {
+        let content = UNMutableNotificationContent()
+        content.title = ApprovalAlert.notificationTitle
+        let chat = alert.title.flatMap { $0.isEmpty ? nil : $0 } ?? "New Chat"
+        let named = server?.showsName == true ? "\(server?.name ?? ""): \(chat)" : chat
+        content.body = "\(named). \(ApprovalAlert.notificationBody)"
+        content.sound = .default
+        var info: [AnyHashable: Any] = [:]
+        if let id = alert.storedSessionId { info[LocalNotificationPoster.sessionIdKey] = id }
+        if let server { info[LocalNotificationPoster.serverIdKey] = server.id.uuidString }
+        content.userInfo = info
+        let thread = [server?.id.uuidString, alert.storedSessionId].compactMap { $0 }.joined(separator: "/")
+        content.threadIdentifier = thread
+        return UNNotificationRequest(identifier: "approval-\(alert.id)", content: content, trigger: nil)
+    }
+
     /// Issue #84: "Remove Server" removes the delivered notifications of that server.
     func removeDelivered(server: UUID) {
         let center = self.center

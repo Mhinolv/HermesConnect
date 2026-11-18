@@ -142,11 +142,13 @@ public struct LiveSessionSnapshot: Decodable, Sendable, Equatable {
     public var status: String?
     public var inflight: InflightTurn?
     public var openRequests: [OpenRequestEntry]?
+    /// Issue #104: the oldest unresolved approval (`contracts/common.py:208-221`). It has no JSON-RPC id.
+    public var pendingApproval: [String: JSONValue]?
 
     private enum CodingKeys: String, CodingKey {
         case sessionId = "session_id", storedSessionId = "stored_session_id", messageCount = "message_count"
         case messages, info, messagesOmitted = "messages_omitted", running, status, inflight
-        case openRequests = "open_requests"
+        case openRequests = "open_requests", pendingApproval = "pending_approval"
     }
 }
 

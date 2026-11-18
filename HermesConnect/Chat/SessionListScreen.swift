@@ -30,6 +30,13 @@ struct SessionListScreen: View {
     @State private var actions = SessionActionState()
     /// Issue #94: counts "Mark All as Read", for the success haptic.
     @State private var markedAllRead = 0
+    /// Issue #95: the select mode, its selection and the alert of a partial failure.
+    @State private var selecting = false
+    @State private var selection = ChatSelection()
+    @State private var archivedBatches = 0
+    @State private var batchFailure: BatchArchiveFailure?
+    @FocusState private var searchFocused: Bool
+    @Environment(AppModel.self) private var appModel
 
     init(model: SessionListModel, link: LiveChatTransport? = nil, query: String = "",
          onSettings: @escaping () -> Void = {}, onNewChat: @escaping () -> Void = {},
@@ -44,29 +51,19 @@ struct SessionListScreen: View {
 
     var body: some View {
         let rows = model.filtered(query)
-        List {
+        // Issue #95: `List(selection:)` in select mode only, so a tap outside it opens the chat.
+        List(selection: selecting ? $selection.ids : nil) {
             if model.hasLoaded {
                 ForEach(rows) { item in
-                    NavigationLink(value: ChatRoute.session(item.id)) {
-                        SessionRow(item: item)
-                    }
-                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                        Button("Archive", systemImage: "archivebox") { actions.archive(item.id, model) }
-                            .tint(.indigo)
-                        // No destructive role: that role removes the row before the dialog answers.
-                        Button("Delete", systemImage: "trash") { actions.deleteTarget = SessionActionTarget(item) }
-                            .tint(.red)
-                    }
-                    .contextMenu {
-                        Button("Rename", systemImage: "pencil") { actions.startRename(SessionActionTarget(item)) }
-                        Button("Archive", systemImage: "archivebox") { actions.archive(item.id, model) }
-                        Divider()
-                        Button("Delete", systemImage: "trash", role: .destructive) {
-                            actions.deleteTarget = SessionActionTarget(item)
-                        }
+                    if selecting {
+                        // No swipe actions and no context menu. The row keeps its unread dot.
+                        SessionRow(item: item, needsApproval: model.needsApproval(item.id))
+                            .tag(item.id)
+                    } else {
+                        sessionLink(item)
                     }
                 }
-                if SessionRowText.showsArchivedRow(count: model.archivedCount, query: query) {
+                if !selecting, SessionRowText.showsArchivedRow(count: model.archivedCount, query: query) {
                     NavigationLink(value: ChatRoute.archived) {
                         ArchivedRow(count: model.archivedCount)
                     }
@@ -80,6 +77,7 @@ struct SessionListScreen: View {
             }
         }
         .listStyle(.plain)
+        .environment(\.editMode, .constant(selecting ? .active : .inactive))
         .animation(.default, value: rows.map(\.id))
         .overlay {
             switch SessionRowText.overlay(hasLoaded: model.hasLoaded, total: model.chatRows.count,
@@ -98,32 +96,106 @@ struct SessionListScreen: View {
             }
         }
         .searchable(text: $query, prompt: "Search")
-        .refreshable { await model.refresh() }
+        .searchFocused($searchFocused)
+        // Issue #95: no refresh in select mode, so the rows do not move under the selection.
+        .refreshable { await refreshUnlessSelecting() }
         .navigationTitle("Hermes")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            // Issue #83: with two or more servers, the title is the server menu.
-            ToolbarItem(placement: .principal) {
-                ServerTitle(title: "Hermes", link: link, activeUnreadChats: model.chatsUnreadCount, onManage: onSettings)
-            }
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Settings", systemImage: "gearshape", action: onSettings)
-            }
-            // Issue #94: one glass group, the "More" menu before "New Chat". #95 adds "Select Chats" to the menu.
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                ChatsMoreMenu(canMarkAllRead: model.canMarkAllRead, onMarkAllRead: markAllRead)
-                Button("New Chat", systemImage: "square.and.pencil", action: onNewChat)
+            if selecting {
+                selectToolbar(rows)
+            } else {
+                // Issue #83: with two or more servers, the title is the server menu.
+                ToolbarItem(placement: .principal) {
+                    ServerTitle(title: "Hermes", link: link, activeUnreadChats: model.chatsUnreadCount,
+                                onManage: onSettings)
+                }
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Settings", systemImage: "gearshape", action: onSettings)
+                }
+                // Issue #94: one glass group, the "More" menu before "New Chat".
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    ChatsMoreMenu(canMarkAllRead: model.canMarkAllRead, onMarkAllRead: markAllRead,
+                                  onSelectChats: startSelect, canSelectChats: model.hasLoaded && !model.chatRows.isEmpty)
+                    Button("New Chat", systemImage: "square.and.pencil", action: onNewChat)
+                }
             }
         }
+        // Issue #95: the bottom bar takes the place of the tab bar.
+        .toolbarVisibility(selecting ? .hidden : .automatic, for: .tabBar)
         .sensoryFeedback(.success, trigger: markedAllRead)
+        .sensoryFeedback(.success, trigger: archivedBatches)
         .sessionActionDialogs(actions, model: model)
+        .alert(batchFailure?.title ?? "", isPresented: present($batchFailure), presenting: batchFailure) { _ in
+            Button("OK") {}
+        } message: { failure in
+            Text(failure.message)
+        }
+        // Issue #95: a chat that leaves the list leaves the selection. A switch or a push ends select mode.
+        .onChange(of: model.chatRows.map(\.id)) { selection.keep(only: model.chatRows) }
+        .onChange(of: appModel.profile?.id) { endSelect() }
+        .onDisappear { endSelect() }
         .task { await model.refresh() }
         #if DEBUG
         .onAppear {
             SessionActionDemo.present(on: actions, model: model)
             ChatsMoreDemo.present(markAllRead: markAllRead)
+            ChatSelectDemo.present { runSelectDemo($0) }
         }
         #endif
+    }
+
+    /// A row outside select mode: it opens the chat, with the #64 swipe actions and context menu.
+    private func sessionLink(_ item: SessionListItem) -> some View {
+        NavigationLink(value: ChatRoute.session(item.id)) {
+            SessionRow(item: item, needsApproval: model.needsApproval(item.id))
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button("Archive", systemImage: "archivebox") { actions.archive(item.id, model) }
+                .tint(.indigo)
+            // No destructive role: that role removes the row before the dialog answers.
+            Button("Delete", systemImage: "trash") { actions.deleteTarget = SessionActionTarget(item) }
+                .tint(.red)
+        }
+        .contextMenu {
+            Button("Rename", systemImage: "pencil") { actions.startRename(SessionActionTarget(item)) }
+            Button("Archive", systemImage: "archivebox") { actions.archive(item.id, model) }
+            Divider()
+            Button("Delete", systemImage: "trash", role: .destructive) {
+                actions.deleteTarget = SessionActionTarget(item)
+            }
+        }
+    }
+
+    /// Issue #95: the bars of select mode. No server menu, no Settings, no More menu, no New Chat.
+    @ToolbarContentBuilder private func selectToolbar(_ rows: [SessionListItem]) -> some ToolbarContent {
+        let count = selection.selected(in: rows).count
+        ToolbarItem(placement: .principal) {
+            Text(ChatSelectText.title(count))
+                .font(.headline)
+                .lineLimit(1)
+        }
+        ToolbarItem(placement: .topBarLeading) {
+            Button(selection.allSelected(rows) ? ChatSelectText.deselectAll : ChatSelectText.selectAll) {
+                selection.toggleAll(rows)
+            }
+            .disabled(rows.isEmpty)
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button(ChatSelectText.done) { endSelect() }
+                .buttonStyle(.glassProminent)
+        }
+        ToolbarItem(placement: .bottomBar) {
+            // The toolbar shows only the icon of a `Label`. The design shows the word too.
+            Button { archiveSelected(rows) } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "archivebox")
+                    Text(ChatSelectText.archive)
+                }
+            }
+            .disabled(count == 0)
+            .accessibilityLabel(ChatSelectText.archiveLabel(count))
+        }
     }
 
     /// Issue #94: no confirmation and no undo, as in Messages. The dots fade out together.
@@ -132,25 +204,132 @@ struct SessionListScreen: View {
         markedAllRead += 1
         onMarkedAllRead()
         // The menu closes first. VoiceOver drops an announcement that comes while it closes.
+        announce(ChatsMoreText.announcement, after: .milliseconds(500))
+    }
+
+    // MARK: Select mode (issue #95)
+
+    /// "Select Chats": the keyboard closes and the search query stays.
+    private func startSelect() {
+        searchFocused = false
+        selection = ChatSelection()
+        withAnimation { selecting = true }
+    }
+
+    /// "Done", "Archive", a server switch, a tab change or a push. No change to the chats.
+    private func endSelect() {
+        guard selecting else { return }
+        withAnimation { selecting = false }
+        selection = ChatSelection()
+    }
+
+    private func refreshUnlessSelecting() async {
+        guard !selecting else { return }
+        await model.refresh()
+    }
+
+    /// "Archive": the rows animate out at once and select mode ends. The calls go one at a time.
+    /// A partial failure puts the failed rows back and shows one alert (owner decision).
+    private func archiveSelected(_ rows: [SessionListItem]) {
+        let ids = selection.selected(in: rows)
+        guard !ids.isEmpty else { return }
+        archivedBatches += 1
+        endSelect()
         Task {
-            try? await Task.sleep(for: .milliseconds(500))
-            AccessibilityNotification.Announcement(ChatsMoreText.announcement).post()
+            let result = await model.archive(ids)
+            guard !result.interrupted else { return }
+            if result.failed.isEmpty {
+                announce(ChatSelectText.announcement(result.archived.count))
+            } else {
+                batchFailure = BatchArchiveFailure(archived: result.archived.count, failed: result.failed.count)
+            }
         }
+    }
+
+    private func announce(_ text: String, after delay: Duration = .zero) {
+        Task {
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            AccessibilityNotification.Announcement(text).post()
+        }
+    }
+
+    /// `true` while the value is set. A dismiss clears it.
+    private func present<Value>(_ value: Binding<Value?>) -> Binding<Bool> {
+        Binding(get: { value.wrappedValue != nil }, set: { if !$0 { value.wrappedValue = nil } })
+    }
+
+    #if DEBUG
+    private func runSelectDemo(_ demo: ChatSelectDemo) {
+        startSelect()
+        let rows = model.filtered(query)
+        switch demo {
+        case .none: break
+        case .three: selection = ChatSelection(ids: Set(rows.prefix(3).map(\.id)))
+        case .all: selection.toggleAll(rows)
+        case .failure:
+            selection.toggleAll(rows)
+            archiveSelected(rows)
+        }
+    }
+    #endif
+}
+
+/// Issue #95: a batch archive with one or more failed chats. One alert shows the counts.
+struct BatchArchiveFailure: Identifiable, Equatable {
+    var archived: Int
+    var failed: Int
+    var id: String { "\(archived)-\(failed)" }
+    var title: String { ChatSelectText.failureTitle(failed: failed) }
+    var message: String { ChatSelectText.failureMessage(archived: archived, failed: failed) }
+}
+
+/// Issue #95: the text of select mode, apart from the views so the tests can read it.
+enum ChatSelectText {
+    static let selectAll = "Select All"
+    static let deselectAll = "Deselect All"
+    static let done = "Done"
+    static let archive = "Archive"
+
+    /// "Select Chats" with 0 selected, else "3 Selected".
+    static func title(_ count: Int) -> String {
+        count == 0 ? ChatsMoreText.selectChats : "\(count) Selected"
+    }
+
+    static func archiveLabel(_ count: Int) -> String {
+        count == 1 ? "Archive 1 chat" : "Archive \(count) chats"
+    }
+
+    static func announcement(_ count: Int) -> String {
+        count == 1 ? "1 chat archived" : "\(count) chats archived"
+    }
+
+    static func failureTitle(failed: Int) -> String {
+        failed == 1 ? "Couldn't Archive Chat" : "Couldn't Archive \(failed) Chats"
+    }
+
+    static func failureMessage(archived: Int, failed: Int) -> String {
+        guard archived > 0 else { return "No chats were archived. Try again later." }
+        let done = archived == 1 ? "1 chat was archived." : "\(archived) chats were archived."
+        let back = failed == 1 ? "The other chat is back in the list." : "The other \(failed) are back in the list."
+        return "\(done) \(back)"
     }
 }
 
 /// Issue #94: the trailing "More" menu of the Chats list (`ellipsis`). Select mode (#95) hides it.
-/// #95 gives `onSelectChats`, so "Select Chats" shows above "Mark All as Read".
+/// Issue #95: with `onSelectChats`, "Select Chats" shows above "Mark All as Read".
 struct ChatsMoreMenu: View {
     /// "Mark All as Read" is disabled, not hidden, with no unread chat and on the first load.
     var canMarkAllRead: Bool
     var onMarkAllRead: () -> Void
     var onSelectChats: (() -> Void)?
+    /// Issue #95: "Select Chats" is disabled with no chat row and on the first load.
+    var canSelectChats = true
 
     var body: some View {
         Menu {
             if let onSelectChats {
                 Button(ChatsMoreText.selectChats, systemImage: "checkmark.circle", action: onSelectChats)
+                    .disabled(!canSelectChats)
             }
             Button(ChatsMoreText.markAllRead, systemImage: "checkmark.message", action: onMarkAllRead)
                 .disabled(!canMarkAllRead)
@@ -190,6 +369,8 @@ struct ArchivedRow: View {
 /// One row: title and time, then two lines of preview with the source label (issue #7 design notes).
 struct SessionRow: View {
     let item: SessionListItem
+    /// Issue #104: an approval card waits in this chat. The preview line is "Approval needed".
+    var needsApproval = false
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
@@ -208,7 +389,7 @@ struct SessionRow: View {
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(SessionRowText.accessibilityLabel(item))
+        .accessibilityLabel(SessionRowText.accessibilityLabel(item, needsApproval: needsApproval))
     }
 
     /// The time goes under the title at the accessibility sizes, so the title keeps its room.
@@ -230,6 +411,11 @@ struct SessionRow: View {
     }
 
     private var preview: Text {
+        if needsApproval {
+            // Issue #104: the waiting approval comes first. The orange hand matches the card.
+            let icon = Text(Image(systemName: "hand.raised.fill")).foregroundStyle(.orange)
+            return Text("\(icon) \(ChatApprovalCard.listPreview)").fontWeight(.semibold)
+        }
         let text = item.preview ?? ""
         guard let badge = item.sourceBadge else { return Text(text) }
         let label = Text("\(Image(systemName: badge.symbol)) \(badge.text)").fontWeight(.semibold)
@@ -286,13 +472,18 @@ enum SessionRowText {
     }
 
     /// "<title>, <time>, <preview>". "Unread" and the source come in when they apply.
-    static func accessibilityLabel(_ item: SessionListItem, now: Date = Date()) -> String {
+    /// Issue #104: "Approval needed" in place of the preview when an approval card waits.
+    static func accessibilityLabel(_ item: SessionListItem, now: Date = Date(), needsApproval: Bool = false) -> String {
         var parts: [String] = []
         if item.isUnread { parts.append("Unread") }
         parts.append(item.displayTitle)
         if let date = item.startedAt { parts.append(time(date, now: now)) }
         if let badge = item.sourceBadge { parts.append(badge.text) }
-        if let preview = item.preview, !preview.isEmpty { parts.append(preview) }
+        if needsApproval {
+            parts.append(ChatApprovalCard.listPreview)
+        } else if let preview = item.preview, !preview.isEmpty {
+            parts.append(preview)
+        }
         return parts.joined(separator: ", ")
     }
 
@@ -360,6 +551,36 @@ enum ChatsMoreDemo: String {
             return [control]
         }
         return view.subviews.flatMap { barButtons(in: $0, inBar: inBar) }
+    }
+}
+#endif
+
+#if DEBUG
+/// Issue #95: the DEBUG screenshots of select mode (`HERMES_DEMO=list HERMES_DEMO_SELECT=<state>`).
+/// `all` with `HERMES_DEMO_SEARCH=an` selects the search matches.
+enum ChatSelectDemo: String {
+    /// Select mode with no chat selected.
+    case none
+    /// Three chats selected.
+    case three
+    /// "Select All": every row that shows.
+    case all
+    /// Every chat archived. Two calls fail: the rows come back and the alert shows.
+    case failure
+
+    static var current: ChatSelectDemo? {
+        ProcessInfo.processInfo.environment["HERMES_DEMO_SELECT"].flatMap(ChatSelectDemo.init(rawValue:))
+    }
+
+    /// The chats that the demo server does not archive in `failure`.
+    static let failingIds: Set<String> = ["20261115_181200_photon", "20261023_140000_old001"]
+
+    @MainActor static func present(_ run: @escaping @MainActor (ChatSelectDemo) -> Void) {
+        guard let current else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.5))
+            run(current)
+        }
     }
 }
 #endif

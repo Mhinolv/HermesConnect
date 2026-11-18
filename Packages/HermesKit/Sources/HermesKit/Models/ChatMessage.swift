@@ -55,12 +55,14 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
     public var command: ChatCommandCard?
     /// Issue #17: the message that this owner prompt replies to. `text` is the reply only.
     public var quote: ChatQuote?
+    /// Issue #104: a local approval card (`.assistant`, no `reply`). It never goes to the cache.
+    public var approval: ChatApprovalCard?
 
     public init(id: String, role: Role, text: String, date: Date, delivery: Delivery? = nil,
                 reply: Reply? = nil, userRowId: Int? = nil, promptId: String? = nil, voice: VoiceMemo? = nil,
                 attachments: [ChatAttachment] = [], spokenReply: SpokenReply? = nil,
                 agentAck: AgentAck? = nil, tapback: Tapback? = nil, command: ChatCommandCard? = nil,
-                quote: ChatQuote? = nil) {
+                quote: ChatQuote? = nil, approval: ChatApprovalCard? = nil) {
         self.id = id
         self.role = role
         self.text = text
@@ -76,7 +78,12 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
         self.tapback = tapback
         self.command = command
         self.quote = quote
+        self.approval = approval
     }
+
+    /// Issue #67, #104: a command card or an approval card. Local cards keep their place by date in a history
+    /// merge and take no tapback or quote.
+    public var isLocalCard: Bool { command != nil || approval != nil }
 
     public var isFailed: Bool {
         if delivery == .failed { return true }

@@ -417,6 +417,53 @@ private struct Harness {
         #expect(answer == ["jsonrpc": "2.0", "id": "r-17", "result": ["choice": "once"]])
     }
 
+    /// Issue #104: the approval calls of the card go out with the protocol 3.11 params.
+    @Test func approvalCallsSendProtocolParams() async throws {
+        let harness = try await Harness.connect()
+        async let resolved = harness.client.respondApproval(sessionId: "s1", choice: .session, requestId: "a1b2")
+        let respond = try await harness.socket.waitForRequest("approval.respond")
+        #expect(respond["params"] == ["session_id": "s1", "choice": "session", "request_id": "a1b2"])
+        harness.socket.reply(to: respond, result: #"{"resolved":1}"#)
+        #expect(try await resolved == 1)
+
+        async let ack: Void = harness.client.acknowledgeApproval(sessionId: "s1", requestId: "a1b2")
+        let received = try await harness.socket.waitForRequest("approval.received")
+        #expect(received["params"] == ["session_id": "s1", "request_id": "a1b2"])
+        harness.socket.reply(to: received, result: #"{"acknowledged":true}"#)
+        try await ack
+
+        async let pending = harness.client.pendingApprovals(sessionId: "s1")
+        let list = try await harness.socket.waitForRequest("approval.pending")
+        #expect(list["params"] == ["session_id": "s1"])
+        harness.socket.reply(to: list, result: #"{"approvals":[{"request_id":"a2","description":"Send mail","allow_session":false}]}"#)
+        let approvals = try await pending
+        #expect(approvals.map(\.requestId) == ["a2"])
+        #expect(approvals.first?.sessionId == "s1")
+
+        try await harness.client.rejectServerRequest(.string("srq-5"), code: -32601, message: "no")
+        let reject = try #require(try await harness.socket.waitForSent { $0["id"] == "srq-5" }.first)
+        #expect(reject["error"] == ["code": -32601, "message": "no"])
+    }
+
+    /// Issue #104: `session.resume` gives the open requests and the pending approval to the chat.
+    @Test func resumeCarriesOpenRequestsAndPendingApproval() async throws {
+        let harness = try await Harness.connect()
+        async let ref = harness.client.resumeSession(storedId: "st1", source: "ios")
+        let request = try await harness.socket.waitForRequest("session.resume")
+        harness.socket.reply(to: request, result: """
+        {"session_id":"s9","stored_session_id":"st1","message_count":0,"messages":[],"info":{},\
+        "open_requests":[{"id":"srq-1","method":"approval","params":{"session_id":"s9","request_id":"a1",\
+        "command":"gcal update","choices":["once","deny"]}},{"id":"srq-2","method":"theme.pick","params":{}}],\
+        "pending_approval":{"request_id":"a1","command":"gcal update","choices":["once","deny"]}}
+        """)
+        let session = try await ref
+        #expect(session.liveId == "s9")
+        #expect(session.openRequests?.map(\.id) == [.string("srq-1")])
+        #expect(session.openRequests?.first?.approval?.choices == [.once, .deny])
+        #expect(session.pendingApproval?.requestId == "a1")
+        #expect(session.pendingApproval?.sessionId == "s9")
+    }
+
     @Test func unsupportedServerRequestIsRefusedAtOnce() async throws {
         let harness = try await Harness.connect()
         harness.socket.push(#"{"jsonrpc":"2.0","id":"r-9","method":"theme.pick","params":{"session_id":"s1"}}"#)
