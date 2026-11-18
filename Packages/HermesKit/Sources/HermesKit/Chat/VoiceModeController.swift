@@ -155,6 +155,8 @@ public final class VoiceModeController {
     @ObservationIgnored private var turnSerial = 0
     @ObservationIgnored private var idleSince: TimeInterval = 0
     @ObservationIgnored private var tickTask: Task<Void, Never>?
+    /// Issue #121: a Hermes prompt waits. The loop keeps the mic closed and the idle timer stops.
+    @ObservationIgnored public private(set) var promptHold = false
     @ObservationIgnored private let log = HermesLog(category: "voice-mode")
 
     private struct Clip {
@@ -247,6 +249,7 @@ public final class VoiceModeController {
     private func end(_ reason: VoiceModeEndReason) {
         guard state.isActive else { return }
         epoch += 1
+        promptHold = false
         silenceTurn()
         closeMicrophone()
         tickTask?.cancel()
@@ -279,6 +282,7 @@ public final class VoiceModeController {
         case .paused, .error: break
         default: return
         }
+        // Issue #121: a resume shows the prompt again. The prompt opens the mic after the answer.
         if microphone.access != .granted { return setFailure(.microphoneOff) }
         guard activateSession() else { return setFailure(.microphoneOff) }
         idleSince = clock()
@@ -349,6 +353,31 @@ public final class VoiceModeController {
         endClip()
     }
 
+    // MARK: Prompts (issue #121)
+
+    /// A Hermes prompt waits: the mic closes, and the next listen turn waits for `releasePrompt()`. The Hermes turn
+    /// waits on the server for the answer, so the reply does not stream meanwhile.
+    public func holdForPrompt() {
+        guard state.isActive, !promptHold else { return }
+        promptHold = true
+        closeMicrophone()
+        level = 0
+        log.info("voice mode held for a prompt")
+    }
+
+    /// The prompt ended (answer or timeout): the loop goes on.
+    public func releasePrompt() {
+        guard promptHold else { return }
+        promptHold = false
+        log.info("voice mode prompt released")
+        idleSince = clock()
+        switch state {
+        case .listening where clip == nil: listen()
+        case .speaking: startMonitor()
+        default: break
+        }
+    }
+
     // MARK: Clock
 
     private func startTicker() {
@@ -391,6 +420,13 @@ public final class VoiceModeController {
     // MARK: Listen
 
     private func listen() {
+        if promptHold {
+            // The mic opens after the prompt. No clip means no idle end meanwhile.
+            closeMicrophone()
+            level = 0
+            state = .listening
+            return
+        }
         guard !muted else {
             closeMicrophone()
             level = 0
@@ -620,7 +656,7 @@ public final class VoiceModeController {
 
     /// While the reply plays, the microphone records, so speech over the reply stops it.
     private func startMonitor() {
-        guard tuning.autoBargeIn, !muted, clip == nil else { return }
+        guard tuning.autoBargeIn, !muted, !promptHold, clip == nil else { return }
         let url = makeClipURL()
         guard (try? microphone.startClip(url: url)) != nil else { return }
         clip = Clip(url: url, startedAt: clock(), monitor: true)
@@ -689,3 +725,5 @@ public final class VoiceModeController {
         microphone.deactivate()
     }
 }
+
+extension VoiceModeController: VoicePromptHolding {}
