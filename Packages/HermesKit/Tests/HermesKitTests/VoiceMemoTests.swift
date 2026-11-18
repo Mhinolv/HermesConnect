@@ -36,22 +36,97 @@ import Testing
         #expect(capture.release(at: 0.31) == .send)
     }
 
-    @Test(arguments: [(-79.0, false), (-80.0, true), (-200.0, true), (30.0, false)])
-    func slideLeftCancelsAHold(dx: Double, cancels: Bool) {
+    /// Issue #103: past 100 pt the cancel arms, and only the release deletes the clip.
+    @Test(arguments: [(-99.0, false), (-100.0, true), (-200.0, true), (30.0, false)])
+    func slideLeftArmsTheCancelAndReleaseDeletes(dx: Double, cancels: Bool) {
         var capture = VoiceMemoCapture()
         capture.press(at: 0)
         _ = capture.tick(now: 0.5, recorded: 0.5)
-        #expect((capture.drag(dx: dx) == .cancel) == cancels)
-        #expect(capture.phase == (cancels ? .idle : .holding))
+        #expect((capture.drag(dx: dx) == .armCancel) == cancels)
+        #expect(capture.phase == .holding)
+        #expect(capture.cancelArmed == cancels)
+        #expect(capture.release(at: 2) == (cancels ? .cancel : .send))
+        #expect(capture.phase == .idle)
     }
 
-    @Test func slideProgressFollowsTheFinger() {
+    @Test func slideBackKeepsTheRecording() {
         var capture = VoiceMemoCapture()
         capture.press(at: 0)
-        _ = capture.drag(dx: -40)
-        #expect(capture.cancelProgress == 0.5)
-        _ = capture.drag(dx: 20)
-        #expect(capture.cancelProgress == 0)
+        _ = capture.tick(now: 0.5, recorded: 0.5)
+        #expect(capture.drag(dx: -120) == .armCancel)
+        #expect(capture.drag(dx: -130) == nil)
+        #expect(capture.drag(dx: -60) == .disarmCancel)
+        #expect(!capture.cancelArmed)
+        #expect(capture.release(at: 3) == .send)
+    }
+
+    /// Issue #103: a slide up of 60 pt locks. The finger can then lift, and the recording goes on.
+    @Test(arguments: [(-59.0, false), (-60.0, true), (-150.0, true)])
+    func slideUpLocks(dy: Double, locks: Bool) {
+        var capture = VoiceMemoCapture()
+        capture.press(at: 0)
+        _ = capture.tick(now: 0.5, recorded: 0.5)
+        #expect((capture.drag(dx: 0, dy: dy) == .lock) == locks)
+        #expect(capture.phase == (locks ? .recording : .holding))
+        #expect(capture.release(at: 3) == (locks ? nil : .send))
+        if locks {
+            #expect(capture.drag(dx: -200, dy: 0) == nil)
+            #expect(capture.phase == .recording)
+        }
+    }
+
+    @Test func lockProgressFollowsTheFingerAndAnArmedCancelBlocksTheLock() {
+        var capture = VoiceMemoCapture()
+        capture.press(at: 0)
+        _ = capture.drag(dx: 0, dy: -30)
+        #expect(capture.lockProgress == 0.5)
+        _ = capture.drag(dx: -100, dy: -30)
+        #expect(capture.lockProgress == 0)
+        #expect(capture.drag(dx: -100, dy: -80) == nil)
+        #expect(capture.phase == .pressed)
+    }
+
+    @Test func pauseThenAddMoreThenSend() {
+        var capture = VoiceMemoCapture()
+        capture.startTapMode()
+        #expect(capture.resume() == nil)
+        #expect(capture.pause() == .pause)
+        #expect(capture.phase == .paused)
+        #expect(capture.pause() == nil)
+        #expect(capture.resume() == .resume)
+        #expect(capture.phase == .recording)
+        #expect(capture.send() == .send)
+    }
+
+    @Test func pauseKeyWorksOnlyWhenLocked() {
+        var capture = VoiceMemoCapture()
+        capture.press(at: 0)
+        #expect(capture.pause() == nil)
+        #expect(capture.phase == .pressed)
+    }
+
+    /// QA #116: a clip that did not send goes back to the paused bar.
+    @Test func restorePausedOnlyFromIdle() {
+        var capture = VoiceMemoCapture()
+        capture.startTapMode()
+        let whileRecording = capture.restorePaused()
+        #expect(!whileRecording)
+        #expect(capture.send() == .send)
+        let afterSend = capture.restorePaused()
+        #expect(afterSend)
+        #expect(capture.phase == .paused)
+        #expect(capture.tick(now: 0, recorded: 600).isEmpty)
+        #expect(capture.send() == .send)
+    }
+
+    /// Main decision 2026-11-17: at 10:00 the recording stops and the memo sends, also after Add More.
+    @Test func addMoreStillSendsAtTheLimit() {
+        var capture = VoiceMemoCapture()
+        capture.startTapMode()
+        _ = capture.pause()
+        _ = capture.resume()
+        #expect(capture.tick(now: 0, recorded: 600) == [.send])
+        #expect(capture.phase == .idle)
     }
 
     @Test func slideInTapModeDoesNothing() {

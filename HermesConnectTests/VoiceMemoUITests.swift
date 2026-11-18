@@ -43,28 +43,43 @@ final class FakeVoiceRecorder: VoiceRecording {
     func level() -> Float { decibels }
 }
 
+/// Issue #103: joins the parts of a memo with no audio work. It answers at once.
+@MainActor
+final class FakeVoiceClipJoiner: VoiceClipJoining {
+    var succeeds = true
+    private(set) var joins: [(parts: [URL], target: URL)] = []
+
+    func join(_ parts: [URL], into url: URL, completion: @escaping @MainActor (Bool) -> Void) {
+        joins.append((parts, url))
+        completion(succeeds)
+    }
+}
+
 @MainActor
 private final class VoiceHarness {
     let recorder = FakeVoiceRecorder()
+    let joiner = FakeVoiceClipJoiner()
     var now: TimeInterval = 100
     var sent: [VoiceMemo] = []
     var haptics: [VoiceHaptic] = []
     var announcements: [String] = []
     var denied = 0
     var failed = 0
+    var joinFailed = 0
     var voiceOver = false
     let controller: VoiceMemoController
 
     init() {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("VoiceMemoUITests")
         var clock: () -> TimeInterval = { 0 }
-        controller = VoiceMemoController(recorder: recorder, folder: folder, clock: { clock() })
+        controller = VoiceMemoController(recorder: recorder, joiner: joiner, folder: folder, clock: { clock() })
         clock = { [unowned self] in self.now }
         controller.onSend = { [unowned self] in self.sent.append($0) }
         controller.onHaptic = { [unowned self] in self.haptics.append($0) }
         controller.onAnnounce = { [unowned self] in self.announcements.append($0) }
         controller.onAccessDenied = { [unowned self] in self.denied += 1 }
         controller.onRecordFailed = { [unowned self] in self.failed += 1 }
+        controller.onJoinFailed = { [unowned self] in self.joinFailed += 1 }
         controller.isVoiceOverRunning = { [unowned self] in self.voiceOver }
     }
 }
@@ -106,14 +121,18 @@ private final class VoiceHarness {
         #expect(h.sent.map(\.duration) == [3])
     }
 
-    @Test func slideLeftCancelsAndDeletesTheClip() {
+    /// Issue #103: past 100 pt the cancel arms with a warning haptic. The release deletes the clip.
+    @Test func slideLeftPastTheThresholdThenReleaseDeletesTheClip() {
         let h = VoiceHarness()
         h.controller.press()
         h.now += 0.5
         h.controller.tick()
         h.controller.drag(dx: -40)
+        h.controller.drag(dx: -101)
         #expect(h.controller.isActive)
-        h.controller.drag(dx: -81)
+        #expect(h.controller.capture.cancelArmed)
+        #expect(h.haptics == [.start, .warning])
+        h.controller.release()
         #expect(!h.controller.isActive)
         #expect(h.recorder.discards == 1)
         #expect(h.sent.isEmpty)
@@ -121,6 +140,192 @@ private final class VoiceHarness {
         // A late release does nothing.
         h.controller.release()
         #expect(h.sent.isEmpty)
+    }
+
+    /// Issue #103: a slide up of 60 pt locks with the `.rigid` haptic. The finger lifts and it records on.
+    @Test func slideUpLocksThenTheKeysSend() throws {
+        let h = VoiceHarness()
+        h.controller.press()
+        h.now += 0.5
+        h.controller.tick()
+        h.controller.drag(dx: -5, dy: -61)
+        #expect(h.controller.capture.phase == .recording)
+        #expect(h.haptics == [.start, .lock])
+        h.controller.release()
+        #expect(h.controller.isActive)
+        h.recorder.currentTime = 7
+        h.controller.tick()
+        h.controller.send()
+        #expect(try #require(h.sent.first).duration == 7)
+        #expect(h.haptics.last == .sent)
+    }
+
+    /// Issue #103: Pause keeps the clip as a playable file. Add More records a new part. Send joins the parts.
+    @Test func pausePlaysThenAddMoreThenSendJoinsTheParts() throws {
+        let h = VoiceHarness()
+        h.controller.startTapMode()
+        h.recorder.currentTime = 5
+        h.controller.tick()
+        h.controller.pause()
+        #expect(h.controller.capture.phase == .paused)
+        #expect(h.recorder.stops == 1)
+        #expect(h.controller.elapsed == 5)
+        let first = try #require(h.recorder.started.first)
+        #expect(h.controller.reviewURL == first)
+
+        h.controller.resume()
+        #expect(h.controller.capture.phase == .recording)
+        #expect(h.recorder.started.count == 2)
+        #expect(h.controller.reviewURL == nil)
+        h.recorder.currentTime = 3
+        h.controller.tick()
+        #expect(h.controller.elapsed == 8)
+        h.controller.pause()
+        // Two parts join into one file, so the paused clip plays as one.
+        #expect(h.joiner.joins.count == 1)
+        #expect(h.joiner.joins.first?.parts == h.recorder.started)
+        let review = try #require(h.controller.reviewURL)
+        #expect(review == h.joiner.joins.first?.target)
+
+        h.controller.send()
+        let memo = try #require(h.sent.first)
+        #expect(memo.duration == 8)
+        #expect(memo.fileURL == review)
+        #expect(!h.controller.isActive)
+    }
+
+    @Test func sendWhileRecordingTheSecondPartJoinsThePartsFirst() throws {
+        let h = VoiceHarness()
+        h.controller.startTapMode()
+        h.recorder.currentTime = 4
+        h.controller.tick()
+        h.controller.pause()
+        h.controller.resume()
+        h.recorder.currentTime = 2
+        h.controller.tick()
+        h.controller.send()
+        let memo = try #require(h.sent.first)
+        #expect(memo.duration == 6)
+        #expect(h.joiner.joins.count == 1)
+        #expect(memo.fileURL == h.joiner.joins.first?.target)
+    }
+
+    /// Writes a small file at each part the fake recorder started, so the test can see which files stay.
+    private func writeParts(_ h: VoiceHarness) throws {
+        for url in h.recorder.started where !FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data([1, 2, 3]).write(to: url)
+        }
+    }
+
+    /// QA #116 defect 1: a failed join keeps every part and goes back to the paused bar. Send tries again.
+    @Test func failedJoinKeepsTheRecordingAndSendTriesAgain() throws {
+        let h = VoiceHarness()
+        h.controller.startTapMode()
+        h.recorder.currentTime = 4
+        h.controller.tick()
+        h.controller.pause()
+        h.controller.resume()
+        h.recorder.currentTime = 3
+        h.controller.tick()
+        try writeParts(h)
+        let parts = h.recorder.started
+        h.joiner.succeeds = false
+        h.controller.send()
+        #expect(h.sent.isEmpty)
+        #expect(h.controller.capture.phase == .paused)
+        #expect(h.controller.elapsed == 7)
+        #expect(parts.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        #expect(h.joinFailed == 1)
+        #expect(h.failed == 0)
+        // A new recording cannot replace the kept clip.
+        #expect(!h.controller.startTapMode())
+
+        h.joiner.succeeds = true
+        h.controller.send()
+        let memo = try #require(h.sent.first)
+        #expect(memo.duration == 7)
+        #expect(h.joiner.joins.last?.parts == parts)
+        #expect(memo.fileURL == h.joiner.joins.last?.target)
+        #expect(!h.controller.isActive)
+        #expect(parts.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+    }
+
+    /// QA #116 defect 1: the 10:00 send uses the same path. A failed join keeps the recording.
+    @Test func failedJoinAtTenMinutesKeepsTheRecording() throws {
+        let h = VoiceHarness()
+        h.controller.startTapMode()
+        h.recorder.currentTime = 400
+        h.controller.tick()
+        h.controller.pause()
+        h.controller.resume()
+        try writeParts(h)
+        h.joiner.succeeds = false
+        h.recorder.currentTime = 200
+        h.controller.tick()
+        #expect(h.sent.isEmpty)
+        #expect(h.controller.capture.phase == .paused)
+        #expect(h.controller.elapsed == 600)
+        #expect(h.recorder.started.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        #expect(h.joinFailed == 1)
+    }
+
+    /// QA #116 defect 3: when the pause join fails, Play joins the parts again. A second failure shows the alert.
+    @Test func playAfterAFailedPauseJoinTriesAgain() throws {
+        let h = VoiceHarness()
+        h.controller.startTapMode()
+        h.controller.pause()
+        h.controller.resume()
+        h.joiner.succeeds = false
+        h.controller.pause()
+        #expect(h.controller.reviewURL == nil)
+        #expect(h.joinFailed == 0)
+        h.controller.prepareReview()
+        #expect(h.joinFailed == 1)
+        #expect(h.controller.reviewURL == nil)
+        h.joiner.succeeds = true
+        h.controller.prepareReview()
+        #expect(h.controller.reviewURL == h.joiner.joins.last?.target)
+        #expect(h.joinFailed == 1)
+    }
+
+    @Test func deleteWhilePausedDeletesTheClip() throws {
+        let h = VoiceHarness()
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("VoiceMemoUITests")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        h.controller.startTapMode()
+        h.controller.pause()
+        let part = try #require(h.controller.reviewURL)
+        try Data([1, 2, 3]).write(to: part)
+        h.controller.cancel()
+        #expect(!FileManager.default.fileExists(atPath: part.path))
+        #expect(h.recorder.discards == 0)
+        #expect(h.sent.isEmpty)
+        #expect(h.haptics.last == .cancelled)
+    }
+
+    @Test func addMoreThatFailsToStartStaysPaused() {
+        let h = VoiceHarness()
+        h.controller.startTapMode()
+        h.controller.pause()
+        h.recorder.failStart = true
+        h.controller.resume()
+        #expect(h.controller.capture.phase == .paused)
+        #expect(h.failed == 1)
+    }
+
+    /// Main decision 2026-11-17: at 10:00 the recording stops and the memo sends, also after Add More.
+    @Test func tenMinutesAcrossPartsSends() throws {
+        let h = VoiceHarness()
+        h.controller.startTapMode()
+        h.recorder.currentTime = 400
+        h.controller.tick()
+        h.controller.pause()
+        h.controller.resume()
+        h.recorder.currentTime = 200
+        h.controller.tick()
+        #expect(try #require(h.sent.first).duration == 600)
+        #expect(!h.controller.isActive)
     }
 
     @Test func microphoneOffShowsTheAlertAndDoesNotRecord() {
@@ -156,7 +361,8 @@ private final class VoiceHarness {
         h.recorder.currentTime = 30
         h.recorder.onInterruption?()
         #expect(h.controller.capture.phase == .paused)
-        #expect(h.recorder.pauses == 1)
+        // Issue #103: the part is finished, so the owner can play it.
+        #expect(h.recorder.stops == 1)
         #expect(h.controller.elapsed == 30)
         h.controller.send()
         #expect(try #require(h.sent.first).duration == 30)
@@ -214,7 +420,7 @@ private final class VoiceHarness {
         let (controller, model, recorder) = makeController()
         #expect(controller.recordingBarMode == nil)
         controller.voice.startTapMode()
-        #expect(controller.recordingBarMode == .tap)
+        #expect(controller.recordingBarMode == .locked)
         recorder.currentTime = 4
         controller.voice.interrupt()
         #expect(controller.recordingBarMode == .paused)

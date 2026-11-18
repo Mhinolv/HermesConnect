@@ -10,6 +10,10 @@ enum ChatVoiceLayout {
     static let replyLines = 2
     /// Space between the bubble and the transcript, and under the transcript.
     static let transcriptPadding = UIEdgeInsets(top: 3, left: 6, bottom: 3, right: 6)
+    /// Issue #103: the transcript card of a memo. 4 pt above and under the card, 8 pt inside it, 12 pt at the sides.
+    static let cardPadding = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+    /// Issue #103: the room for the three pulse bars before "Transcribing…".
+    static let pulseWidth: CGFloat = 16
 
     static func durationFont(_ traits: UITraitCollection) -> UIFont {
         let base = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traits)
@@ -37,13 +41,24 @@ enum ChatVoiceLayout {
                 .font: caption, .foregroundColor: UIColor.secondaryLabel,
             ])
         case .done(let text):
+            // Issue #103: the transcript card uses `.subheadline`.
             return NSAttributedString(string: text, attributes: [
-                .font: UIFont.preferredFont(forTextStyle: .footnote, compatibleWith: traits),
-                .foregroundColor: UIColor.secondaryLabel,
+                .font: UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traits),
+                .foregroundColor: UIColor.label,
             ])
         case .empty:
             return nil
         }
+    }
+
+    /// The padding of the transcript area of a memo: the card for a transcript, else the plain line.
+    static func padding(for voice: VoiceMemo) -> UIEdgeInsets {
+        if case .done = voice.transcript { return cardPadding }
+        if voice.transcript == .pending {
+            return UIEdgeInsets(top: transcriptPadding.top, left: transcriptPadding.left + pulseWidth,
+                                bottom: transcriptPadding.bottom, right: transcriptPadding.right)
+        }
+        return transcriptPadding
     }
 
     /// Issue #10: the line under a voice reply while the audio is on its way.
@@ -72,23 +87,25 @@ enum ChatVoiceLayout {
     /// `lines * lineHeight` was a little short, and the label dropped the last line.
     @MainActor
     static func transcriptHeight(_ text: NSAttributedString?, width: CGFloat, expanded: Bool,
-                                 lines: Int = collapsedLines) -> CGFloat {
+                                 lines: Int = collapsedLines, padding: UIEdgeInsets = transcriptPadding) -> CGFloat {
         guard let text, text.length > 0, width > 0 else { return 0 }
-        let inner = width - transcriptPadding.left - transcriptPadding.right
+        let inner = width - padding.left - padding.right
         sizingLabel.attributedText = text
         sizingLabel.lineBreakMode = .byTruncatingTail
         sizingLabel.numberOfLines = expanded ? 0 : lines
         let bounds = CGRect(x: 0, y: 0, width: inner, height: .greatestFiniteMagnitude)
         let shown = sizingLabel.textRect(forBounds: bounds, limitedToNumberOfLines: sizingLabel.numberOfLines).height
-        return (shown + transcriptPadding.top + transcriptPadding.bottom).rounded(.up)
+        return (shown + padding.top + padding.bottom).rounded(.up)
     }
 
     @MainActor private static let sizingLabel = UILabel()
 
     /// `true` when the transcript has more lines than the collapsed view shows.
     @MainActor
-    static func isTruncated(_ text: NSAttributedString?, width: CGFloat) -> Bool {
-        transcriptHeight(text, width: width, expanded: true) > transcriptHeight(text, width: width, expanded: false)
+    static func isTruncated(_ text: NSAttributedString?, width: CGFloat,
+                            padding: UIEdgeInsets = transcriptPadding) -> Bool {
+        transcriptHeight(text, width: width, expanded: true, padding: padding)
+            > transcriptHeight(text, width: width, expanded: false, padding: padding)
     }
 }
 
@@ -109,6 +126,13 @@ final class ChatVoiceCell: MessageContentCell {
     private lazy var scrub = UIPanGestureRecognizer(target: self, action: #selector(scrubbed(_:)))
     private let scrubDelegate = ScrubDelegate()
     let transcriptLabel = UILabel()
+    /// Issue #103: the soft card behind the transcript of a memo.
+    let transcriptCard = UIView()
+    /// Issue #103: three small bars that pulse beside "Transcribing…".
+    let transcribingBars = TranscribingBarsView()
+    private var transcriptPadding = ChatVoiceLayout.transcriptPadding
+    /// Issue #103: a memo in the player shows its played bars in full color.
+    private var tracksProgress = false
     /// The area of the bottom label from the layout: the transcript, then the footnote.
     private var bottomRegion: CGRect = .zero
     private var transcriptHeight: CGFloat = 0
@@ -130,6 +154,13 @@ final class ChatVoiceCell: MessageContentCell {
         durationLabel.adjustsFontForContentSizeCategory = false
         durationLabel.textAlignment = .right
         transcriptLabel.lineBreakMode = .byTruncatingTail
+        transcriptCard.backgroundColor = .secondarySystemFill
+        transcriptCard.layer.cornerRadius = 14
+        transcriptCard.layer.cornerCurve = .continuous
+        transcriptCard.isHidden = true
+        transcribingBars.isHidden = true
+        contentView.addSubview(transcriptCard)
+        contentView.addSubview(transcribingBars)
         messageContainerView.addSubview(playIcon)
         messageContainerView.addSubview(waveform)
         messageContainerView.addSubview(durationLabel)
@@ -143,17 +174,25 @@ final class ChatVoiceCell: MessageContentCell {
         onSeek = nil
         isReply = false
         seeks = false
+        tracksProgress = false
         spinner.stopAnimating()
         waveform.isHidden = false
         waveform.progress = nil
         transcriptLabel.attributedText = nil
         transcriptHeight = 0
+        transcriptPadding = ChatVoiceLayout.transcriptPadding
+        transcriptCard.isHidden = true
+        transcribingBars.setActive(false)
     }
 
-    func configure(voice: VoiceMemo, outgoing: Bool, playing: Bool, transcript: NSAttributedString?,
-                   transcriptHeight: CGFloat, expanded: Bool, traits: UITraitCollection) {
+    /// `time` is the play position when the player has this memo loaded, else `nil`.
+    func configure(voice: VoiceMemo, outgoing: Bool, playing: Bool, time: TimeInterval? = nil,
+                   transcript: NSAttributedString?, transcriptHeight: CGFloat, expanded: Bool,
+                   traits: UITraitCollection) {
         isReply = false
         seeks = false
+        tracksProgress = time != nil
+        replyDuration = voice.duration
         waveform.isHidden = false
         waveform.progress = nil
         spinner.stopAnimating()
@@ -162,15 +201,23 @@ final class ChatVoiceCell: MessageContentCell {
         let symbol = UIImage.SymbolConfiguration(pointSize: 26, weight: .regular)
         playIcon.image = UIImage(systemName: playing ? "pause.circle.fill" : "play.circle.fill", withConfiguration: symbol)
         playIcon.tintColor = tint
-        waveform.barColor = tint.withAlphaComponent(0.85)
+        // Issue #103: while the memo plays, the played bars are full color and the others 50 %.
+        waveform.barColor = tracksProgress ? tint.withAlphaComponent(0.5) : tint.withAlphaComponent(0.85)
+        waveform.playedColor = tint
         waveform.levels = voice.waveform
         waveform.barCount = max(1, voice.waveform.count)
+        if let time { waveform.progress = Self.fraction(time: time, duration: voice.duration) }
         durationLabel.font = ChatVoiceLayout.durationFont(traits)
         durationLabel.textColor = tint
         durationLabel.text = VoiceMemoFormat.duration(voice.duration)
         transcriptLabel.attributedText = transcript
         transcriptLabel.numberOfLines = expanded ? 0 : ChatVoiceLayout.collapsedLines
         self.transcriptHeight = transcriptHeight
+        transcriptPadding = ChatVoiceLayout.padding(for: voice)
+        let card: Bool
+        if case .done = voice.transcript { card = transcript != nil } else { card = false }
+        transcriptCard.isHidden = !card
+        transcribingBars.setActive(voice.transcript == .pending && transcript != nil)
         layoutTranscript()
         setNeedsLayout()
     }
@@ -222,7 +269,7 @@ final class ChatVoiceCell: MessageContentCell {
     /// plays, with no reload of the row. A drag in progress keeps its place. Issue #49: the label keeps the
     /// full length, so the owner never reads the play time as the length.
     func setProgress(time: TimeInterval) {
-        guard seeks, scrub.state != .changed, scrub.state != .began else { return }
+        guard seeks || tracksProgress, scrub.state != .changed, scrub.state != .began else { return }
         waveform.progress = Self.fraction(time: time, duration: replyDuration)
     }
 
@@ -270,11 +317,17 @@ final class ChatVoiceCell: MessageContentCell {
     /// The transcript takes the top of the bottom label area, so the footnote stays under it.
     private func layoutTranscript() {
         let height = min(transcriptHeight, bottomRegion.height)
-        let pad = ChatVoiceLayout.transcriptPadding
+        let pad = transcriptPadding
         let bubble = messageContainerView.frame
         transcriptLabel.frame = CGRect(x: bubble.minX + pad.left, y: bottomRegion.minY + pad.top,
                                        width: max(0, bubble.width - pad.left - pad.right),
                                        height: max(0, height - pad.top - pad.bottom))
+        transcriptCard.frame = CGRect(x: bubble.minX, y: bottomRegion.minY + 4, width: bubble.width,
+                                      height: max(0, height - 8))
+        let lineHeight = transcriptLabel.font.lineHeight
+        transcribingBars.frame = CGRect(x: transcriptLabel.frame.minX - ChatVoiceLayout.pulseWidth,
+                                        y: transcriptLabel.frame.minY + (min(lineHeight, transcriptLabel.frame.height)
+                                            - 10) / 2, width: 12, height: 10)
         messageBottomLabel.frame = CGRect(x: bottomRegion.minX, y: bottomRegion.minY + height,
                                           width: bottomRegion.width, height: bottomRegion.height - height)
     }
@@ -346,5 +399,61 @@ private final class ScrubDelegate: NSObject, UIGestureRecognizerDelegate {
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         shouldBegin(gestureRecognizer)
+    }
+}
+
+/// Issue #103: three small bars that pulse beside "Transcribing…". Reduce Motion: static bars.
+final class TranscribingBarsView: UIView {
+    private let bars = (0..<3).map { _ in UIView() }
+    private(set) var isActive = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        isAccessibilityElement = false
+        for bar in bars {
+            bar.backgroundColor = .secondaryLabel
+            bar.layer.cornerRadius = 1
+            addSubview(bar)
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func setActive(_ active: Bool) {
+        isActive = active
+        isHidden = !active
+        animate()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let heights: [CGFloat] = [0.6, 1, 0.45]
+        for (index, bar) in bars.enumerated() {
+            let height = bounds.height * heights[index]
+            bar.bounds = CGRect(x: 0, y: 0, width: 2, height: height)
+            bar.center = CGPoint(x: 1 + CGFloat(index) * 5, y: bounds.midY)
+        }
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        animate()
+    }
+
+    private func animate() {
+        for (index, bar) in bars.enumerated() {
+            bar.layer.removeAnimation(forKey: "pulse")
+            guard isActive, window != nil, !UIAccessibility.isReduceMotionEnabled else { continue }
+            let pulse = CABasicAnimation(keyPath: "transform.scale.y")
+            pulse.fromValue = 0.4
+            pulse.toValue = 1
+            pulse.duration = 0.45
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            pulse.beginTime = CACurrentMediaTime() + Double(index) * 0.15
+            bar.layer.add(pulse, forKey: "pulse")
+        }
     }
 }

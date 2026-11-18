@@ -17,6 +17,8 @@ final class ChatViewController: MessagesViewController {
     private lazy var micPress = UILongPressGestureRecognizer(target: self, action: #selector(micPressChanged(_:)))
     private let micPressDelegate = MicPressDelegate()
     private var micPressStart: CGPoint = .zero
+    /// Issue #103: the paused clip that the player may play. It stops when the recording ends.
+    private var lastReviewURL: URL?
     private var voiceCalculator: ChatVoiceSizeCalculator?
     /// Issue #67: the size of a command card.
     private var commandCalculator: ChatVoiceSizeCalculator?
@@ -96,10 +98,11 @@ final class ChatViewController: MessagesViewController {
     private let noticePill = ChatNoticePill()
 
     init(model: ChatViewModel, recorder: any VoiceRecording = AVVoiceRecorder(),
+         joiner: any VoiceClipJoining = AVVoiceClipJoiner(),
          voiceFolder: URL = VoiceMemoFiles.directory(), readOnly: Bool = false) {
         self.model = model
         self.readOnly = readOnly
-        self.voice = VoiceMemoController(recorder: recorder, folder: voiceFolder)
+        self.voice = VoiceMemoController(recorder: recorder, joiner: joiner, folder: voiceFolder)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -354,8 +357,26 @@ final class ChatViewController: MessagesViewController {
         micPress.delegate = micPressDelegate
         messageInputBar.addGestureRecognizer(micPress)
 
-        recordingBar.onCancel = { [weak self] in self?.voice.cancel() }
-        recordingBar.onSend = { [weak self] in self?.voice.send() }
+        // Issue #103: the locked and paused keys. The paused clip plays in the shared player.
+        recordingBar.onDelete = { [weak self] in
+            self?.player.stop()
+            self?.voice.cancel()
+        }
+        recordingBar.onSend = { [weak self] in
+            self?.player.stop()
+            self?.voice.send()
+        }
+        recordingBar.onPause = { [weak self] in self?.voice.pause() }
+        recordingBar.onResume = { [weak self] in
+            self?.player.stop()
+            self?.voice.resume()
+        }
+        recordingBar.onPlay = { [weak self] in
+            guard let self else { return }
+            // QA #116: the parts did not join yet. Play joins them again, or shows why it cannot.
+            guard let url = self.voice.reviewURL else { return self.voice.prepareReview() }
+            self.player.toggle(url)
+        }
         voice.onChange = { [weak self] in self?.updateRecordingBar() }
         voice.onSend = { [weak self] memo in
             self?.pinnedToBottom = true
@@ -363,30 +384,49 @@ final class ChatViewController: MessagesViewController {
         }
         voice.onAccessDenied = { [weak self] in self?.showMicrophoneOff() }
         voice.onRecordFailed = { [weak self] in self?.showRecordFailed() }
-        player.onChange = { [weak self] in self?.reloadVoiceRows() }
-        player.onProgress = { [weak self] url, time, _ in self?.showProgress(url: url, time: time) }
+        voice.onJoinFailed = { [weak self] in self?.showJoinFailed() }
+        player.onChange = { [weak self] in
+            self?.reloadVoiceRows()
+            self?.updateReviewPlayback(time: nil)
+        }
+        player.onProgress = { [weak self] url, time, _ in
+            self?.showProgress(url: url, time: time)
+            if url == self?.voice.reviewURL { self?.updateReviewPlayback(time: time) }
+        }
         player.onFailure = { [weak self] url in self?.playbackFailed(url: url) }
         updateSendButton()
     }
 
     /// The 64 pt hit area of the 44 pt mic (driving use). VoiceOver uses the button activation instead.
     private func micPressShouldReceive(_ touch: UITouch) -> Bool {
+        micPressShouldReceive(at: touch.location(in: messageInputBar))
+    }
+
+    /// `point` is in the input bar. Tests call it with the points of a laid-out screen.
+    func micPressShouldReceive(at point: CGPoint) -> Bool {
         guard showsMic, !voice.isActive, !UIAccessibility.isVoiceOverRunning, micButton.window != nil else {
             return false
         }
         let area = micButton.convert(micButton.bounds, to: messageInputBar).insetBy(dx: -10, dy: -10)
-        return area.contains(touch.location(in: messageInputBar))
+        return area.contains(point)
     }
 
     @objc private func micPressChanged(_ gesture: UILongPressGestureRecognizer) {
-        let point = gesture.location(in: view)
-        switch gesture.state {
+        handleMicPress(gesture.state, at: gesture.location(in: view))
+    }
+
+    /// The recognizer that takes the mic touches (tests).
+    var micPressRecognizer: UILongPressGestureRecognizer { micPress }
+
+    /// One step of the mic press. `point` is in the view, as the recognizer gives it. Tests drive it with points.
+    func handleMicPress(_ state: UIGestureRecognizer.State, at point: CGPoint) {
+        switch state {
         case .began:
             micPressStart = point
             player.stop()
             voice.press()
         case .changed:
-            voice.drag(dx: Double(point.x - micPressStart.x))
+            voice.drag(dx: Double(point.x - micPressStart.x), dy: Double(point.y - micPressStart.y))
         case .ended:
             voice.release()
         case .cancelled, .failed:
@@ -401,6 +441,8 @@ final class ChatViewController: MessagesViewController {
         let bar = messageInputBar
         let capture = voice.capture
         guard capture.isActive else {
+            if let url = player.playingURL, url == lastReviewURL { player.stop() }
+            lastReviewURL = nil
             if bar.middleContentView === recordingBar {
                 attachments.setPlusShown(true)
                 bar.setMiddleContentView(bar.inputTextView, animated: false)
@@ -420,11 +462,28 @@ final class ChatViewController: MessagesViewController {
             UIAccessibility.post(notification: .layoutChanged, argument: recordingBar.sendButton)
         }
         let mode: VoiceRecordingBar.Mode = switch capture.phase {
-        case .pressed, .holding: .hold(cancelProgress: capture.cancelProgress)
+        case .pressed, .holding:
+            capture.cancelArmed ? .cancelArmed
+                : .hold(cancelProgress: capture.cancelProgress, lockProgress: capture.lockProgress)
         case .paused: .paused
-        case .recording, .idle: .tap
+        case .recording, .idle: .locked
         }
+        let resized = recordingBar.height(for: mode) != recordingBar.height(for: recordingBar.mode)
+        let wasLocked = recordingBar.mode == .locked
         recordingBar.update(mode: mode, elapsed: voice.elapsed, levels: voice.levels)
+        lastReviewURL = voice.reviewURL ?? lastReviewURL
+        if resized { bar.invalidateIntrinsicContentSize() }
+        // VoiceOver goes to the keys when a hold locks.
+        if mode == .locked, !wasLocked, UIAccessibility.isVoiceOverRunning {
+            UIAccessibility.post(notification: .layoutChanged, argument: recordingBar.sendButton)
+        }
+    }
+
+    /// Issue #103: the play position and the Play key of the paused clip.
+    private func updateReviewPlayback(time: TimeInterval?) {
+        guard recordingBar.mode == .paused, let url = voice.reviewURL else { return }
+        let loaded = player.playingURL == url
+        recordingBar.setPlayback(time: loaded ? (time ?? player.currentTime) : 0, playing: player.isPlaying(url))
     }
 
     /// The recording bar (tests).
@@ -448,6 +507,15 @@ final class ChatViewController: MessagesViewController {
 
     private func showRecordFailed() {
         let alert = UIAlertController(title: "Can't Record", message: "Another app may use the microphone. Try again.",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+
+    /// QA #116: the parts of a memo did not join. The recording stays in the paused bar.
+    private func showJoinFailed() {
+        let alert = UIAlertController(title: "Can't Prepare Voice Memo",
+                                      message: "Your recording is kept. Tap Send or Play to try again.",
                                       preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
@@ -560,8 +628,9 @@ final class ChatViewController: MessagesViewController {
         let isFile = (message as? ChatBubble)?.part.receivedFile != nil
         let lines = row.message.voice == nil && !isFile ? ChatVoiceLayout.replyLines : ChatVoiceLayout.collapsedLines
         let key = isFile ? message.messageId : row.id
+        let padding = row.message.voice.map(ChatVoiceLayout.padding(for:)) ?? ChatVoiceLayout.transcriptPadding
         let height = ChatVoiceLayout.transcriptHeight(text, width: width, expanded: expandedTranscripts.contains(key),
-                                                      lines: lines)
+                                                      lines: lines, padding: padding)
         return (text, height, width)
     }
 
@@ -1072,7 +1141,7 @@ final class ChatViewController: MessagesViewController {
             })
             if memo.transcript.text != nil, !expandedTranscripts.contains(id),
                let info = transcript(for: row, message: bubbles[indexPath.section], at: indexPath),
-               ChatVoiceLayout.isTruncated(info.text, width: info.width) {
+               ChatVoiceLayout.isTruncated(info.text, width: info.width, padding: ChatVoiceLayout.padding(for: memo)) {
                 actions.append(UIAccessibilityCustomAction(name: "Show Full Transcript") { [weak self] _ in
                     self?.toggleTranscript(id: id)
                     return true
@@ -1463,7 +1532,10 @@ extension ChatViewController: MessagesDataSource {
         if ChatCaptionRow.uses(footnote) || footnote == .queued {
             return ChatCaptionRow.text(footnote, font: ChatLabelStyle.font(.caption2, traitCollection))
         }
-        return NSAttributedString(string: footnote.text, attributes: [
+        // Issue #103: a memo with a transcript names it in its footer: "Transcript · Delivered".
+        var text = footnote.text
+        if case .done = row(for: message)?.message.voice?.transcript, !footnote.isError { text = "Transcript · " + text }
+        return NSAttributedString(string: text, attributes: [
             .font: ChatLabelStyle.font(.caption2, traitCollection),
             .foregroundColor: footnote.isError ? UIColor.systemRed : UIColor.secondaryLabel,
         ])
@@ -1543,8 +1615,9 @@ extension ChatViewController: MessagesDataSource {
             return cell
         }
         guard let memo = row.message.voice else { return cell }
+        let loaded = player.playingURL == memo.fileURL
         cell.configure(voice: memo, outgoing: row.message.role == .user, playing: player.isPlaying(memo.fileURL),
-                       transcript: info.text, transcriptHeight: info.height,
+                       time: loaded ? player.currentTime : nil, transcript: info.text, transcriptHeight: info.height,
                        expanded: expandedTranscripts.contains(id), traits: traitCollection)
         cell.onPlay = { [weak self] in self?.togglePlay(id: id) }
         cell.onTranscriptTap = { [weak self] in self?.toggleTranscript(id: id) }
