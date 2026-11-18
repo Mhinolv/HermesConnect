@@ -46,8 +46,6 @@ struct ChatScreen: View {
                                     maxWidth: maxWidth)
             })
             .modifier(OptionalSessionActionDialogs(state: actions, model: sessions))
-            // Issue #98: the Live voice engine with a plain view. The final Voice UI comes from #101.
-            .modifier(LiveModeEntry(chat: model, service: link.map { $0 as any LiveModeService } ?? LiveModeDemo.service))
             .onAppear { model.startEvents() }
             // Issue #15: ask for notification permission after the first reply, not at first launch.
             .onChange(of: model.completedReplyId) { _, id in

@@ -6,19 +6,15 @@ import UIKit
 @testable import HermesConnect
 
 // Issue #107: a long chat title ran under the back button and the Live Voice button.
-// The tests push the chat title and the Live entry, as `ChatScreen` adds them, and measure the bar in a window.
-
-private struct NoLive: LiveModeService {
-    func voiceLiveStatus() async throws -> VoiceLiveStatus? { nil }
-    func createVoiceLiveSession(offerSDP _: String, history _: [VoiceLiveHistoryItem]) async throws
-        -> VoiceLiveSessionAnswer { VoiceLiveSessionAnswer(sessionId: "s", sdp: "answer") }
-}
+// The tests push the chat title, as `ChatScreen` adds it, and measure the bar in a window.
+// Issue #102 removed the Live Voice button. The title must still stay inside one bar button from each edge.
 
 /// The frames in the navigation bar, in window points.
 private struct TitleBar {
     /// All the views of the principal title, as one frame.
     let title: CGRect
     let back: CGRect
+    /// The space of one bar button at the trailing edge (the mirror of the back button).
     let live: CGRect
     let image: UIImage
 }
@@ -63,7 +59,6 @@ private struct TitleBar {
     }
 
     private func render(_ title: String, style: UIUserInterfaceStyle, size: UIContentSizeCategory) throws -> TitleBar {
-        let chat = ChatViewModel(transport: OfflineChatTransport())
         let view = NavigationStack(path: .constant([1])) {
             Text("Chats").navigationTitle("Chats")
                 .navigationDestination(for: Int.self) { _ in
@@ -72,7 +67,6 @@ private struct TitleBar {
                         .modifier(ChatTitleBar { maxWidth in
                             ChatNavigationTitle(title: title, onRename: {}, maxWidth: maxWidth)
                         })
-                        .modifier(LiveModeEntry(chat: chat, service: NoLive()))
                 }
         }
         .environment(AppModel.preview(setUp: true))
@@ -96,8 +90,7 @@ private struct TitleBar {
             .map { $0.convert($0.bounds, to: window) }
             .sorted { $0.minX < $1.minX }
         let back = try #require(buttons.first, "no back button")
-        let live = try #require(buttons.last, "no Live Voice button")
-        try #require(buttons.count >= 2 && live.minX > back.maxX, "bar buttons: \(buttons)")
+        let live = CGRect(x: width - back.maxX, y: back.minY, width: back.maxX, height: back.height)
         let image = UIGraphicsImageRenderer(bounds: CGRect(x: 0, y: 0, width: width, height: navBar.frame.maxY + 120))
             .image { _ in window.drawHierarchy(in: window.bounds, afterScreenUpdates: true) }
         return TitleBar(title: title, back: back, live: live, image: image)

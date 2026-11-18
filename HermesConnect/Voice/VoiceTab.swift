@@ -4,18 +4,42 @@ import HermesKit
 import SwiftUI
 
 /// Issue #101: the Voice tab. It shows the #96 hands-free loop with the Quiet Ring.
+/// Issue #102: it also shows the #98 live mode (the Live segment of the picker).
 struct VoiceTab: View {
-    let model: VoiceTabModel
+    @Bindable var model: VoiceTabModel
     var link: LiveChatTransport?
     /// Issue #83: the unread chats of the active server, for the server menu.
     var activeUnreadChats = 0
     var onSettings: () -> Void = {}
     @State private var choosing = false
+    @Environment(AppModel.self) private var app: AppModel?
+
+    /// A new server or a new connection checks `voice-live/status` again.
+    private var statusKey: String {
+        "\(app?.profile?.id.uuidString ?? "none") \(app?.hermesEndpoint != nil)"
+    }
 
     var body: some View {
         NavigationStack {
-            VoiceScreen(state: VoiceScreenState(model: model), link: link, activeUnreadChats: activeUnreadChats,
-                        actions: actions)
+            VoiceScreen(state: VoiceScreenState(model: model, server: app?.profile?.name), link: link,
+                        activeUnreadChats: activeUnreadChats, actions: actions)
+        }
+        .task(id: statusKey) { await model.refreshLiveStatus() }
+        // Issue #102: the engine also ends by itself (idle, background, a phone call, the server).
+        .onChange(of: model.isLiveRunning) { _, running in if !running { model.liveDidStop() } }
+        .onChange(of: model.liveController?.phase) { _, phase in
+            if let phase, let text = VoiceTabDisplay.liveAnnouncement(phase) {
+                AccessibilityNotification.Announcement(text).post()
+            }
+        }
+        .onChange(of: model.liveToast) { _, toast in
+            if let toast { AccessibilityNotification.Announcement(toast).post() }
+        }
+        .alert("Microphone Access Off", isPresented: $model.liveMicrophoneDenied) {
+            Button("Cancel", role: .cancel) {}
+            Button("Open Settings") { model.run(.openSettings) }
+        } message: {
+            Text("Turn on Microphone for Hermes in Settings to use Live mode.")
         }
         .sheet(isPresented: $choosing) {
             VoiceChatPicker(rows: model.sessions.chatRows) { row in
@@ -47,7 +71,9 @@ struct VoiceTab: View {
             action: { model.run($0) },
             pick: { model.choose($0) },
             choose: { choosing = true },
-            settings: onSettings)
+            settings: onSettings,
+            select: { model.select($0) },
+            dismissToast: { model.clearLiveToast() })
     }
 }
 
@@ -60,12 +86,35 @@ struct VoiceScreenState {
     var target: VoiceTarget = .active
     /// The name under "Active Chat". `nil` when there is no chat yet.
     var activeChatTitle: String?
+    /// Issue #102: the segment that is on.
+    var mode: VoiceTabMode = .handsFree
+    var liveAvailable = false
+    /// The line under the picker: the cost, or why Live is not available.
+    var liveLine: String?
+    /// The elapsed time of the live session, in seconds.
+    var liveElapsed = 0
+    /// The red-dot capsule shows (a live session that has not failed).
+    var showsLiveCapsule = false
+    /// "Live Mode Ended, 4:12".
+    var toast: String?
 }
 
 extension VoiceScreenState {
-    @MainActor init(model: VoiceTabModel) {
-        self.init(display: model.display, level: model.level, bargeIns: model.bargeInCount,
-                  targetTitle: model.targetTitle, target: model.target, activeChatTitle: model.activeChatTitle)
+    @MainActor init(model: VoiceTabModel, server: String? = nil) {
+        let live = model.liveController
+        self.init(display: model.display, level: Self.level(model), bargeIns: model.bargeInCount,
+                  targetTitle: model.targetTitle, target: model.target, activeChatTitle: model.activeChatTitle,
+                  mode: model.mode, liveAvailable: model.liveAvailability.isAvailable,
+                  liveLine: model.liveAvailability.line(server: server, selected: model.mode == .live),
+                  liveElapsed: model.liveElapsed,
+                  showsLiveCapsule: model.isLiveRunning && live?.phase != .failed,
+                  toast: model.liveToast)
+    }
+
+    /// The #98 engine has no audio level. The live ring bends a little, more while Hermes talks.
+    @MainActor private static func level(_ model: VoiceTabModel) -> Float {
+        guard let live = model.liveController, model.isLiveRunning else { return model.level }
+        return live.speaking ? 0.6 : 0.3
     }
 }
 
@@ -78,6 +127,9 @@ struct VoiceScreenActions {
     var pick: (VoiceTarget) -> Void = { _ in }
     var choose: () -> Void = {}
     var settings: () -> Void = {}
+    /// Issue #102: the mode picker.
+    var select: (VoiceTabMode) -> Void = { _ in }
+    var dismissToast: () -> Void = {}
 }
 
 /// The Quiet Ring layout: the ring at 40 % of the height, the title, then the controls above the tab bar.
@@ -96,9 +148,14 @@ struct VoiceScreen: View {
     var body: some View {
         GeometryReader { proxy in
             VStack(spacing: 0) {
+                if state.showsLiveCapsule {
+                    LiveCapsule(elapsed: state.liveElapsed)
+                        .padding(.top, 8)
+                        .transition(.opacity)
+                }
                 Spacer(minLength: 8)
                     .frame(maxHeight: max(0, proxy.size.height * 0.4 - (typeSize.isAccessibilitySize ? 160 : 120)
-                                           - ringSize / 2))
+                                           - ringSize / 2 - (state.showsLiveCapsule ? 56 : 0)))
                 ring
                 titles
                     .padding(.top, typeSize.isAccessibilitySize ? 16 : 28)
@@ -111,6 +168,15 @@ struct VoiceScreen: View {
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 16)
         }
+        .overlay(alignment: .top) {
+            if let toast = state.toast {
+                LiveEndToast(text: toast, onDismiss: actions.dismissToast)
+                    .padding(.top, 8)
+                    .padding(.horizontal, 16)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: state.toast)
         .background(Color(uiColor: .systemBackground))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -141,13 +207,15 @@ struct VoiceScreen: View {
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(display.ringAccessibilityLabel)
+        .accessibilityLabel(display.isLive ? display.liveAccessibilityLabel(elapsedSeconds: state.liveElapsed)
+                            : display.ringAccessibilityLabel)
         .accessibilityHint(ringHint)
     }
 
     private var ringHint: String {
-        switch display.ring {
-        case .idle: "Starts voice mode."
+        if display.isLive { return display.action == .tryAgain ? "Starts Live mode again." : "" }
+        return switch display.ring {
+        case .idle: state.mode == .live ? "Starts Live mode." : "Starts voice mode."
         case .speaking: "Stops the reply."
         case .paused: "Listens again."
         case .listening, .working, .muted: ""
@@ -195,12 +263,23 @@ struct VoiceScreen: View {
                     VoiceKey(title: "Mute", systemImage: "mic.slash.fill", isOn: display.muteOn, action: actions.mute)
                         .disabled(!display.muteEnabled)
                         .accessibilityValue(display.muteOn ? "On" : "Off")
-                    VoiceKey(title: "End", systemImage: "xmark", tint: .red, action: actions.end)
+                    VoiceKey(title: "End", systemImage: display.isLive ? "phone.down.fill" : "xmark", tint: .red,
+                             action: actions.end)
+                        .accessibilityLabel(display.isLive ? "End Live Mode" : "End")
                 }
             }
         } else {
             VStack(spacing: 20) {
-                VoiceModePicker()
+                VStack(spacing: 8) {
+                    VoiceModePicker(mode: state.mode, liveAvailable: state.liveAvailable, onSelect: actions.select)
+                    if let line = state.liveLine {
+                        Text(line)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 targetMenu
             }
         }
@@ -238,27 +317,105 @@ struct VoiceScreen: View {
     }
 }
 
-/// "Hands-Free | Live". Live is dim until #102.
+/// "Hands-Free | Live". Issue #102: Live is dim and not selectable while the server does not have it.
 struct VoiceModePicker: View {
+    var mode: VoiceTabMode = .handsFree
+    var liveAvailable = false
+    var onSelect: (VoiceTabMode) -> Void = { _ in }
+
     var body: some View {
         HStack(spacing: 0) {
-            Label("Hands-Free", systemImage: "waveform")
-                .fontWeight(.semibold)
-                .padding(.horizontal, 16)
-                .frame(minHeight: 36)
-                .glassEffect(.regular, in: Capsule())
-                .accessibilityAddTraits(.isSelected)
-            Label("Live", systemImage: "dot.radiowaves.left.and.right")
-                .padding(.horizontal, 16)
-                .frame(minHeight: 36)
-                .foregroundStyle(.tertiary)
-                .accessibilityHint("Not available yet.")
+            segment("Hands-Free", systemImage: "waveform", value: .handsFree)
+            segment("Live", systemImage: "dot.radiowaves.left.and.right", value: .live)
+                .disabled(!liveAvailable)
+                .accessibilityHint(liveAvailable ? "Talks with Hermes in real time." : "Not available on this server.")
         }
         .font(.subheadline)
         .padding(3)
         .background(Capsule().fill(Color(uiColor: .tertiarySystemFill)))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Mode")
+    }
+
+    private func segment(_ title: String, systemImage: String, value: VoiceTabMode) -> some View {
+        let selected = mode == value
+        return Button { onSelect(value) } label: {
+            Label(title, systemImage: systemImage)
+                .fontWeight(selected ? .semibold : .regular)
+                .padding(.horizontal, 16)
+                .frame(minHeight: 36)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(VoiceSegmentStyle(selected: selected))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// One segment of the mode picker: glass when it is on, tertiary when it is off and disabled.
+private struct VoiceSegmentStyle: ButtonStyle {
+    var selected: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(isEnabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+            .glassEffect(selected ? .regular : .identity, in: Capsule())
+            .opacity(configuration.isPressed ? 0.6 : 1)
+    }
+}
+
+/// Issue #102: the live capsule (top center, glass): red dot, "Live", elapsed `m:ss`. The cost line is under it.
+/// The red dot does not blink. AX5: the cost line wraps and never truncates.
+struct LiveCapsule: View {
+    var elapsed: Int
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(Color(uiColor: .systemRed))
+                    .frame(width: 8, height: 8)
+                Text(VoiceTabDisplay.liveMiniTitle(elapsedSeconds: elapsed))
+                    .font(.subheadline.weight(.semibold))
+                    .monospacedDigit()
+            }
+            .padding(.horizontal, 12)
+            .frame(minHeight: 32)
+            .glassEffect(.regular, in: Capsule())
+            Text(LiveModeFormat.costCaption)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Live, \(LiveModeFormat.elapsed(elapsed)), \(LiveModeFormat.costCaption)")
+    }
+}
+
+/// Issue #102: "Live Mode Ended, 4:12" after the end. It hides after 3 s, or on a tap.
+struct LiveEndToast: View {
+    var text: String
+    var onDismiss: () -> Void = {}
+
+    var body: some View {
+        Button(action: onDismiss) {
+            Label(text, systemImage: "phone.down.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .glassEffect(.regular, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Hides the message.")
+        .task(id: text) {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            onDismiss()
+        }
     }
 }
 
@@ -368,15 +525,31 @@ struct VoiceChatPicker: View {
 struct VoiceMiniBar: View {
     var display: VoiceTabDisplay
     var level: Float = 0
+    /// Issue #102: the elapsed time of a live session. Live shows a red dot and "Live 2:14".
+    var liveElapsed: Int?
     var onOpen: () -> Void = {}
     var onEnd: () -> Void = {}
+
+    /// A live session that has not failed.
+    private var showsLiveTime: Bool { display.isLive && display.action != .tryAgain }
+    private var title: String {
+        showsLiveTime ? VoiceTabDisplay.liveMiniTitle(elapsedSeconds: liveElapsed ?? 0) : display.title
+    }
 
     var body: some View {
         HStack(spacing: 12) {
             Button(action: onOpen) {
                 HStack(spacing: 12) {
-                    QuietRing(style: display.ring, level: level, diameter: 28, lineWidth: 2, showsSymbol: false)
-                    Text(display.title)
+                    if showsLiveTime {
+                        Circle()
+                            .fill(Color(uiColor: .systemRed))
+                            .frame(width: 10, height: 10)
+                            .frame(width: 28, height: 28)
+                    } else {
+                        QuietRing(style: display.ring, level: level, diameter: 28, lineWidth: 2, showsSymbol: false)
+                    }
+                    Text(title)
+                        .monospacedDigit()
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
@@ -385,14 +558,16 @@ struct VoiceMiniBar: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(display.ringAccessibilityLabel)
+            .accessibilityLabel(display.isLive ? display.liveAccessibilityLabel(elapsedSeconds: liveElapsed ?? 0)
+                                : display.ringAccessibilityLabel)
             .accessibilityHint("Opens the Voice tab.")
-            Button("End", systemImage: "xmark", action: onEnd)
+            Button("End", systemImage: display.isLive ? "phone.down.fill" : "xmark", action: onEnd)
                 .labelStyle(.iconOnly)
                 .font(.body.weight(.semibold))
                 .foregroundStyle(.red)
                 .frame(width: 44, height: 44)
-                .accessibilityLabel("End Voice Mode")
+                .contentShape(Rectangle())
+                .accessibilityLabel(display.isLive ? "End Live Mode" : "End Voice Mode")
         }
         .padding(.leading, 14)
         .padding(.trailing, 4)
@@ -414,7 +589,9 @@ private struct VoiceMiniBarAccessory: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 26.1, *) {
             content.tabViewBottomAccessory(isEnabled: isEnabled) {
-                VoiceMiniBar(display: model.display, level: model.level, onOpen: onOpen, onEnd: { model.end() })
+                VoiceMiniBar(display: model.display, level: VoiceScreenState(model: model).level,
+                             liveElapsed: model.isLiveRunning ? model.liveElapsed : nil,
+                             onOpen: onOpen, onEnd: { model.end() })
             }
         } else {
             content

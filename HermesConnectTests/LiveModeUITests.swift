@@ -6,7 +6,8 @@ import Testing
 import UIKit
 @testable import HermesConnect
 
-// Issue #98: the Live entry, the mode picker and the panel. Fakes only: no test opens a live session.
+// Issue #98: the status gate and the end rules of `LiveModeSessionModel`. Fakes only: no test opens a live session.
+// Issue #102: the Voice tab tests (`VoiceLiveTabUITests`) cover the live views.
 
 private final class StatusService: LiveModeService, @unchecked Sendable {
     let lock = NSLock()
@@ -117,69 +118,5 @@ private final class StubConnection: LiveModeConnection {
         #expect(model.microphoneDenied)
         #expect(!model.controller.isActive)
         #expect(service.offers.isEmpty)
-    }
-
-    // MARK: Screenshots of the plain view (light, dark, AX5). Set TEST_RUNNER_HERMES_SCREENS_DIR to write them.
-
-    @Test func viewScreenshots() async throws {
-        let folder = ProcessInfo.processInfo.environment["HERMES_SCREENS_DIR"].map { URL(fileURLWithPath: $0) }
-        let off = StatusService(VoiceLiveStatus(mode: .chained, available: false, reason: "GPT-Live is off on this server."))
-        let (offModel, offChat) = session(off, connection: StubConnection())
-        _ = offChat
-        await offModel.refreshStatus()
-        try shoot(offModel, "unavailable", folder)
-
-        let service = StatusService(VoiceLiveStatus(mode: .gptLive, available: true))
-        let connection = StubConnection()
-        let (model, chat) = session(service, connection: connection)
-        _ = chat
-        await model.refreshStatus()
-        try shoot(model, "ready", folder)
-        await model.start()
-        try shoot(model, "connecting", folder)
-        try await settle { !service.offers.isEmpty }
-        connection.onEvent?(.connected)
-        try shoot(model, "live", folder)
-        model.controller.toggleMute()
-        try shoot(model, "muted", folder)
-        model.controller.toggleMute()
-        connection.onEvent?(.message(#"{"type":"session.input_transcript.delta","delta":"Check my mail."}"#))
-        connection.onEvent?(.message(#"{"type":"session.delegation.created","delegation":{"id":"d1"}}"#))
-        try shoot(model, "working", folder)
-        connection.onEvent?(.disconnected)
-        try shoot(model, "reconnecting", folder)
-        connection.onEvent?(.failed)
-        try shoot(model, "error", folder)
-        model.end(.hangUp)
-        try shoot(model, "ended", folder)
-    }
-
-    private func shoot(_ model: LiveModeSessionModel, _ name: String, _ folder: URL?) throws {
-        for (style, size, suffix) in [(UIUserInterfaceStyle.light, UIContentSizeCategory.large, "light"),
-                                      (.dark, .large, "dark"),
-                                      (.light, .accessibilityExtraExtraExtraLarge, "ax5")] {
-            let image = render(LiveModeView(model: model), style: style, size: size)
-            #expect(image.size.width > 0)
-            if let folder { try image.pngData()?.write(to: folder.appending(path: "\(name)-\(suffix).png")) }
-        }
-    }
-
-    private func render(_ view: some View, style: UIUserInterfaceStyle, size: UIContentSizeCategory) -> UIImage {
-        let host = UIHostingController(rootView: view)
-        host.overrideUserInterfaceStyle = style
-        host.traitOverrides.preferredContentSizeCategory = size
-        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow()
-        window.frame = CGRect(x: 0, y: 0, width: 402, height: 874)
-        window.overrideUserInterfaceStyle = style
-        window.rootViewController = host
-        window.makeKeyAndVisible()
-        host.view.layoutIfNeeded()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
-        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
-            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
-        }
-        window.isHidden = true
-        return image
     }
 }
