@@ -287,6 +287,9 @@ struct RootView: View {
                         Button("Set Up Server") { showSetup = true }
                             .buttonStyle(.glassProminent)
                     }
+                    // Issue #73: no tab bar before setup. Issue #95: on this view only, so the select mode
+                    // of the list can hide the tab bar too.
+                    .toolbarVisibility(.hidden, for: .tabBar)
                 }
             }
             .navigationTitle("Hermes")
@@ -299,8 +302,6 @@ struct RootView: View {
                 }
             }
             .hermesStartAlert()
-            // Issue #73: no tab bar before setup.
-            .toolbarVisibility(model.isSetUp ? .automatic : .hidden, for: .tabBar)
         }
     }
 }
