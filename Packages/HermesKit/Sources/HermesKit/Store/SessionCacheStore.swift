@@ -53,7 +53,8 @@ public enum SessionCache {
     /// Version 5 (issue #12): the photos, files and location cards of sent messages (metadata and local path).
     /// Version 6 (issues #39 and #17): messages in the outbox (`queued`), the outbox index in the state file,
     /// and the quote of a reply. Both are optional keys, so one version covers both.
-    public static let formatVersion = 6
+    /// Version 7 (issue #120): the tool calls of a reply (name, summary, duration). Older files: no tools.
+    public static let formatVersion = 7
     /// Issue #36: the transcript key of the new chat that has no server row yet. Its memos stay here,
     /// so a failed memo survives a quit. No stored id starts with `#`.
     public static let newChatId = "#new-chat"
@@ -204,6 +205,34 @@ struct CachedQuote: Codable, Equatable {
     }
 }
 
+/// One tool call of a reply (format version 7, issue #120). Only the name, the summary and the duration:
+/// never the args or the result.
+struct CachedTool: Codable, Equatable {
+    var id: String
+    var name: String
+    var summary: String?
+    var duration: TimeInterval?
+
+    init(_ tool: ChatToolCall) {
+        id = tool.id
+        name = tool.name
+        summary = tool.summary
+        duration = tool.duration
+    }
+
+    var tool: ChatToolCall { ChatToolCall(id: id, name: name, summary: summary, duration: duration) }
+
+    private enum CodingKeys: String, CodingKey { case id, name, summary, duration }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? ""
+        name = try container.decode(String.self, forKey: .name)
+        summary = (try? container.decodeIfPresent(String.self, forKey: .summary)) ?? nil
+        duration = (try? container.decodeIfPresent(TimeInterval.self, forKey: .duration)) ?? nil
+    }
+}
+
 /// One attachment of a sent message (format version 5, issue #12). The bytes stay in their local file.
 /// A file that the system cleared shows the gray placeholder (photo) or the cell with no preview (file).
 struct CachedAttachment: Codable, Equatable {
@@ -293,6 +322,8 @@ struct CachedMessage: Codable, Equatable {
     /// Version 6 (issue #39): the message waits in the outbox. `notDelivered` is also `true`, so an older
     /// build shows "Not Delivered" and never sends it twice. Older files have no key: not queued.
     var queued: Bool
+    /// Version 7 (issue #120): the tool calls of a reply, in call order. Older files have no key: none.
+    var tools: [CachedTool]
 
     init(_ message: ChatMessage) {
         id = message.id
@@ -311,6 +342,7 @@ struct CachedMessage: Codable, Equatable {
         tapback = message.tapback?.rawValue
         attachments = message.attachments.map(CachedAttachment.init)
         quote = message.quote.map(CachedQuote.init)
+        tools = message.role == .assistant ? message.tools.map(CachedTool.init) : []
     }
 
     var message: ChatMessage {
@@ -333,12 +365,33 @@ struct CachedMessage: Codable, Equatable {
         }
         return ChatMessage(id: id, role: .assistant, text: text, date: date,
                            reply: interrupted ? .interrupted : .complete, promptId: promptId,
-                           spokenReply: speech?.spoken, tapback: tapback)
+                           spokenReply: speech?.spoken, tapback: tapback, tools: tools.map(\.tool))
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, role, text, date, userRowId, promptId, interrupted, notDelivered, voice, speech, ack, tapback
-        case attachments, quote, queued
+        case attachments, quote, queued, tools
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(role, forKey: .role)
+        try container.encode(text, forKey: .text)
+        try container.encode(date, forKey: .date)
+        try container.encodeIfPresent(userRowId, forKey: .userRowId)
+        try container.encodeIfPresent(promptId, forKey: .promptId)
+        try container.encode(interrupted, forKey: .interrupted)
+        try container.encode(notDelivered, forKey: .notDelivered)
+        try container.encodeIfPresent(voice, forKey: .voice)
+        try container.encodeIfPresent(speech, forKey: .speech)
+        try container.encodeIfPresent(ack, forKey: .ack)
+        try container.encodeIfPresent(tapback, forKey: .tapback)
+        try container.encode(attachments, forKey: .attachments)
+        try container.encodeIfPresent(quote, forKey: .quote)
+        try container.encode(queued, forKey: .queued)
+        // Version 7: a message with no tools writes no key, so the file stays small.
+        if !tools.isEmpty { try container.encode(tools, forKey: .tools) }
     }
 
     init(from decoder: any Decoder) throws {
@@ -363,6 +416,8 @@ struct CachedMessage: Codable, Equatable {
         quote = (try? container.decodeIfPresent(CachedQuote.self, forKey: .quote)) ?? nil
         // Version 6. A broken value reads as not queued: "Not Delivered" with "Try Again", never a second send.
         queued = ((try? container.decodeIfPresent(Bool.self, forKey: .queued)) ?? nil) ?? false
+        // Version 7. A broken list drops only the tools: the reply shows with no tool row.
+        tools = ((try? container.decodeIfPresent([CachedTool].self, forKey: .tools)) ?? nil) ?? []
     }
 }
 

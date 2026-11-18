@@ -13,6 +13,9 @@ public struct ChatBubblePart: Sendable, Equatable, Identifiable {
         case spokenReply
         /// Issue #12: one file of a `MEDIA:` tag, as its own incoming bubble after the text, in tag order.
         case receivedFile(ReceivedFile)
+        /// Issue #120: the "Used 3 tools" row under an ended reply, after its last bubble. It has no bubble,
+        /// no tail and no footnote.
+        case tools
     }
 
     /// The row with the labels of this part only.
@@ -78,7 +81,26 @@ public enum ChatBubbleParts {
                 parts[index].row.statusLine = nil
             }
         }
+        if let tools = toolsPart(for: row, after: parts) {
+            parts[parts.count - 1].row.statusLine = nil
+            parts.append(tools)
+        }
         return parts
+    }
+
+    /// Issue #120: the tool row of a reply that ended. It takes the status line of the last bubble, so the line
+    /// stays at the end of the thread.
+    private static func toolsPart(for row: ChatRow, after parts: [ChatBubblePart]) -> ChatBubblePart? {
+        let message = row.message
+        guard message.role == .assistant, !message.tools.isEmpty, message.reply != .streaming,
+              !message.isLocalCard, !parts.isEmpty else { return nil }
+        var toolsRow = row
+        toolsRow.timeHeader = nil
+        toolsRow.showsReactions = false
+        toolsRow.hasTail = false
+        toolsRow.footnote = nil
+        toolsRow.statusLine = parts.last?.row.statusLine
+        return ChatBubblePart(row: toolsRow, content: .tools, id: "\(row.id)#tools")
     }
 
     public static func parts(for rows: [ChatRow]) -> [ChatBubblePart] {
