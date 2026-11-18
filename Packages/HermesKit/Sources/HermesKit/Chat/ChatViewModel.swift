@@ -74,6 +74,8 @@ public final class ChatViewModel {
     @ObservationIgnored private(set) var keepsNewChat: Bool
     /// Issue #67: the prompt text of a `send` or `skill` result, by message id. The bubble shows `display`.
     @ObservationIgnored private var commandPrompts: [String: String] = [:]
+    /// Issue #98: the `voice_context` of each GPT-Live delegation, by message id. These go out with surface `voice-live`.
+    @ObservationIgnored private var livePrompts: [String: String] = [:]
     /// Issue #39: the run that sends the queued messages in order. One run at a time.
     @ObservationIgnored private var outboxTask: Task<Void, Never>?
     /// Issue #12: the downloads of the `MEDIA:` files of this chat.
@@ -391,6 +393,34 @@ public final class ChatViewModel {
         return Task { await deliverVoice(id: id) }
     }
 
+    /// Issue #98: a GPT-Live delegation. The request shows as an owner text bubble and goes out at once as
+    /// `prompt.submit` with surface `voice-live`. It never waits in the outbox. Returns the bubble id.
+    public func sendLiveDelegation(_ text: String, voiceContext: String) async -> String {
+        let id = makeId()
+        thread.addOutgoing(id: id, text: text, date: now(), attachments: [], quote: nil)
+        livePrompts[id] = voiceContext
+        redrawNow()
+        _ = await deliver(id: id, retryBeforeRowId: nil)
+        return id
+    }
+
+    /// Issue #98: the reply to a delegation bubble, for the live voice.
+    public func liveReplyProgress(promptId: String) -> LiveReplyProgress {
+        guard let prompt = thread.message(id: promptId) else { return .failed }
+        if let reply = thread.messages.last(where: { $0.promptId == promptId && $0.role == .assistant }) {
+            switch reply.reply {
+            case .complete, .interrupted: return .done(reply.text)
+            case .failed: return .failed
+            case .streaming, nil: return .streaming(reply.text)
+            }
+        }
+        switch prompt.delivery {
+        case .failed, .queued: return .failed
+        case .delivered where turn == .idle: return .done("")
+        default: return .waiting
+        }
+    }
+
     /// "Try Again" on a bubble that shows "Not Delivered" (or "No speech found." for a memo).
     /// A memo with a transcript sends the turn again. A memo with no transcript is transcribed again.
     @discardableResult
@@ -621,7 +651,9 @@ public final class ChatViewModel {
             thread.beginTurn(promptId: id)
             redrawNow()
             submitted = true
-            let row = if isVoice {
+            let row = if let voiceContext = livePrompts[id], let live = transport as? any LiveDelegationTransport {
+                try await live.submitLivePrompt(sessionId: session.liveId, text: text, voiceContext: voiceContext)
+            } else if isVoice {
                 try await transport.submitVoicePrompt(sessionId: session.liveId, text: text,
                                                       retryBeforeRowId: retryBeforeRowId)
             } else {
@@ -635,7 +667,7 @@ public final class ChatViewModel {
             saveActiveSessionId()
             saveTranscript()
             outcome = .delivered
-        } catch where canQueue(id, retryBeforeRowId: retryBeforeRowId)
+        } catch where livePrompts[id] == nil && canQueue(id, retryBeforeRowId: retryBeforeRowId)
                         && Outbox.isOffline(error, submitted: submitted) {
             thread.cancelWaiting()
             queue(id)
