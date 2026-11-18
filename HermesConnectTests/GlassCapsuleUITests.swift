@@ -13,6 +13,7 @@ import UIKit
 
     private struct Screen {
         let controller: ChatViewController
+        let model: ChatViewModel
         let recorder: FakeVoiceRecorder
         let window: UIWindow
     }
@@ -51,7 +52,7 @@ import UIKit
         window.makeKeyAndVisible()
         controller.view.layoutIfNeeded()
         Self.keep.append(window)
-        return Screen(controller: controller, recorder: recorder, window: window)
+        return Screen(controller: controller, model: model, recorder: recorder, window: window)
     }
 
     /// Feeds the waveform a varied voice, so the bars look like speech.
@@ -229,6 +230,125 @@ import UIKit
         #expect(cell.transcribingBars.isActive)
         #expect(cell.transcribingBars.frame.maxX <= cell.transcriptLabel.frame.minX)
         #expect(cell.transcriptCard.isHidden)
+    }
+
+    // MARK: Real touch paths (QA #116 defect 2)
+
+    /// The center of `view` in the view of the chat screen, where the mic recognizer reads its points.
+    private func center(of view: UIView, in screen: Screen) -> CGPoint {
+        view.convert(CGPoint(x: view.bounds.midX, y: view.bounds.midY), to: screen.controller.view)
+    }
+
+    /// Hit-tests the center of `key` in its window, then taps the control that the touch reaches.
+    private func tap(_ key: UIControl) throws {
+        let window = try #require(key.window)
+        let point = key.convert(CGPoint(x: key.bounds.midX, y: key.bounds.midY), to: window)
+        let hit = try #require(window.hitTest(point, with: nil))
+        #expect(hit.isDescendant(of: key), "the touch reached \(type(of: hit)), not the key")
+        var control: UIView? = hit
+        while let view = control, !(view is UIControl) { control = view.superview }
+        (control as? UIControl)?.sendActions(for: .touchUpInside)
+    }
+
+    @Test func micRecognizerIsOnTheComposerAndStartsAtOnce() throws {
+        let screen = makeScreen(thread())
+        let recognizer = screen.controller.micPressRecognizer
+        #expect(recognizer.view === screen.controller.messageInputBar)
+        #expect(recognizer.minimumPressDuration == 0)
+        #expect(recognizer.delegate != nil)
+    }
+
+    /// The 64 pt hit area of the mic takes the touch. The text field and an active recording do not.
+    @Test func micHitAreaTakesTouchesOnTheMicOnly() throws {
+        let screen = makeScreen(thread())
+        let bar = screen.controller.messageInputBar
+        bar.layoutIfNeeded()
+        let mic = try #require(bar.rightStackView.arrangedSubviews.first)
+        let frame = mic.convert(mic.bounds, to: bar)
+        #expect(screen.controller.micPressShouldReceive(at: CGPoint(x: frame.midX, y: frame.midY)))
+        #expect(screen.controller.micPressShouldReceive(at: CGPoint(x: frame.minX - 9, y: frame.midY)))
+        #expect(!screen.controller.micPressShouldReceive(at: CGPoint(x: frame.minX - 12, y: frame.midY)))
+        let field = bar.inputTextView.convert(bar.inputTextView.bounds, to: bar)
+        #expect(!screen.controller.micPressShouldReceive(at: CGPoint(x: field.midX, y: field.midY)))
+        screen.controller.voice.startTapMode()
+        #expect(!screen.controller.micPressShouldReceive(at: CGPoint(x: frame.midX, y: frame.midY)))
+        screen.controller.voice.cancel()
+    }
+
+    /// Recognizer points map to the slide: up 60 pt locks, and the finger can lift.
+    @Test func micPressSlideUpLocks() throws {
+        let screen = makeScreen(thread())
+        let mic = try #require(screen.controller.messageInputBar.rightStackView.arrangedSubviews.first)
+        let start = center(of: mic, in: screen)
+        let controller = screen.controller
+        controller.handleMicPress(.began, at: start)
+        guard case .hold = controller.recordingBarMode else { Issue.record("expected the hold bar"); return }
+        controller.handleMicPress(.changed, at: CGPoint(x: start.x - 4, y: start.y - 30))
+        guard case .hold(_, let lock) = controller.recordingBarMode else { Issue.record("expected hold"); return }
+        #expect(lock == 0.5)
+        controller.handleMicPress(.changed, at: CGPoint(x: start.x - 4, y: start.y - 61))
+        #expect(controller.recordingBarMode == .locked)
+        controller.handleMicPress(.ended, at: CGPoint(x: start.x, y: start.y - 61))
+        #expect(controller.recordingBarMode == .locked)
+        controller.voice.cancel()
+    }
+
+    /// Recognizer points map to the slide: left 100 pt arms the cancel, and the release deletes.
+    @Test func micPressSlideLeftThenReleaseDeletes() throws {
+        let screen = makeScreen(thread())
+        let mic = try #require(screen.controller.messageInputBar.rightStackView.arrangedSubviews.first)
+        let start = center(of: mic, in: screen)
+        let controller = screen.controller
+        controller.handleMicPress(.began, at: start)
+        controller.handleMicPress(.changed, at: CGPoint(x: start.x - 99, y: start.y))
+        #expect(controller.recordingBarMode != .cancelArmed)
+        controller.handleMicPress(.changed, at: CGPoint(x: start.x - 101, y: start.y + 3))
+        #expect(controller.recordingBarMode == .cancelArmed)
+        controller.handleMicPress(.ended, at: CGPoint(x: start.x - 101, y: start.y))
+        #expect(controller.recordingBarMode == nil)
+        #expect(screen.recorder.discards == 1)
+        #expect(screen.model.messages.count == 3)
+    }
+
+    /// A hold of 0.3 s or more, then the release, sends the memo. A system cancel pauses.
+    @Test func micPressHoldThenReleaseSendsAndSystemCancelPauses() throws {
+        let screen = makeScreen(thread())
+        let mic = try #require(screen.controller.messageInputBar.rightStackView.arrangedSubviews.first)
+        let start = center(of: mic, in: screen)
+        let controller = screen.controller
+        controller.handleMicPress(.began, at: start)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        screen.recorder.currentTime = 2
+        controller.handleMicPress(.ended, at: start)
+        #expect(controller.recordingBarMode == nil)
+        #expect(screen.model.messages.last?.voice?.duration == 2)
+
+        controller.handleMicPress(.began, at: start)
+        controller.handleMicPress(.cancelled, at: start)
+        #expect(controller.recordingBarMode == .paused)
+        controller.voice.cancel()
+    }
+
+    /// A touch on each capsule key reaches that key in the laid-out bar.
+    @Test func capsuleKeysTakeTouchesInTheLaidOutBar() throws {
+        let screen = try show(.locked, style: .light, size: .large)
+        let bar = try recordingBar(screen)
+        try tap(bar.middleButton)
+        #expect(screen.controller.recordingBarMode == .paused)
+        settle(screen)
+        try tap(bar.playButton)
+        try tap(bar.middleButton)
+        #expect(screen.controller.recordingBarMode == .locked)
+        settle(screen)
+        screen.recorder.currentTime = 3
+        try tap(bar.sendButton)
+        #expect(screen.controller.recordingBarMode == nil)
+        #expect(screen.model.messages.last?.voice != nil)
+
+        let other = try show(.locked, style: .light, size: .accessibilityExtraExtraExtraLarge)
+        try tap(try recordingBar(other).deleteButton)
+        #expect(other.controller.recordingBarMode == nil)
+        #expect(other.model.messages.count == 3)
     }
 
     /// The screens of each state in light, dark and AX5 (`.team/screens/103/`).

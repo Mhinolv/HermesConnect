@@ -175,6 +175,17 @@ public struct VoiceMemoCapture: Sendable, Equatable {
         return .resume
     }
 
+    /// The clip did not send (for example, its parts did not join). Go back to the paused bar with the clip.
+    @discardableResult
+    public mutating func restorePaused() -> Bool {
+        guard phase == .idle else { return false }
+        phase = .paused
+        cancelProgress = 0
+        lockProgress = 0
+        cancelArmed = false
+        return true
+    }
+
     /// The Send key of the recording bar.
     public mutating func send() -> Action? {
         guard phase != .idle else { return nil }

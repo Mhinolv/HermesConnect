@@ -105,6 +105,20 @@ import Testing
         #expect(capture.phase == .pressed)
     }
 
+    /// QA #116: a clip that did not send goes back to the paused bar.
+    @Test func restorePausedOnlyFromIdle() {
+        var capture = VoiceMemoCapture()
+        capture.startTapMode()
+        let whileRecording = capture.restorePaused()
+        #expect(!whileRecording)
+        #expect(capture.send() == .send)
+        let afterSend = capture.restorePaused()
+        #expect(afterSend)
+        #expect(capture.phase == .paused)
+        #expect(capture.tick(now: 0, recorded: 600).isEmpty)
+        #expect(capture.send() == .send)
+    }
+
     /// Main decision 2026-11-17: at 10:00 the recording stops and the memo sends, also after Add More.
     @Test func addMoreStillSendsAtTheLimit() {
         var capture = VoiceMemoCapture()

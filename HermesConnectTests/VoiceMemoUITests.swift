@@ -65,6 +65,7 @@ private final class VoiceHarness {
     var announcements: [String] = []
     var denied = 0
     var failed = 0
+    var joinFailed = 0
     var voiceOver = false
     let controller: VoiceMemoController
 
@@ -78,6 +79,7 @@ private final class VoiceHarness {
         controller.onAnnounce = { [unowned self] in self.announcements.append($0) }
         controller.onAccessDenied = { [unowned self] in self.denied += 1 }
         controller.onRecordFailed = { [unowned self] in self.failed += 1 }
+        controller.onJoinFailed = { [unowned self] in self.joinFailed += 1 }
         controller.isVoiceOverRunning = { [unowned self] in self.voiceOver }
     }
 }
@@ -208,16 +210,83 @@ private final class VoiceHarness {
         #expect(memo.fileURL == h.joiner.joins.first?.target)
     }
 
-    @Test func failedJoinShowsTheAlertAndSendsNothing() {
+    /// Writes a small file at each part the fake recorder started, so the test can see which files stay.
+    private func writeParts(_ h: VoiceHarness) throws {
+        for url in h.recorder.started where !FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data([1, 2, 3]).write(to: url)
+        }
+    }
+
+    /// QA #116 defect 1: a failed join keeps every part and goes back to the paused bar. Send tries again.
+    @Test func failedJoinKeepsTheRecordingAndSendTriesAgain() throws {
         let h = VoiceHarness()
+        h.controller.startTapMode()
+        h.recorder.currentTime = 4
+        h.controller.tick()
+        h.controller.pause()
+        h.controller.resume()
+        h.recorder.currentTime = 3
+        h.controller.tick()
+        try writeParts(h)
+        let parts = h.recorder.started
         h.joiner.succeeds = false
+        h.controller.send()
+        #expect(h.sent.isEmpty)
+        #expect(h.controller.capture.phase == .paused)
+        #expect(h.controller.elapsed == 7)
+        #expect(parts.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        #expect(h.joinFailed == 1)
+        #expect(h.failed == 0)
+        // A new recording cannot replace the kept clip.
+        #expect(!h.controller.startTapMode())
+
+        h.joiner.succeeds = true
+        h.controller.send()
+        let memo = try #require(h.sent.first)
+        #expect(memo.duration == 7)
+        #expect(h.joiner.joins.last?.parts == parts)
+        #expect(memo.fileURL == h.joiner.joins.last?.target)
+        #expect(!h.controller.isActive)
+        #expect(parts.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+    }
+
+    /// QA #116 defect 1: the 10:00 send uses the same path. A failed join keeps the recording.
+    @Test func failedJoinAtTenMinutesKeepsTheRecording() throws {
+        let h = VoiceHarness()
+        h.controller.startTapMode()
+        h.recorder.currentTime = 400
+        h.controller.tick()
+        h.controller.pause()
+        h.controller.resume()
+        try writeParts(h)
+        h.joiner.succeeds = false
+        h.recorder.currentTime = 200
+        h.controller.tick()
+        #expect(h.sent.isEmpty)
+        #expect(h.controller.capture.phase == .paused)
+        #expect(h.controller.elapsed == 600)
+        #expect(h.recorder.started.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        #expect(h.joinFailed == 1)
+    }
+
+    /// QA #116 defect 3: when the pause join fails, Play joins the parts again. A second failure shows the alert.
+    @Test func playAfterAFailedPauseJoinTriesAgain() throws {
+        let h = VoiceHarness()
         h.controller.startTapMode()
         h.controller.pause()
         h.controller.resume()
-        h.controller.send()
-        #expect(h.sent.isEmpty)
-        #expect(h.failed == 1)
-        #expect(!h.controller.isActive)
+        h.joiner.succeeds = false
+        h.controller.pause()
+        #expect(h.controller.reviewURL == nil)
+        #expect(h.joinFailed == 0)
+        h.controller.prepareReview()
+        #expect(h.joinFailed == 1)
+        #expect(h.controller.reviewURL == nil)
+        h.joiner.succeeds = true
+        h.controller.prepareReview()
+        #expect(h.controller.reviewURL == h.joiner.joins.last?.target)
+        #expect(h.joinFailed == 1)
     }
 
     @Test func deleteWhilePausedDeletesTheClip() throws {

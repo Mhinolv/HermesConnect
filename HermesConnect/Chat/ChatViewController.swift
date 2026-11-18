@@ -372,7 +372,9 @@ final class ChatViewController: MessagesViewController {
             self?.voice.resume()
         }
         recordingBar.onPlay = { [weak self] in
-            guard let self, let url = self.voice.reviewURL else { return }
+            guard let self else { return }
+            // QA #116: the parts did not join yet. Play joins them again, or shows why it cannot.
+            guard let url = self.voice.reviewURL else { return self.voice.prepareReview() }
             self.player.toggle(url)
         }
         voice.onChange = { [weak self] in self?.updateRecordingBar() }
@@ -382,6 +384,7 @@ final class ChatViewController: MessagesViewController {
         }
         voice.onAccessDenied = { [weak self] in self?.showMicrophoneOff() }
         voice.onRecordFailed = { [weak self] in self?.showRecordFailed() }
+        voice.onJoinFailed = { [weak self] in self?.showJoinFailed() }
         player.onChange = { [weak self] in
             self?.reloadVoiceRows()
             self?.updateReviewPlayback(time: nil)
@@ -396,16 +399,28 @@ final class ChatViewController: MessagesViewController {
 
     /// The 64 pt hit area of the 44 pt mic (driving use). VoiceOver uses the button activation instead.
     private func micPressShouldReceive(_ touch: UITouch) -> Bool {
+        micPressShouldReceive(at: touch.location(in: messageInputBar))
+    }
+
+    /// `point` is in the input bar. Tests call it with the points of a laid-out screen.
+    func micPressShouldReceive(at point: CGPoint) -> Bool {
         guard showsMic, !voice.isActive, !UIAccessibility.isVoiceOverRunning, micButton.window != nil else {
             return false
         }
         let area = micButton.convert(micButton.bounds, to: messageInputBar).insetBy(dx: -10, dy: -10)
-        return area.contains(touch.location(in: messageInputBar))
+        return area.contains(point)
     }
 
     @objc private func micPressChanged(_ gesture: UILongPressGestureRecognizer) {
-        let point = gesture.location(in: view)
-        switch gesture.state {
+        handleMicPress(gesture.state, at: gesture.location(in: view))
+    }
+
+    /// The recognizer that takes the mic touches (tests).
+    var micPressRecognizer: UILongPressGestureRecognizer { micPress }
+
+    /// One step of the mic press. `point` is in the view, as the recognizer gives it. Tests drive it with points.
+    func handleMicPress(_ state: UIGestureRecognizer.State, at point: CGPoint) {
+        switch state {
         case .began:
             micPressStart = point
             player.stop()
@@ -492,6 +507,15 @@ final class ChatViewController: MessagesViewController {
 
     private func showRecordFailed() {
         let alert = UIAlertController(title: "Can't Record", message: "Another app may use the microphone. Try again.",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+
+    /// QA #116: the parts of a memo did not join. The recording stays in the paused bar.
+    private func showJoinFailed() {
+        let alert = UIAlertController(title: "Can't Prepare Voice Memo",
+                                      message: "Your recording is kept. Tap Send or Play to try again.",
                                       preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)

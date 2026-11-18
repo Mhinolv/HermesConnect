@@ -230,6 +230,8 @@ final class VoiceMemoController {
     private var partsDuration: TimeInterval = 0
     /// Counts the joins, so a late join of an old clip does nothing.
     private var joinGeneration = 0
+    /// `true` while the parts of a sent clip join. A new recording waits, so a failed join can come back.
+    private(set) var isSending = false
     private var timer: Timer?
 
     /// The bar state changed.
@@ -240,6 +242,8 @@ final class VoiceMemoController {
     var onAccessDenied: (() -> Void)?
     /// The recorder did not start.
     var onRecordFailed: (() -> Void)?
+    /// QA #116: the parts did not join. The clip is kept in the paused bar, and Send or Play tries again.
+    var onJoinFailed: (() -> Void)?
     var onHaptic: @MainActor (VoiceHaptic) -> Void = { VoiceMemoController.playHaptic($0) }
     var onAnnounce: @MainActor (String) -> Void = { UIAccessibility.post(notification: .announcement, argument: $0) }
     var isVoiceOverRunning: @MainActor () -> Bool = { UIAccessibility.isVoiceOverRunning }
@@ -266,7 +270,7 @@ final class VoiceMemoController {
     /// The finger touched the mic. Returns `true` when the recording started.
     @discardableResult
     func press() -> Bool {
-        guard !capture.isActive, canRecord() else { return false }
+        guard !capture.isActive, !isSending, canRecord() else { return false }
         guard begin() else { return false }
         capture.press(at: clock())
         changed()
@@ -276,7 +280,7 @@ final class VoiceMemoController {
     /// A tap or VoiceOver: locked recording with no hold.
     @discardableResult
     func startTapMode() -> Bool {
-        guard !capture.isActive, canRecord() else { return false }
+        guard !capture.isActive, !isSending, canRecord() else { return false }
         guard begin() else { return false }
         capture.startTapMode()
         changed()
@@ -308,6 +312,12 @@ final class VoiceMemoController {
     /// The Pause key.
     func pause() {
         handle(capture.pause())
+    }
+
+    /// QA #116: the Play key when the paused parts are not one file yet (a join failed). It tries the join again.
+    func prepareReview() {
+        guard capture.phase == .paused, fileURL == nil, parts.count > 1 else { return }
+        joinPartsForReview(reportsFailure: true)
     }
 
     /// The Add More key.
@@ -399,7 +409,7 @@ final class VoiceMemoController {
         case .pause:
             endPart()
             stopTimer()
-            joinPartsForReview()
+            joinPartsForReview(reportsFailure: false)
             changed()
         case .resume:
             if startPart() {
@@ -418,7 +428,7 @@ final class VoiceMemoController {
     }
 
     /// The paused clip plays as one file, so more than one part are joined now.
-    private func joinPartsForReview() {
+    private func joinPartsForReview(reportsFailure: Bool) {
         guard parts.count > 1 else { return }
         joinGeneration += 1
         let generation = joinGeneration
@@ -428,6 +438,8 @@ final class VoiceMemoController {
             guard let self else { return }
             guard joined, generation == self.joinGeneration, self.parts == sources else {
                 if joined { try? FileManager.default.removeItem(at: target) }
+                // The parts stay. Send joins them again.
+                if !joined, reportsFailure, generation == self.joinGeneration { self.onJoinFailed?() }
                 return
             }
             sources.forEach { try? FileManager.default.removeItem(at: $0) }
@@ -446,21 +458,27 @@ final class VoiceMemoController {
             let sources = parts
             let duration = partsDuration
             let memoLevels = levels
-            parts = []
+            reset()
             if sources.count == 1, let url = sources.first {
                 deliver(url: url, duration: duration, levels: memoLevels)
-            } else {
-                let target = VoiceMemoFiles.newFile(in: folder)
-                joiner.join(sources, into: target) { [weak self] joined in
-                    guard joined else {
-                        sources.forEach { try? FileManager.default.removeItem(at: $0) }
-                        self?.onRecordFailed?()
-                        return
-                    }
+                return changed()
+            }
+            // QA #116: the parts stay on disk until the join works. A failed join goes back to the paused bar.
+            isSending = true
+            changed()
+            let target = VoiceMemoFiles.newFile(in: folder)
+            joiner.join(sources, into: target) { [weak self] joined in
+                guard let self else { return }
+                self.isSending = false
+                if joined {
                     sources.forEach { try? FileManager.default.removeItem(at: $0) }
-                    self?.deliver(url: target, duration: duration, levels: memoLevels)
+                    self.deliver(url: target, duration: duration, levels: memoLevels)
+                } else {
+                    try? FileManager.default.removeItem(at: target)
+                    self.restore(parts: sources, duration: duration, levels: memoLevels)
                 }
             }
+            return
         } else {
             if fileURL != nil { recorder.discard() }
             fileURL = nil
@@ -468,9 +486,25 @@ final class VoiceMemoController {
             parts = []
             onHaptic(.cancelled)
         }
+        reset()
+        changed()
+    }
+
+    private func reset() {
+        parts = []
         partsDuration = 0
         levels = []
         elapsed = 0
+    }
+
+    /// QA #116: the clip did not send. It comes back in the paused bar, so no recording is lost.
+    private func restore(parts sources: [URL], duration: TimeInterval, levels memoLevels: [Float]) {
+        guard capture.restorePaused() else { return }
+        parts = sources
+        partsDuration = duration
+        elapsed = duration
+        levels = memoLevels
+        onJoinFailed?()
         changed()
     }
 
