@@ -143,7 +143,7 @@ import UserNotifications
         homeCache.saveOutbox(true, sessionId: "20261117_080000_home03")
         let lists = attachLists(setup.model, seed: [home.id: homeCache])
         #expect(lists.sessions.sessions == rows)
-        #expect(setup.model.badgeCount(activeUnread: lists.sessions.unreadCount) == 2)
+        #expect(setup.model.badgeCount(lists.sessions) == 1, "issue #122: the cron run is not counted")
 
         await setup.model.switchServer(to: lab.id)
         #expect(!lists.sessions.hasLoaded, "Lab has no cache: the redacted rows show")
@@ -154,7 +154,7 @@ import UserNotifications
         #expect(kept.outboxIds == ["20261117_080000_home03"])
         #expect(lists.caches.sessions.outboxSessionIds().isEmpty, "the Lab folder has no Home outbox")
         #expect(homeCache.outboxSessionIds() == ["20261117_080000_home03"])
-        #expect(setup.model.badgeCount(activeUnread: lists.sessions.unreadCount) == 2, "the badge counts all servers")
+        #expect(setup.model.badgeCount(lists.sessions) == 1, "the badge counts the chats of all servers")
         let menu = setup.model.serverMenu(activeChats: lists.sessions.chatsUnreadCount)
         #expect(menu.title() == "Lab")
         #expect(menu.items.map(\.subtitle) == ["1 unread", nil])
@@ -189,13 +189,13 @@ import UserNotifications
         setup.model.recordServerState(.init(unreadIds: ["l1", "l2", "l3"], unreadChats: 3), for: lab.id)
         let lists = attachLists(setup.model, seed: [home.id: homeCache])
         #expect(lists.sessions.canMarkAllRead)
-        #expect(setup.model.badgeCount(activeUnread: lists.sessions.unreadCount) == 6)
+        #expect(setup.model.badgeCount(lists.sessions) == 5, "issue #122: 2 chats here, 3 on Lab, no cron run")
 
         #expect(lists.sessions.markAllRead() == 2)
         ServerSwitchGlue.recordActiveState(model: setup.model, sessions: lists.sessions)
         #expect(lists.sessions.chatsUnreadCount == 0, "the Chats tab badge")
-        #expect(lists.sessions.unreadCronRuns.count == 1, "the Jobs tab badge does not change")
-        #expect(setup.model.badgeCount(activeUnread: lists.sessions.unreadCount) == 4, "Lab keeps its 3")
+        #expect(RootTab.jobs.badge(lists.sessions) == 0, "issue #122: the Jobs tab has no badge")
+        #expect(setup.model.badgeCount(lists.sessions) == 3, "Lab keeps its 3")
         #expect(setup.model.serverBook.entry(for: home.id) == .init(unreadIds: ["cron_j1_1"], unreadChats: 0))
         #expect(setup.model.serverBook.entry(for: lab.id).unreadChats == 3)
         let menu = setup.model.serverMenu(activeChats: lists.sessions.chatsUnreadCount)
@@ -222,7 +222,7 @@ import UserNotifications
                 "the queued messages of a removed server never send")
         #expect(lists.caches.sessionStore(for: lab.id).loadSessions().isEmpty)
         #expect(removed == [lab.id], "the app drops its notifications and its slash catalog")
-        #expect(setup.model.badgeCount(activeUnread: 0) == 0)
+        #expect(setup.model.badgeCount(lists.sessions) == 0)
     }
 
     @Test func removeTheActiveServerSwitchesToTheFirstAndDeletesItsFolder() async throws {

@@ -418,9 +418,6 @@ private let runsJSON = #"""
         #expect(model.job(forRun: SessionListItem(id: "local-77", source: "cron"))?.id == "b2")
         #expect(model.job(forRun: SessionListItem(id: "local-88", title: "Backup", source: "cron"))?.id == "b2")
         #expect(model.job(forRun: SessionListItem(id: "local-99", title: "Other", source: "cron")) == nil)
-        let unread = [SessionListItem(id: "cron_a1_1", source: "cron", isUnread: true),
-                      SessionListItem(id: "local-99", source: "cron", isUnread: true)]
-        #expect(model.unreadJobIds(unread) == ["a1"])
         #expect(CronRun(session: SessionListItem(id: "cron_a1_1", title: "Zillow", source: "cron")).id == "cron_a1_1")
     }
 
@@ -591,7 +588,7 @@ private let runsJSON = #"""
         #expect(notifier.posted == [CatchUpNotification(sessionId: "cron_a1_20261117_080003",
                                                         title: "Morning Zillow new rental watch",
                                                         body: "New message from Hermes")])
-        #expect(notifier.badges == [1])
+        #expect(notifier.badges == [0], "issue #122: the notification posts, but the badge counts chats only")
         #expect(cache.loadSessions().first { $0.id == run.id }?.isUnread == true)
     }
 

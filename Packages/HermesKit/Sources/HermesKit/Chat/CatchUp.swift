@@ -216,7 +216,8 @@ public struct CatchUpRefresher: Sendable {
         let unread = Set(cached.filter(\.isUnread).map(\.id))
         let merged = CatchUp.markUnread(fresh, unread: unread, newContent: Set(changed), openSessionId: openSessionId)
         cache.saveSessions(merged)
-        let count = merged.filter(\.isUnread).count
+        // Issue #122: the badge counts unread chats only, not cron runs.
+        let count = SessionListItem.chats(merged).filter(\.isUnread).count
         if setsBadge { await notifier.setBadge(count) }
         return CatchUpResult(changed: changed, notified: notified, unreadCount: count)
     }
