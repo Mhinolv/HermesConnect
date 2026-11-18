@@ -229,6 +229,14 @@ final class VoiceTabModel {
         await session.start(in: chat)
     }
 
+    /// Issue #124: the "Start Hands-Free" Siri shortcut. `server` is the active server after any switch.
+    /// The result is the same as a tap on the ring in Hands-Free, on the Voice target of that server.
+    func startHandsFree(server: UUID?) async {
+        serverChanged(server)
+        select(.handsFree)
+        await start()
+    }
+
     private func targetChat() -> ChatViewModel {
         let chat: ChatViewModel
         switch target {

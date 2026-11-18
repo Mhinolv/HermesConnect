@@ -70,6 +70,12 @@ struct HermesShortcuts: AppShortcutsProvider {
                               "What did \(.applicationName) say"],
                     shortTitle: "Read Hermes",
                     systemImageName: "speaker.wave.2.bubble")
+        // Issue #124: the owner can make a Shortcuts app shortcut named "Hands Free" that runs this intent.
+        AppShortcut(intent: StartHandsFreeIntent(),
+                    phrases: ["Start Hands-Free in \(.applicationName)", "Hands-Free with \(.applicationName)",
+                              "Start \(.applicationName) Hands-Free"],
+                    shortTitle: "Start Hands-Free",
+                    systemImageName: "waveform")
     }
 
     static let shortcutTileColor: ShortcutTileColor = .blue
