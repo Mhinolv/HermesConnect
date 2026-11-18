@@ -34,10 +34,16 @@ public struct GatewayEndpoint: Sendable, Equatable, CustomStringConvertible, Cus
     static let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "::1", "[::1]"]
 
     /// `ws://127.0.0.1:<port>/api/ws?token=<token>` (`apps/desktop/electron/connection-config.ts:91-97`).
-    public var webSocketURL: URL {
+    public var webSocketURL: URL { webSocketURL(path: "/api/ws") }
+
+    /// Issue #97: the audio sockets use the same `?token=` as `/api/ws` (`web_server_chat.py:352-363`).
+    /// `ws://127.0.0.1:<port>/api/audio/speak-stream?token=<token>`.
+    public var speakStreamURL: URL { webSocketURL(path: "/api/audio/speak-stream") }
+
+    func webSocketURL(path: String) -> URL {
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
-        components.path = "/api/ws"
+        components.path = path
         components.queryItems = [URLQueryItem(name: "token", value: token)]
         return components.url!
     }
