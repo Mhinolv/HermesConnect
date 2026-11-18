@@ -29,7 +29,8 @@ struct HermesConnectApp: App {
             let demoJobs = JobsDemo.makeJobs() ?? ChatLaunch.makeOfflineJobs()
             sessions = demoSessions
             jobs = demoJobs
-            voice = VoiceTabModel(sessions: demoSessions)
+            // Issue #102: `HERMES_DEMO_LIVE=on|off` gives the Live status with no server.
+            voice = VoiceTabModel(sessions: demoSessions, liveService: LiveModeDemo.service)
             link = nil
             // The DEBUG demo conversation: no server, no App Lock, so screenshots show the chat.
             // Issue #66: the Servers screenshots use 3 servers.

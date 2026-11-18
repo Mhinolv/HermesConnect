@@ -4,6 +4,8 @@ import UIKit
 
 /// Issue #101: the state of the Voice tab and the mini bar. It owns one #96 voice session at a time and the
 /// target chat choice. The loop logic stays in `VoiceModeController`.
+/// Issue #102: it also owns one #98 live session (`LiveModeSessionModel`) in the Live mode. The live logic stays
+/// in `LiveModeController`.
 @MainActor @Observable
 final class VoiceTabModel {
     private(set) var session: VoiceModeSessionModel?
@@ -14,24 +16,50 @@ final class VoiceTabModel {
     /// The `clipEndCount` at the last barge-in. Listening shows "Reply stopped" until the next clip ends.
     private var clipEndsAtBargeIn: Int?
     private var seenBargeIns = 0
+    /// Issue #102: the picker choice of this server. It stays Hands-Free while Live is not available.
+    private(set) var chosenMode: VoiceTabMode = .handsFree
+    /// Issue #102: the last `voice-live/status` answer of the active server.
+    private(set) var liveAvailability: LiveAvailability = .checking
+    /// Issue #102: the live session that runs, or that failed ("Try Again"). `nil` in Hands-Free.
+    private(set) var live: LiveModeSessionModel?
+    /// Issue #102: the toast after a live session ends ("Live Mode Ended, 4:12").
+    private(set) var liveToast: String?
+    /// Issue #102: the owner refused the microphone. The tab shows "Microphone Access Off".
+    var liveMicrophoneDenied = false
+    @ObservationIgnored private var seenLiveEnd = 0
 
     @ObservationIgnored let sessions: SessionListModel
     @ObservationIgnored private let makeSession: @MainActor () -> VoiceModeSessionModel?
     @ObservationIgnored private let store: VoiceTargetStore
+    @ObservationIgnored private let modeStore: VoiceTabModeStore
+    @ObservationIgnored private let liveService: (any LiveModeService)?
+    @ObservationIgnored private let makeLive: @MainActor (ChatViewModel, any LiveModeService) -> LiveModeSessionModel
     @ObservationIgnored private var server: UUID?
 
-    /// - Parameter makeSession: a new voice session for the active server. `nil` when there is no link (DEBUG demo).
+    /// - Parameters:
+    ///   - makeSession: a new voice session for the active server. `nil` when there is no link (DEBUG demo).
+    ///   - liveService: the `voice-live` calls (#97). `nil`: Live is not available.
+    ///   - makeLive: a new live session in a chat. Tests give a fake connection. No test opens a real session.
     init(sessions: SessionListModel, store: VoiceTargetStore = VoiceTargetStore(),
-         makeSession: @escaping @MainActor () -> VoiceModeSessionModel? = { nil }) {
+         modeStore: VoiceTabModeStore = VoiceTabModeStore(), liveService: (any LiveModeService)? = nil,
+         makeSession: @escaping @MainActor () -> VoiceModeSessionModel? = { nil },
+         makeLive: @escaping @MainActor (ChatViewModel, any LiveModeService) -> LiveModeSessionModel = {
+             LiveModeSessionModel(hermes: $0, service: $1)
+         }) {
         self.sessions = sessions
         self.store = store
+        self.modeStore = modeStore
+        self.liveService = liveService
+        self.makeLive = makeLive
         self.makeSession = makeSession
         target = store.load(server: nil)
+        chosenMode = modeStore.load(server: nil)
+        if liveService == nil { liveAvailability = .failed }
     }
 
     /// The live app: a session on the chat link. While VoiceOver runs, only Magic Tap interrupts a reply.
     static func live(sessions: SessionListModel, link: LiveChatTransport?) -> VoiceTabModel {
-        VoiceTabModel(sessions: sessions) {
+        VoiceTabModel(sessions: sessions, liveService: link.map { $0 as any LiveModeService }) {
             guard let link else { return nil }
             var tuning = VoiceModeTuning()
             tuning.autoBargeIn = !UIAccessibility.isVoiceOverRunning
@@ -41,13 +69,26 @@ final class VoiceTabModel {
 
     var controller: VoiceModeController? { session?.controller }
     var state: VoiceModeState { controller?.state ?? .idle }
+    /// Issue #102: the live engine of the live session.
+    var liveController: LiveModeController? { live?.controller }
     /// `true` from start to end. The mini bar shows on the other tabs.
-    var isRunning: Bool { state.isActive }
+    var isRunning: Bool { state.isActive || isLiveRunning }
+    /// Issue #102: a live session runs (also "Live mode stopped", until End or Try Again).
+    var isLiveRunning: Bool { liveController?.isActive ?? false }
+    var liveElapsed: Int { liveController?.elapsedSeconds ?? 0 }
+
+    /// The segment that shows as on. Live only when the server has it.
+    var mode: VoiceTabMode { chosenMode == .live && liveAvailability.isAvailable ? .live : .handsFree }
     var level: Float { controller?.level ?? 0 }
     var bargeInCount: Int { controller?.bargeInCount ?? 0 }
     var clipEndCount: Int { controller?.clipEndCount ?? 0 }
 
     var display: VoiceTabDisplay {
+        if let live = liveController, let display = VoiceTabDisplay.live(
+            phase: live.phase, muted: live.muted, speaking: live.speaking, idleWarning: live.idleWarning,
+            stillWorking: live.stillWorking, failure: live.failure) {
+            return display
+        }
         let afterBargeIn = clipEndsAtBargeIn != nil && clipEndsAtBargeIn == controller?.clipEndCount
         return VoiceTabDisplay.make(state: state, muted: controller?.muted ?? false,
                                     thinkingSeconds: controller?.thinkingSeconds ?? 0, afterBargeIn: afterBargeIn)
@@ -94,12 +135,101 @@ final class VoiceTabModel {
         end()
         server = id
         target = store.load(server: id)
+        chosenMode = modeStore.load(server: id)
+        liveAvailability = liveService == nil ? .failed : .checking
+    }
+
+    // MARK: Live mode (issue #102)
+
+    /// "Hands-Free | Live". A change ends the current session. Live is not selectable while it is not available.
+    func select(_ mode: VoiceTabMode) {
+        guard mode != self.mode else {
+            // Live shows as Hands-Free while it is not available. A tap on Hands-Free keeps Hands-Free.
+            chosenMode = mode
+            modeStore.save(mode, server: server)
+            return
+        }
+        guard mode == .handsFree || liveAvailability.isAvailable else { return }
+        if isLiveRunning { endLive(.modeChange) } else { end() }
+        chosenMode = mode
+        modeStore.save(mode, server: server)
+    }
+
+    /// `GET /api/audio/voice-live/status`. A failure or no link makes the segment dim.
+    func refreshLiveStatus() async {
+        guard let liveService else {
+            liveAvailability = .failed
+            return
+        }
+        let server = server
+        let result: LiveAvailability
+        do {
+            result = LiveAvailability(status: try await liveService.voiceLiveStatus())
+        } catch {
+            result = .failed
+        }
+        // A switch while the call ran: the answer belongs to the old server.
+        guard server == self.server else { return }
+        liveAvailability = result
+    }
+
+    private func startLive(in chat: ChatViewModel) async {
+        guard let liveService else { return }
+        let live = makeLive(chat, liveService)
+        self.live = live
+        sessionChat = chat
+        liveToast = nil
+        seenLiveEnd = live.controller.lastEnd?.serial ?? 0
+        await live.start()
+        // The gate refreshed the status. A server that turned Live off shows it in the picker.
+        if let status = live.status { liveAvailability = .init(status: status) }
+        if live.isOlderServer { liveAvailability = .olderServer }
+        if live.microphoneDenied { liveMicrophoneDenied = true }
+        // The gate or the microphone refused: no session runs.
+        if !live.controller.isActive { self.live = nil }
+    }
+
+    /// Ends the live session at once. The toast shows "Live Mode Ended, m:ss".
+    func endLive(_ reason: LiveModeEndReason = .hangUp) {
+        guard let live else { return }
+        live.end(reason)
+        noteLiveEnd()
+        if !live.controller.isActive { self.live = nil }
+    }
+
+    /// The view calls it when the live phase changes: the engine also ends by itself (idle, background, server).
+    func noteLiveEnd() {
+        guard let end = liveController?.lastEnd, end.serial != seenLiveEnd else { return }
+        seenLiveEnd = end.serial
+        liveToast = end.toast
+    }
+
+    func clearLiveToast() { liveToast = nil }
+
+    /// The view calls it when the live session is no longer active: the model drops it.
+    func liveDidStop() {
+        noteLiveEnd()
+        if let live, !live.controller.isActive { self.live = nil }
     }
 
     // MARK: Commands
 
     func start() async {
         guard !isRunning else { return }
+        if mode == .live {
+            await startLive(in: targetChat())
+            return
+        }
+        let chat = targetChat()
+        guard let session = makeSession() else { return }
+        self.session = session
+        sessionChat = chat
+        clipEndsAtBargeIn = nil
+        seenBargeIns = 0
+        await session.start(in: chat)
+    }
+
+    private func targetChat() -> ChatViewModel {
         let chat: ChatViewModel
         switch target {
         case .active:
@@ -109,20 +239,23 @@ final class VoiceTabModel {
         case .chosen(let id, _, _):
             chat = sessions.chat(for: id)
         }
-        guard let session = makeSession() else { return }
-        self.session = session
-        sessionChat = chat
-        clipEndsAtBargeIn = nil
-        seenBargeIns = 0
-        await session.start(in: chat)
+        return chat
     }
 
-    /// End: the microphone closes and the audio session is released.
+    /// End: the microphone closes and the audio session is released. In Live, the live session ends.
     func end() {
+        if live != nil {
+            endLive(.hangUp)
+            return
+        }
         controller?.end()
     }
 
     func toggleMute() {
+        if let liveController, isLiveRunning {
+            liveController.toggleMute()
+            return
+        }
         controller?.toggleMute()
     }
 
@@ -136,10 +269,33 @@ final class VoiceTabModel {
         }
     }
 
-    func ringTap() async { await perform(VoiceTabDisplay.ringTap(state)) }
-    func magicTap() async { await perform(VoiceTabDisplay.magicTap(state)) }
+    func ringTap() async {
+        if let liveController, isLiveRunning {
+            if VoiceTabDisplay.liveRingTap(liveController.phase) == .resume { await tryAgainLive() }
+            return
+        }
+        await perform(VoiceTabDisplay.ringTap(state))
+    }
+
+    /// Live: Magic Tap mutes. Idle in Live mode: it starts a session.
+    func magicTap() async {
+        if isLiveRunning {
+            toggleMute()
+            return
+        }
+        await perform(VoiceTabDisplay.magicTap(state))
+    }
+
+    private func tryAgainLive() async {
+        guard let live else { return }
+        await live.start()
+    }
 
     func run(_ action: VoiceTabAction) {
+        if isLiveRunning, action == .tryAgain {
+            Task { await tryAgainLive() }
+            return
+        }
         switch action {
         case .resume, .tryAgain:
             controller?.resume()

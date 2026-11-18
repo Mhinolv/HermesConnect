@@ -3,7 +3,7 @@ import HermesKit
 import Observation
 import UIKit
 
-/// Issue #98: the app side of the GPT-Live engine. It has no views, so the #101 Voice tab can use it as is.
+/// Issue #98: the app side of the GPT-Live engine. It has no views. The Voice tab (#102) uses it as is.
 ///
 /// - The status gate: Live can start only when `voice-live/status` says `available: true`.
 /// - The microphone check before a session.

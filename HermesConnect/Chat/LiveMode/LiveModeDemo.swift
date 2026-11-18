@@ -1,8 +1,8 @@
 import Foundation
 import HermesKit
 
-/// DEBUG only: the Live entry with no server. `HERMES_DEMO_LIVE=on` (Live available) or `off` (not available).
-/// The demo never opens a live session: "Start Live" in the `on` demo fails at once with no network.
+/// DEBUG only: the Live status of the Voice tab with no server. `HERMES_DEMO_LIVE=on` (Live available) or `off`
+/// (not available). The demo never opens a live session: a start in the `on` demo fails at once with no network.
 enum LiveModeDemo {
     static var service: (any LiveModeService)? {
         #if DEBUG
