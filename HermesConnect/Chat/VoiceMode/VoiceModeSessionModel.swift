@@ -161,15 +161,25 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
         processing.value.withLock { $0 = status }
         _ = engine.mainMixerNode
         inputNode.removeTap(onBus: 0)
-        let input = input
-        inputNode.installTap(onBus: 0, bufferSize: 1_024, format: inputNode.outputFormat(forBus: 0)) { buffer, _ in
-            input.receive(buffer)
-        }
+        Self.installInputTap(on: inputNode, input: input)
         if !engine.isRunning {
             engine.prepare()
             try engine.start()
         }
         route.engineStarted()
+    }
+
+    /// Puts the tap on `node` (the engine input). AVFAudio calls the block on its own audio queue.
+    /// Issue #127 round 3: the block must not have main actor isolation. A block made in this `@MainActor`
+    /// class gets it, and the Swift runtime check traps on the audio queue. So the function is `nonisolated`,
+    /// the block is `@Sendable`, and it touches only `VoiceEngineInput` (lock-protected).
+    nonisolated static func installInputTap(on node: AVAudioNode, input: VoiceEngineInput) {
+        node.installTap(onBus: 0, bufferSize: 1_024, format: node.outputFormat(forBus: 0),
+                        block: inputTap(for: input))
+    }
+
+    nonisolated private static func inputTap(for input: VoiceEngineInput) -> AVAudioNodeTapBlock {
+        { @Sendable buffer, _ in input.receive(buffer) }
     }
 
     func startClip(url: URL) throws {

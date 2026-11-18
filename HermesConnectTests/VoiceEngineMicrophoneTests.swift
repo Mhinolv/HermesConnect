@@ -66,4 +66,48 @@ struct VoiceEngineMicrophoneTests {
         #expect(!FileManager.default.fileExists(atPath: url.path))
         #expect(input.stop() == 0)
     }
+
+    /// Issue #127 round 3: AVFAudio calls the tap block on its own audio queue. A block with main actor
+    /// isolation traps there (`dispatch_assert_queue`). This test installs the real tap on an offline engine,
+    /// so AVFAudio calls it off the main thread, as on the device.
+    @Test func theInputTapRunsOnTheAudioQueue() async throws {
+        let input = VoiceEngineInput()
+        let url = clipURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try input.start(url: url, settings: AVVoiceRecorder.settings)
+
+        let engine = AVAudioEngine()
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+        try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4_800)
+        let source = AVAudioPlayerNode()
+        engine.attach(source)
+        engine.connect(source, to: engine.mainMixerNode, format: format)
+        AVVoiceModeMicrophone.installInputTap(on: engine.mainMixerNode, input: input)
+        try engine.start()
+        source.scheduleBuffer(buffer(value: 0.1, frames: 48_000), completionHandler: nil)
+        source.play()
+        let output = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat, frameCapacity: 4_800)!
+        for _ in 0..<10 { _ = try engine.renderOffline(4_800, to: output) }
+        // The tap delivers on its own queue a little later.
+        for _ in 0..<100 where (input.level() ?? VoiceInputMeter.silence) <= -100 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        engine.mainMixerNode.removeTap(onBus: 0)
+        engine.stop()
+        #expect((input.level() ?? VoiceInputMeter.silence) > -100)
+        #expect(input.stop() > 0)
+    }
+
+    /// The route check before each reply runs where `StreamedSpeech` runs: not on the main thread.
+    /// `begin(sampleRate: 0)` runs the check, then the player refuses the rate, so no audio starts.
+    @Test func theReplyRouteCheckRunsOffTheMainThread() async {
+        let microphone = AVVoiceModeMicrophone(environment: [:])
+        let player = microphone.replyPlayer
+        let refused = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            DispatchQueue(label: "test.speech").async {
+                continuation.resume(returning: (try? player.begin(sampleRate: 0)) == nil)
+            }
+        }
+        #expect(refused)
+    }
 }
