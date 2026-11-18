@@ -122,3 +122,15 @@ extension GatewayClient: SessionsTransport {
         return id
     }
 }
+
+/// Issue #97: the voice calls that voice mode (#96) and GPT-Live (#98) use. Tests use a fake.
+public protocol VoiceStreamTransport: Sendable {
+    /// `GET /api/audio/voice-config`: relay or client-direct for each leg.
+    func voiceConfig() async throws -> VoiceClientConfig
+    /// `GET /api/audio/voice-live/status`. `nil` on an older server: use `chained`.
+    func voiceLiveStatus() async throws -> VoiceLiveStatus?
+    /// `POST /api/audio/voice-live/session`: the SDP answer for a WebRTC offer. Each session costs money.
+    func createVoiceLiveSession(offerSDP: String, history: [VoiceLiveHistoryItem]) async throws -> VoiceLiveSessionAnswer
+    /// A speaker for one reply: `speak-stream`, with `POST /api/audio/speak` as the fallback.
+    func makeStreamedSpeech(player: any StreamedSpeechPlaying) async throws -> StreamedSpeech
+}

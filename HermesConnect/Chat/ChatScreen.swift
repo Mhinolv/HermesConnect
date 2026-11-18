@@ -393,7 +393,8 @@ enum ChatLaunch {
     static func makeDemoSessions() -> SessionListModel {
         guard let scenario = DemoChatTransport.Scenario.current else { return makeOfflineSessions() }
         let transport = DemoChatTransport(scenario: scenario)
-        let rows = scenario.hasListRows ? DemoChatTransport.sessionRows() : []
+        // Issue #94: `HERMES_DEMO_MORE` gives two chats the blue dot.
+        let rows = scenario.hasListRows ? ChatsMoreDemo.rows(DemoChatTransport.sessionRows()) : []
         let active = scenario.showsList || scenario == .empty ? nil : DemoChatTransport.storedId
         let cache = InMemorySessionCacheStore(sessions: rows, activeSessionId: active)
         let sessions = SessionListModel(transport: transport, chatTransport: transport, cache: cache)

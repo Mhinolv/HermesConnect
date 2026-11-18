@@ -41,6 +41,10 @@ public final class SessionListModel {
     @ObservationIgnored private var generation = 0
     /// Issue #83: the unread ids of the server that is active again. The next load gives them the blue dot.
     @ObservationIgnored private var carriedUnread: Set<String> = []
+    /// Issue #94: the chats that "Mark All as Read" cleared and the server did not get yet (offline, failed link).
+    /// They go on the next connect. A switch drops them: they belong to the old server.
+    @ObservationIgnored private var pendingReadSync: [String] = []
+    @ObservationIgnored private var readSyncTask: Task<Void, Never>?
 
     /// `transport` and `chatTransport` are the same `LiveChatTransport` in the app. Tests give fakes.
     public init(transport: any SessionsTransport, chatTransport: any ChatTransport, cache: any SessionCacheStore,
@@ -154,6 +158,68 @@ public final class SessionListModel {
         cache.saveSessions(sessions)
     }
 
+    // MARK: Mark all as read (issue #94)
+
+    /// "Mark All as Read" is on: the first load is done and a chat row has the blue dot. Offline is not a stop.
+    public var canMarkAllRead: Bool { hasLoaded && chatsUnreadCount > 0 }
+
+    /// Clears the blue dot on every chat row of the active server, also the rows that the search hides.
+    /// - Cron runs keep their dots (the Jobs tab, #73). The Archived list does not change.
+    /// - The carried dots of a server switch go too, so the next load does not bring them back.
+    /// - Then each cleared chat gets `PATCH unread: false`, one at a time. A failure keeps the chat read here.
+    /// Returns the number of chats that it cleared.
+    @discardableResult
+    public func markAllRead() -> Int {
+        let cleared = chatRows.filter(\.isUnread).map(\.id)
+        carriedUnread = carriedUnread.filter(isCronRun)
+        guard !cleared.isEmpty else { return 0 }
+        let ids = Set(cleared)
+        sessions = sessions.map { row in
+            guard ids.contains(row.id) else { return row }
+            var row = row
+            row.isUnread = false
+            return row
+        }
+        cache.saveSessions(sessions)
+        pendingReadSync.append(contentsOf: cleared.filter { !pendingReadSync.contains($0) })
+        syncReadStateSoon()
+        return cleared.count
+    }
+
+    /// Sends the pending read state to the server. Calls at the same time share one run. Tests await it.
+    public func syncReadState() async {
+        if let readSyncTask { return await readSyncTask.value }
+        guard !pendingReadSync.isEmpty, let actions else { return }
+        let current = generation
+        let task = Task {
+            // Each id goes once in a run, also an id that a second "Mark All as Read" adds while it runs.
+            var attempted: Set<String> = []
+            while let id = pendingReadSync.first(where: { !attempted.contains($0) }) {
+                attempted.insert(id)
+                guard current == generation else { return }
+                do {
+                    try await actions.setSessionUnread(storedId: id, unread: false)
+                    if current == generation { pendingReadSync.removeAll { $0 == id } }
+                } catch {
+                    // A refusal of the server is final: the chat stays read on the phone only. A link
+                    // failure waits for the next connect.
+                    if current == generation, ReadSync.isFinal(error) { pendingReadSync.removeAll { $0 == id } }
+                }
+            }
+        }
+        readSyncTask = task
+        await task.value
+        // A switch can start a new run for the new server while this one ends.
+        if readSyncTask == task { readSyncTask = nil }
+    }
+
+    /// The ids that wait for the server (tests).
+    public var pendingReadSyncIds: [String] { pendingReadSync }
+
+    private func syncReadStateSoon() {
+        Task { await syncReadState() }
+    }
+
     /// Issue #15: one background catch-up (BGAppRefresh). It posts the notifications and sets the badge.
     /// Then the list shows the new rows and dots. Returns `nil` when `session.list` fails.
     @discardableResult
@@ -218,6 +284,8 @@ public final class SessionListModel {
         chats = [:]
         openChatModel = nil
         refreshTask = nil
+        pendingReadSync = []
+        readSyncTask = nil
         archivedCount = 0
         archivedSessions = []
         hasLoadedArchived = false
@@ -246,6 +314,8 @@ public final class SessionListModel {
         case .state(.connected):
             Task { await refresh() }
             sendOutboxes()
+            // Issue #94: the read state that "Mark All as Read" could not send offline.
+            syncReadStateSoon()
         case .event(let event):
             switch event.kind {
             case .sessionsChanged:
@@ -478,6 +548,24 @@ public final class SessionListModel {
         chat.startEvents()
         chats[key] = chat
         return chat
+    }
+}
+
+/// Issue #94: the answer to a `PATCH unread` call.
+enum ReadSync {
+    /// `true` when the server answered with a refusal, so a new call gets the same answer. A link failure
+    /// (offline, stale token, a 5xx answer) is not final: the call goes again on the next connect.
+    static func isFinal(_ error: any Error) -> Bool {
+        switch error {
+        case SessionActionError.refused(let status, _), HermesAPIError.http(let status): return isFinal(status: status)
+        case HermesAPIError.notFound: return true
+        default: return false
+        }
+    }
+
+    /// A 4xx answer, but not 408, 409 (busy or a newer revision) or 429: a later call can pass.
+    private static func isFinal(status: Int) -> Bool {
+        (400..<500).contains(status) && ![408, 409, 429].contains(status)
     }
 }
 

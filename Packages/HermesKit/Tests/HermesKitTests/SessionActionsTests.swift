@@ -71,6 +71,29 @@ private func query(_ request: URLRequest) -> [String: String] {
         #expect(Set(body.keys) == ["title", "request_id", "expected_revision", "expected_generation"])
     }
 
+    // Issue #94: "Mark All as Read" sends the read state like the desktop app.
+    @Test func unreadReadsTheSnapshotThenPatchesOnlyTheFlagWithTheFence() async throws {
+        let http = ScriptedHTTP()
+        http.answer("GET /api/sessions/k1/mutation-snapshot",
+                    body: #"{"session_id":"k1","exists":true,"runtime_revision":3,"runtime_generation":null}"#)
+        http.answer("PATCH /api/sessions/k1", body: #"{"ok":true}"#)
+        try await client(http).setSessionUnread(storedSessionId: "k1", unread: false)
+        #expect(http.keys == ["GET /api/sessions/k1/mutation-snapshot", "PATCH /api/sessions/k1"])
+        let body = try json(http.requests[1].httpBody)
+        #expect(body["unread"] as? Bool == false)
+        #expect(body["expected_revision"] as? Int == 3)
+        #expect(Set(body.keys) == ["unread", "request_id", "expected_revision"])
+    }
+
+    @Test func unreadOfAMissingSessionIsNotFoundWithNoPatch() async throws {
+        let http = ScriptedHTTP()
+        http.answer("GET /api/sessions/k1/mutation-snapshot", body: #"{"session_id":"k1","exists":false,"runtime_revision":0,"runtime_generation":null}"#)
+        await #expect(throws: HermesAPIError.notFound) {
+            try await client(http).setSessionUnread(storedSessionId: "k1", unread: false)
+        }
+        #expect(http.keys == ["GET /api/sessions/k1/mutation-snapshot"])
+    }
+
     @Test func renameWithNoGenerationSendsNone() async throws {
         let http = ScriptedHTTP()
         http.answer("GET /api/sessions/k1/mutation-snapshot",
@@ -338,6 +361,7 @@ private final class FakeActionsTransport: SessionsTransport, SessionActionsTrans
 
     func closeSession(liveId: String) async throws { try await record("close \(liveId)") }
     func deleteSession(storedId: String) async throws { try await record("delete \(storedId)") }
+    func setSessionUnread(storedId: String, unread: Bool) async throws { try await record("unread \(storedId) \(unread)") }
 
     func fetchArchivedSessions(limit: Int) async throws -> ArchivedSessions {
         lock.withLock {

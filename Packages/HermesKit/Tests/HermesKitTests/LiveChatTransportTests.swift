@@ -151,4 +151,43 @@ private func waitFor(_ condition: @MainActor () -> Bool) async throws {
         #expect(!LiveChatTransport.isStaleToken(GatewayError.disconnected(.heartbeatTimeout)))
         #expect(!LiveChatTransport.isStaleToken(HermesAPIError.http(status: 500)))
     }
+
+    // MARK: Voice (issue #97)
+
+    @Test func speechNeedsAnEndpoint() throws {
+        let transport = LiveChatTransport()
+        #expect(throws: SpeechStreamError.offline) { try transport.makeStreamedSpeech(player: FakeSpeechPlayer()) }
+    }
+
+    @Test func voiceRESTUsesTheEndpoint() async throws {
+        let http = ScriptedHermesHTTP()
+        let factory = ClientFactory()
+        let transport = LiveChatTransport(makeClient: factory.make, makeREST: { HermesRESTClient(endpoint: $0, loader: http) })
+        await #expect(throws: GatewayError.notConnected) { try await transport.voiceConfig() }
+        transport.setEndpoint(try endpoint(8123))
+        _ = try? await transport.voiceLiveStatus()
+        _ = try? await transport.voiceConfig()
+        #expect(http.paths == ["/api/audio/voice-live/status", "/api/audio/voice-config"])
+    }
+
+    @Test func speechStreamsOnTheForwardAndARefusalRenewsOnce() async throws {
+        let factory = ClientFactory()
+        let audioSocket = FakeGatewaySocket()
+        let audio = FakeGatewayConnector(audioSocket)
+        let transport = LiveChatTransport(makeClient: factory.make, audioConnector: audio)
+        var renewals = 0
+        transport.onStaleToken = { renewals += 1 }
+        transport.setEndpoint(try endpoint(8123))
+        _ = try await factory.handshake(0)
+        try await waitFor { transport.status == .ready }
+
+        let speech = try transport.makeStreamedSpeech(player: FakeSpeechPlayer())
+        await speech.append("Hi.")
+        try await waitFor { audioSocket.sent.contains { $0["text"]?.stringValue == "Hi." } }
+        #expect(audio.urls.map(\.absoluteString) == ["ws://127.0.0.1:8123/api/audio/speak-stream?token=\(token)"])
+        audioSocket.serverClose(httpStatus: 403)
+        #expect(await speech.waitUntilDone() == .failed(.unauthorized))
+        try await waitFor { renewals == 1 }
+        #expect(transport.status == .reconnecting)
+    }
 }

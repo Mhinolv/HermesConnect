@@ -177,6 +177,38 @@ import UserNotifications
         #expect(lists.caches.activeServer == home.id, "a relaunch on Home reads only the Home folder")
     }
 
+    /// Issue #94: "Mark All as Read" clears the active server only, and its book entry, so a relaunch keeps it.
+    @Test func markAllReadDropsOnlyTheActiveCountAndItsBookEntry() async throws {
+        let setup = await makeModel([home, lab])
+        let rows = [SessionListItem(id: "h1", title: "Trip", isUnread: true),
+                    SessionListItem(id: "h2", title: "Dinner", source: "photon", isUnread: true),
+                    SessionListItem(id: "cron_j1_1", title: "Digest", source: "cron", isUnread: true)]
+        let homeCache = InMemorySessionCacheStore(sessions: rows)
+        // An old entry of Home (a switch away and back) and 3 unread chats on Lab.
+        setup.model.recordServerState(.init(unreadIds: ["h1", "h2", "cron_j1_1"], unreadChats: 2), for: home.id)
+        setup.model.recordServerState(.init(unreadIds: ["l1", "l2", "l3"], unreadChats: 3), for: lab.id)
+        let lists = attachLists(setup.model, seed: [home.id: homeCache])
+        #expect(lists.sessions.canMarkAllRead)
+        #expect(setup.model.badgeCount(activeUnread: lists.sessions.unreadCount) == 6)
+
+        #expect(lists.sessions.markAllRead() == 2)
+        ServerSwitchGlue.recordActiveState(model: setup.model, sessions: lists.sessions)
+        #expect(lists.sessions.chatsUnreadCount == 0, "the Chats tab badge")
+        #expect(lists.sessions.unreadCronRuns.count == 1, "the Jobs tab badge does not change")
+        #expect(setup.model.badgeCount(activeUnread: lists.sessions.unreadCount) == 4, "Lab keeps its 3")
+        #expect(setup.model.serverBook.entry(for: home.id) == .init(unreadIds: ["cron_j1_1"], unreadChats: 0))
+        #expect(setup.model.serverBook.entry(for: lab.id).unreadChats == 3)
+        let menu = setup.model.serverMenu(activeChats: lists.sessions.chatsUnreadCount)
+        #expect(menu.items.map(\.subtitle) == [nil, "3 unread"])
+
+        // A relaunch carries only the cron run back.
+        let relaunched = await makeModel([home, lab], defaults: setup.defaults)
+        #expect(relaunched.model.serverBook.entry(for: home.id).unreadIds == ["cron_j1_1"])
+        let again = attachLists(relaunched.model, seed: [home.id: homeCache])
+        #expect(again.sessions.chatsUnreadCount == 0)
+        #expect(!again.sessions.canMarkAllRead)
+    }
+
     @Test func removeAnotherServerDeletesItsFolderAndCount() async throws {
         let setup = await makeModel([home, lab])
         let labCache = InMemorySessionCacheStore(sessions: [SessionListItem(id: "l1", isUnread: true)])
