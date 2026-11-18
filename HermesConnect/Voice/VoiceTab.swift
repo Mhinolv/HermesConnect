@@ -222,6 +222,12 @@ struct VoiceScreen: View {
         }
     }
 
+    /// Issue #120: the tool line is one line, 2 lines from AX3.
+    private var subtitleLines: Int {
+        if display.showsTool { return typeSize >= .accessibility3 ? 2 : 1 }
+        return typeSize.isAccessibilitySize ? 3 : 2
+    }
+
     private var titles: some View {
         VStack(spacing: 6) {
             Text(display.title)
@@ -235,7 +241,8 @@ struct VoiceScreen: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                    .lineLimit(typeSize.isAccessibilitySize ? 3 : 2)
+                    .lineLimit(subtitleLines)
+                    .truncationMode(display.showsTool ? .middle : .tail)
                     .fixedSize(horizontal: false, vertical: true)
                     .monospacedDigit()
             }
@@ -589,7 +596,7 @@ private struct VoiceMiniBarAccessory: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 26.1, *) {
             content.tabViewBottomAccessory(isEnabled: isEnabled) {
-                VoiceMiniBar(display: model.display, level: VoiceScreenState(model: model).level,
+                VoiceMiniBar(display: model.miniBarDisplay, level: VoiceScreenState(model: model).level,
                              liveElapsed: model.isLiveRunning ? model.liveElapsed : nil,
                              onOpen: onOpen, onEnd: { model.end() })
             }

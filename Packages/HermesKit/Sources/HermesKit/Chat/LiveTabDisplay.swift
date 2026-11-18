@@ -75,8 +75,9 @@ extension VoiceTabDisplay {
     /// - Parameters:
     ///   - speaking: Hermes talks (the remote audio plays). Else the owner has the floor: the ring is blue.
     ///   - failure: the error line of the failed state.
+    ///   - tool: issue #120, the tool that runs now. It takes the place of "Still working…".
     public static func live(phase: LiveModePhase, muted: Bool, speaking: Bool, idleWarning: Bool,
-                            stillWorking: Bool, failure: String? = nil) -> VoiceTabDisplay? {
+                            stillWorking: Bool, failure: String? = nil, tool: String? = nil) -> VoiceTabDisplay? {
         func session(_ ring: VoiceRingStyle, _ title: String, _ subtitle: String?, action: VoiceTabAction? = nil,
                      muteEnabled: Bool = true) -> VoiceTabDisplay {
             VoiceTabDisplay(ring: ring, title: title, subtitle: subtitle, action: action, isSession: true,
@@ -90,6 +91,11 @@ extension VoiceTabDisplay {
         case .reconnecting:
             return session(.working, "Reconnecting…", nil)
         case .working:
+            if let tool {
+                var display = session(.working, "Hermes is working…", ChatToolText.runningLine(tool))
+                display.showsTool = true
+                return display
+            }
             return session(.working, "Hermes is working…", stillWorking ? "Still working…" : nil)
         case .failed:
             return session(.paused, "Live mode stopped", failure, action: .tryAgain, muteEnabled: false)

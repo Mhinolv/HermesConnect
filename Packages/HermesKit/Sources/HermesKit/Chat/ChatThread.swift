@@ -28,6 +28,8 @@ public struct ChatThread: Sendable, Equatable {
     public private(set) var turn: ChatTurnPhase = .idle
     /// One line under the thread while a turn runs: "Using web_search…". Cleared on `message.complete`.
     public private(set) var statusLine: String?
+    /// Issue #120: the name of the tool that runs now, for the Voice tab. `nil` between tools.
+    public private(set) var runningTool: String?
 
     /// The incoming bubble of the current turn.
     private var replyId: String?
@@ -42,6 +44,10 @@ public struct ChatThread: Sendable, Equatable {
     /// UTF-16 units applied per segment, to drop chunks that come twice (`offset`).
     private var applied: [Int: Int] = [:]
     private var segment = 0
+    /// Issue #120: the tool calls of the current turn, in call order. They go on the reply at `message.complete`.
+    private var turnTools: [ChatToolCall] = []
+    /// Issue #120: the `tool_id`s that started and did not complete, oldest first.
+    private var openToolIds: [String] = []
 
     public init(messages: [ChatMessage] = []) {
         self.messages = messages
@@ -340,7 +346,12 @@ public struct ChatThread: Sendable, Equatable {
             return applyDelta(delta, now: now, makeId: makeId)
         case .toolStart(let tool):
             guard turn != .idle else { return .none }
-            statusLine = "Using \(tool.name)…"
+            statusLine = ChatToolText.runningLine(tool.name)
+            startTool(tool)
+            return .structure
+        case .toolComplete(let tool):
+            guard turn != .idle else { return .none }
+            completeTool(tool)
             return .structure
         case .statusUpdate(let status):
             guard turn != .idle, !status.text.isEmpty else { return .none }
@@ -354,6 +365,37 @@ public struct ChatThread: Sendable, Equatable {
         default:
             return .none
         }
+    }
+
+    /// Issue #120: a `tool.start` that comes twice (a replay) keeps the first entry.
+    private mutating func startTool(_ tool: ToolStartPayload) {
+        if !turnTools.contains(where: { $0.id == tool.toolId }) {
+            turnTools.append(ChatToolCall(id: tool.toolId, name: tool.name, summary: tool.preview))
+        }
+        openToolIds.removeAll { $0 == tool.toolId }
+        openToolIds.append(tool.toolId)
+        runningTool = turnTools.first { $0.id == tool.toolId }?.name
+    }
+
+    /// Issue #120: the summary and the duration. A `tool.complete` with no `tool.start` still adds the tool.
+    private mutating func completeTool(_ tool: ToolCompletePayload) {
+        if let index = turnTools.firstIndex(where: { $0.id == tool.toolId }) {
+            let summary = tool.summary.flatMap { ChatToolText.clean($0, limit: ChatToolText.summaryLimit) }
+            if let summary { turnTools[index].summary = summary }
+            turnTools[index].duration = ChatToolCall.validDuration(tool.durationS)
+        } else {
+            turnTools.append(ChatToolCall(id: tool.toolId, name: tool.name, summary: tool.summary,
+                                          duration: tool.durationS))
+        }
+        openToolIds.removeAll { $0 == tool.toolId }
+        let open = openToolIds.last
+        runningTool = open.flatMap { id in turnTools.first { $0.id == id }?.name }
+    }
+
+    /// Issue #120: the tools of the turn go on its reply.
+    private mutating func attachTools(to row: Int) {
+        guard !turnTools.isEmpty else { return }
+        messages[row].tools = turnTools
     }
 
     /// The socket dropped during a turn. The reply fails, so the owner can retry.
@@ -419,10 +461,12 @@ public struct ChatThread: Sendable, Equatable {
             id = replyId
             messages[row].text = finalText
             messages[row].reply = reply
+            attachTools(to: row)
         } else if !finalText.isEmpty || reply != .complete {
             id = makeId()
             messages.append(ChatMessage(id: id, role: .assistant, text: finalText, date: now, reply: reply,
                                         promptId: promptId))
+            attachTools(to: messages.count - 1)
         } else {
             // A turn with no text, for example a muted background turn.
             ackTurnEnd(nil)
@@ -437,9 +481,11 @@ public struct ChatThread: Sendable, Equatable {
     private mutating func fail(message: String?, now: Date, makeId: () -> String) -> ChatThreadChange {
         if let replyId, let row = index(of: replyId) {
             messages[row].reply = .failed(message: message)
+            attachTools(to: row)
         } else {
             messages.append(ChatMessage(id: makeId(), role: .assistant, text: streamedText, date: now,
                                         reply: .failed(message: message), promptId: promptId))
+            attachTools(to: messages.count - 1)
         }
         ackTurnEnd(.failed(message: nil))
         endTurn()
@@ -468,6 +514,9 @@ public struct ChatThread: Sendable, Equatable {
         resetStream()
         replyId = nil
         statusLine = nil
+        runningTool = nil
+        turnTools = []
+        openToolIds = []
         turn = .idle
     }
 

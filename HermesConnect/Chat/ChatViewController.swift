@@ -30,6 +30,10 @@ final class ChatViewController: MessagesViewController {
     private var handledApprovalAlertId: String?
     /// Issue #117: the size of a secret, password or question card.
     private var promptCalculator: ChatVoiceSizeCalculator?
+    /// Issue #120: the size of the tool row of a reply.
+    private var toolsCalculator: ChatVoiceSizeCalculator?
+    /// Issue #120: the replies whose tool list is open, by row id.
+    private(set) var expandedTools: Set<String> = []
     /// Issue #117: what the owner typed on each prompt card that waits, by card id. Send and Cancel remove it.
     private var promptDrafts: [String: ChatPromptDraft] = [:]
     /// Issue #117: the last prompt card that played the haptic.
@@ -134,6 +138,7 @@ final class ChatViewController: MessagesViewController {
         messagesCollectionView.register(ChatCommandCell.self)
         messagesCollectionView.register(ChatApprovalCell.self)
         messagesCollectionView.register(ChatPromptCell.self)
+        messagesCollectionView.register(ChatToolsCell.self)
         messagesCollectionView.keyboardDismissMode = .interactive
         scrollsToLastItemOnKeyboardBeginsEditing = true
         maintainPositionOnInputBarHeightChanged = true
@@ -254,6 +259,13 @@ final class ChatViewController: MessagesViewController {
             return ChatPromptCardLayout.size(card, traits: self?.traitCollection ?? .current, maxWidth: maxWidth)
         }
         self.promptCalculator = promptCalculator
+        let toolsCalculator = ChatVoiceSizeCalculator(layout: layout, copying: layout.attributedTextMessageSizeCalculator)
+        toolsCalculator.bubbleSize = { [weak self] message, maxWidth in
+            guard let row = (message as? ChatBubble)?.row else { return .zero }
+            return ChatToolsLayout.size(row.message.tools, expanded: self?.expandedTools.contains(row.id) ?? false,
+                                        traits: self?.traitCollection ?? .current, maxWidth: maxWidth)
+        }
+        self.toolsCalculator = toolsCalculator
     }
 
     private func configureComposer() {
@@ -880,6 +892,8 @@ final class ChatViewController: MessagesViewController {
     }
 
     private func makeBubble(_ part: ChatBubblePart) -> ChatBubble {
+        // Issue #120: the tool row draws its own text.
+        if part.content == .tools { return ChatBubble(part: part, text: NSAttributedString()) }
         if let file = part.receivedFile { return receivedBubble(part, file: file) }
         guard let item = part.attachment else { return ChatBubble(part: part, text: styledText(for: part.row.message)) }
         if item.showsAsImage {
@@ -977,6 +991,15 @@ final class ChatViewController: MessagesViewController {
         UINotificationFeedbackGenerator().notificationOccurred(.warning)
         if UIAccessibility.isVoiceOverRunning {
             UIAccessibility.post(notification: .announcement, argument: ChatApprovalCard.title)
+        }
+    }
+
+    /// Issue #120: a tap on the tool row of a reply opens its list, and a second tap closes it.
+    func toggleTools(id: String) {
+        if expandedTools.remove(id) == nil { expandedTools.insert(id) }
+        guard let index = bubbles.firstIndex(where: { $0.row.id == id && $0.part.content == .tools }) else { return }
+        UIView.performWithoutAnimation {
+            messagesCollectionView.reloadSections(IndexSet(integer: index))
         }
     }
 
@@ -1124,6 +1147,12 @@ final class ChatViewController: MessagesViewController {
         guard let part = bubble(at: indexPath)?.part else { return cell }
         let row = part.row
         showBadges(on: cell, row: row)
+        // Issue #120: the tool row has its own elements: the row button, then one element per tool.
+        if part.content == .tools {
+            cell.isAccessibilityElement = false
+            cell.accessibilityCustomActions = nil
+            return cell
+        }
         cell.isAccessibilityElement = true
         cell.accessibilityLabel = ChatBubbleParts.accessibilityLabel(for: part)
         cell.accessibilityHint = switch row.footnote {
@@ -1238,7 +1267,8 @@ final class ChatViewController: MessagesViewController {
         guard let indexPath = indexPaths.first, let part = bubble(at: indexPath)?.part else { return nil }
         let row = part.row
         // Issue #104, #117: an approval card and a prompt card have their own buttons and no menu.
-        if row.message.approval != nil || row.message.prompt != nil { return nil }
+        // Issue #120: the tool row has no menu either.
+        if row.message.approval != nil || row.message.prompt != nil || part.content == .tools { return nil }
         return UIContextMenuConfiguration(identifier: indexPath as NSIndexPath, previewProvider: nil) { [weak self] _ in
             var actions: [UIMenuElement] = []
             // Issue #11: the six tapbacks in one row above the other actions.
@@ -1609,6 +1639,14 @@ extension ChatViewController: MessagesDataSource {
 
     func customCell(for message: MessageType, at indexPath: IndexPath,
                     in messagesCollectionView: MessagesCollectionView) -> UICollectionViewCell {
+        if let bubble = message as? ChatBubble, bubble.part.content == .tools {
+            let cell = messagesCollectionView.dequeueReusableCell(ChatToolsCell.self, for: indexPath)
+            cell.configure(with: message, at: indexPath, and: messagesCollectionView)
+            let id = bubble.row.id
+            cell.configure(tools: bubble.row.message.tools, expanded: expandedTools.contains(id), traits: traitCollection)
+            cell.onToggle = { [weak self] in self?.toggleTools(id: id) }
+            return cell
+        }
         if let row = row(for: message), let card = row.message.approval {
             let cell = messagesCollectionView.dequeueReusableCell(ChatApprovalCell.self, for: indexPath)
             cell.configure(with: message, at: indexPath, and: messagesCollectionView)
@@ -1752,6 +1790,7 @@ extension ChatViewController: MessagesLayoutDelegate {
 
     func customCellSizeCalculator(for message: MessageType, at _: IndexPath,
                                   in _: MessagesCollectionView) -> CellSizeCalculator {
+        if (message as? ChatBubble)?.part.content == .tools, let toolsCalculator { return toolsCalculator }
         if row(for: message)?.message.approval != nil, let approvalCalculator { return approvalCalculator }
         if row(for: message)?.message.prompt != nil, let promptCalculator { return promptCalculator }
         if row(for: message)?.message.command != nil, let commandCalculator { return commandCalculator }
@@ -1773,6 +1812,8 @@ extension ChatViewController: MessagesLayoutDelegate {
 
 extension ChatViewController: MessagesDisplayDelegate {
     func messageStyle(for message: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> MessageStyle {
+        // Issue #120: the tool row has no bubble.
+        if (message as? ChatBubble)?.part.content == .tools { return .none }
         if row(for: message)?.message.isLocalCard == true {
             return .custom { $0.layer.cornerRadius = ChatCommandCardLayout.cornerRadius }
         }
@@ -1781,6 +1822,7 @@ extension ChatViewController: MessagesDisplayDelegate {
     }
 
     func backgroundColor(for message: MessageType, at _: IndexPath, in _: MessagesCollectionView) -> UIColor {
+        if (message as? ChatBubble)?.part.content == .tools { return .clear }
         if row(for: message)?.message.isLocalCard == true { return .secondarySystemBackground }
         return row(for: message)?.message.role == .user ? .systemBlue : .systemGray5
     }
@@ -1858,7 +1900,9 @@ extension ChatViewController {
         swipeReply.target = { [weak self] point in
             guard let self, let indexPath = self.messagesCollectionView.indexPathForItem(at: point),
                   let cell = self.messagesCollectionView.cellForItem(at: indexPath) as? MessageContentCell,
-                  let row = self.bubble(at: indexPath)?.row, QuoteReply.canQuote(row.message) else { return nil }
+                  let part = self.bubble(at: indexPath)?.part, part.content != .tools,
+                  QuoteReply.canQuote(part.row.message) else { return nil }
+            let row = part.row
             return (cell, row.id)
         }
         swipeReply.onReply = { [weak self] id in self?.startReply(to: id) }
