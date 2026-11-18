@@ -57,7 +57,7 @@ public enum QuoteReply {
 
     /// A command card, a reply that still streams, and a bubble with no text, file or memo cannot be quoted.
     public static func canQuote(_ message: ChatMessage) -> Bool {
-        guard message.command == nil, message.reply != .streaming else { return false }
+        guard !message.isLocalCard, message.reply != .streaming else { return false }
         return !source(of: message).isEmpty
     }
 

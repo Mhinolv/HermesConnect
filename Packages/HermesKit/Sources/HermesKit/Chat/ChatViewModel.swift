@@ -40,6 +40,12 @@ public final class ChatViewModel {
     public private(set) var composerFill: ComposerFill?
     /// Issue #17: the message that the next text send quotes. The composer shows it above the text view.
     public private(set) var replyQuote: ChatQuote?
+    /// Issue #104: the last approval card that showed. Each new card gets a new value. The screen plays the
+    /// `.warning` haptic for it.
+    public private(set) var approvalAlert: ApprovalAlert?
+    /// Issue #104: an approval came on the open socket (not a replay). The app posts a local notification when
+    /// it is in the background.
+    @ObservationIgnored public var onApprovalRequest: (@MainActor (ApprovalAlert) -> Void)?
 
     @ObservationIgnored private var thread = ChatThread()
     @ObservationIgnored private let transport: any ChatTransport
@@ -76,6 +82,8 @@ public final class ChatViewModel {
     @ObservationIgnored private var commandPrompts: [String: String] = [:]
     /// Issue #98: the `voice_context` of each GPT-Live delegation, by message id. These go out with surface `voice-live`.
     @ObservationIgnored private var livePrompts: [String: String] = [:]
+    /// Issue #96: the memos of voice mode. Their replies get the audio that played, not a `POST /api/audio/speak`.
+    @ObservationIgnored private var voiceModePrompts: Set<String> = []
     /// Issue #39: the run that sends the queued messages in order. One run at a time.
     @ObservationIgnored private var outboxTask: Task<Void, Never>?
     /// Issue #12: the downloads of the `MEDIA:` files of this chat.
@@ -199,7 +207,10 @@ public final class ChatViewModel {
             // A session with a transcript has a server row, so the next launch can resume it.
             if !transcript.isEmpty { saveActiveSessionId() }
             // A running turn owns the end of the thread. Its `message.complete` brings the text.
-            guard thread.turn == .idle else { return }
+            guard thread.turn == .idle else {
+                await loadPendingApprovals(live)
+                return
+            }
             let history = ChatHistory.messages(from: transcript, reusing: thread.messages, fallbackDate: now())
             let shown = Set(thread.messages.map(\.id))
             if thread.replaceHistory(history) {
@@ -211,6 +222,7 @@ public final class ChatViewModel {
             saveTranscript()
             // Issue #39: the link is up. The outbox sends after the history, so the order stays.
             sendQueued()
+            await loadPendingApprovals(live)
         } catch where Self.isSessionNotFound(error) && !thread.messages.isEmpty {
             // QA #38 defect 1: the server lost a row that has messages on the screen. Keep them and
             // start a new session in its place. The chat stays open.
@@ -330,6 +342,20 @@ public final class ChatViewModel {
                 return
             }
             guard let live = session?.liveId, event.sessionId == live else { return }
+            switch event.kind {
+            case .requestCancel(let payload):
+                // Issue #104: the server withdrew a request. Only an approval card changes.
+                // The reason can be free text from the approval tool: it stays out of the log.
+                log.info("server request withdrawn: \(payload.method)")
+                if thread.withdrawApproval(serverRequestId: payload.id, reason: payload.reason) { redrawNow() }
+                return
+            case .approvalCancelled(let payload):
+                log.info("approvals cancelled: \(payload.requestIds.count)")
+                if thread.cancelApprovals(requestIds: payload.requestIds) { redrawNow() }
+                return
+            default:
+                break
+            }
             if case .messageComplete = event.kind { log.info("reply complete: session \(live)") }
             let makeId = self.makeId
             changed(thread.apply(event.kind, now: now(), makeId: makeId))
@@ -349,8 +375,127 @@ public final class ChatViewModel {
                 // Issue #39: a new chat with no stored id, or a chat that did not open yet.
                 sendQueued()
             }
-        case .state, .serverRequest:
+        case .serverRequest(let request):
+            guard let live = session?.liveId, request.sessionId == live else { return }
+            handle(request, sessionId: live, replayed: false)
+        case .state:
             break
+        }
+    }
+
+    // MARK: Server requests (issue #104)
+
+    /// `true` while an approval card waits for the owner. The chats list shows "Approval needed".
+    public var hasWaitingApproval: Bool {
+        messages.contains { $0.approval?.isWaiting == true }
+    }
+
+    /// An `approval` shows a card. `clarify`, `sudo` and `secret` get an error answer at once (a withdrawal), so
+    /// Hermes does not wait, and the chat shows one card line. `replayed` is a request from a resume snapshot.
+    private func handle(_ request: GatewayServerRequest, sessionId: String, replayed: Bool) {
+        guard let approval = request.approval else {
+            rejectUnsupported(request)
+            return
+        }
+        showApproval(ChatApprovalCard(request: approval, serverRequestId: request.id, sessionId: sessionId),
+                     replayed: replayed)
+    }
+
+    private func rejectUnsupported(_ request: GatewayServerRequest) {
+        // The method only: never the params (a sudo command, a secret prompt).
+        log.notice("server request not supported: \(request.method)")
+        if let card = UnsupportedServerRequest.card(for: request.kind) { addCommandCard(card) }
+        guard let requests = transport as? any ServerRequestTransport else { return }
+        let id = request.id
+        Task {
+            try? await requests.rejectServerRequest(id, code: UnsupportedServerRequest.errorCode,
+                                                    message: UnsupportedServerRequest.errorMessage)
+        }
+    }
+
+    /// Adds the card, or updates the card of the same request. A new card plays the haptic, tells the server that
+    /// it shows (`approval.received`), and, for a request on the open socket, asks the app for a notification.
+    private func showApproval(_ card: ChatApprovalCard, replayed: Bool) {
+        let id = makeId()
+        guard thread.addApproval(id: id, card: card, date: now()) else {
+            redrawNow()
+            return
+        }
+        // Ids and counts only: never the command or the description.
+        log.info("approval shown: card \(id), \(card.choices.count) choices, replayed \(replayed)")
+        redrawNow()
+        let alert = ApprovalAlert(id: id, storedSessionId: storedSessionId, title: title)
+        approvalAlert = alert
+        if !replayed { onApprovalRequest?(alert) }
+        guard !card.requestId.isEmpty, let requests = transport as? any ServerRequestTransport else { return }
+        let sessionId = card.sessionId
+        let requestId = card.requestId
+        Task { try? await requests.acknowledgeApproval(sessionId: sessionId, requestId: requestId) }
+    }
+
+    /// Issue #104: the cards of a resume snapshot. `open_requests` first: they carry the JSON-RPC id. Then the
+    /// snapshot `pending_approval`. A waiting card that the snapshot does not list ended while the socket was
+    /// closed: it shows "This request expired".
+    private func applySnapshot(_ ref: ChatSessionRef) {
+        var open = Set<String>()
+        for request in ref.openRequests ?? [] {
+            if let approval = request.approval { open.insert(approval.requestId) }
+            handle(request, sessionId: ref.liveId, replayed: true)
+        }
+        if let pending = ref.pendingApproval {
+            open.insert(pending.requestId)
+            showApproval(ChatApprovalCard(request: pending, serverRequestId: nil, sessionId: ref.liveId), replayed: true)
+        }
+        if ref.openRequests != nil, thread.expireApprovals(notIn: open) { redrawNow() }
+    }
+
+    /// Issue #104: `approval.pending` after an open. It lists every approval that waits, also the ones after the
+    /// oldest. An older server without the method changes nothing.
+    private func loadPendingApprovals(_ live: ChatSessionRef) async {
+        guard let requests = transport as? any ServerRequestTransport,
+              let pending = try? await requests.pendingApprovals(sessionId: live.liveId),
+              session?.liveId == live.liveId else { return }
+        for approval in pending {
+            showApproval(ChatApprovalCard(request: approval, serverRequestId: nil, sessionId: live.liveId),
+                         replayed: true)
+        }
+    }
+
+    /// A tap on a choice of an approval card. The answer goes on the JSON-RPC id of the request. A card with no id,
+    /// or an answer that did not go (the socket closed), uses `approval.respond` with the queue id. If that fails
+    /// too, the buttons show again. Returns the task (tests wait for it).
+    @discardableResult
+    public func answerApproval(id: String, choice: ApprovalChoice) -> Task<Void, Never>? {
+        guard let card = thread.message(id: id)?.approval, card.isWaiting, card.choices.contains(choice),
+              let requests = transport as? any ServerRequestTransport else { return nil }
+        thread.setApprovalState(.sending(choice), id: id)
+        redrawNow()
+        log.info("approval answered: card \(id), choice \(choice.rawValue)")
+        return Task {
+            let state = await Self.send(choice, for: card, with: requests)
+            guard thread.message(id: id)?.approval?.state == .sending(choice) else { return }
+            if state == .waiting { log.notice("approval answer not sent: card \(id)") }
+            thread.setApprovalState(state, id: id)
+            redrawNow()
+        }
+    }
+
+    private nonisolated static func send(_ choice: ApprovalChoice, for card: ChatApprovalCard,
+                                         with requests: any ServerRequestTransport) async -> ChatApprovalCard.State {
+        if let serverRequestId = card.serverRequestId {
+            do {
+                try await requests.answerApproval(requestId: serverRequestId, choice: choice)
+                return .answered(choice)
+            } catch {
+                guard !card.requestId.isEmpty else { return .waiting }
+            }
+        }
+        do {
+            let resolved = try await requests.respondApproval(sessionId: card.sessionId, choice: choice,
+                                                              requestId: card.requestId.isEmpty ? nil : card.requestId)
+            return resolved > 0 ? .answered(choice) : .expired
+        } catch {
+            return .waiting
         }
     }
 
@@ -391,6 +536,71 @@ public final class ChatViewModel {
         // The owner never loses a recording: the memo is in the cache before the upload starts.
         saveTranscript()
         return Task { await deliverVoice(id: id) }
+    }
+
+    /// Issue #96: the transcript of one voice mode clip, with the #44 engines: on-device first, then
+    /// `POST /api/audio/transcribe`. No bubble shows yet, so a "stop" clip never shows. Throws on a failure.
+    public func transcribeVoiceClip(at url: URL) async throws -> String {
+        let transport = self.transport
+        let loadAudio = self.loadAudio
+        let transcription = self.transcription
+        // The clip and the transcript never go to a log.
+        return try await Task.detached {
+            try await transcription.transcribe(fileURL: url) {
+                try await transport.transcribe(audio: try loadAudio(url), mimeType: VoiceMemoLimits.mimeType)
+            }
+        }.value
+    }
+
+    /// Issue #96: one voice mode turn. The memo bubble shows with its transcript, then goes as a voice turn.
+    /// The voice mode engine speaks the reply with `speak-stream`, so the #10 speak call does not run for it.
+    /// Offline, the memo waits in the outbox, and the #10 rules apply when it goes later.
+    public func sendVoiceModeTurn(_ memo: VoiceMemo, transcript: String) async -> VoiceModeTurnResult {
+        let id = makeId()
+        thread.addOutgoingVoice(id: id, memo: memo, date: now())
+        thread.setTranscript(.done(transcript), id: id)
+        replyQuote = nil
+        voiceModePrompts.insert(id)
+        if let queued = queueBehindOutbox(id) {
+            await queued.value
+        } else {
+            redrawNow()
+            saveTranscript()
+            await deliver(id: id, retryBeforeRowId: nil)
+        }
+        switch thread.message(id: id)?.delivery {
+        case .delivered?:
+            return .delivered(promptId: id)
+        case .queued?:
+            voiceModePrompts.remove(id)
+            return .queued
+        default:
+            voiceModePrompts.remove(id)
+            return .failed
+        }
+    }
+
+    /// Issue #96: the audio that voice mode played becomes the voice reply of the bubble (#10). It does not auto-play.
+    /// Returns the save task (tests wait for it).
+    @discardableResult
+    public func saveVoiceModeAudio(_ audio: SpokenAudio, promptId: String) -> Task<Void, Never>? {
+        guard let reply = thread.messages.last(where: { $0.promptId == promptId && $0.role == .assistant }),
+              reply.spokenReply == nil else { return nil }
+        let id = reply.id
+        let saveSpeech = self.saveSpeech
+        return Task {
+            // The audio never goes to a log.
+            let result: SpokenReply
+            do {
+                result = .ready(try await Task.detached { try saveSpeech(audio) }.value)
+            } catch {
+                return
+            }
+            guard thread.message(id: id)?.spokenReply == nil else { return }
+            thread.setSpokenReply(result, id: id)
+            redrawNow()
+            saveTranscript()
+        }
     }
 
     /// Issue #98: a GPT-Live delegation. The request shows as an owner text bubble and goes out at once as
@@ -868,6 +1078,8 @@ public final class ChatViewModel {
                 // No active id yet: the server writes no row until the first prompt (QA #27 defect 1).
                 storedSessionId = stored
             }
+            // Issue #104: approvals that wait show their cards (protocol 4.2).
+            applySnapshot(created)
             return created
         } catch {
             sessionTask = nil
@@ -895,7 +1107,8 @@ public final class ChatViewModel {
     /// A complete reply to a delivered voice memo, with text to speak. A text turn never calls speak.
     private func isVoiceTurnReply(_ id: String) -> Bool {
         guard let reply = thread.message(id: id), reply.reply == .complete, reply.spokenReply == nil,
-              let promptId = reply.promptId, thread.message(id: promptId)?.voice != nil else { return false }
+              let promptId = reply.promptId, thread.message(id: promptId)?.voice != nil,
+              !voiceModePrompts.contains(promptId) else { return false }
         return !VoiceReplyText.spokenText(reply.text).isEmpty
     }
 

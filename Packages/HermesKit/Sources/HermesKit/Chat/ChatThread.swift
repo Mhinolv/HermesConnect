@@ -65,6 +65,99 @@ public struct ChatThread: Sendable, Equatable {
         messages.append(ChatMessage(id: id, role: .assistant, text: card.output, date: date, command: card))
     }
 
+    // MARK: Approvals (issue #104)
+
+    /// The id of the card for this approval: the same queue id, or the same server request id.
+    public func approvalCardId(requestId: String, serverRequestId: JSONRPCID?) -> String? {
+        messages.first { message in
+            guard let card = message.approval else { return false }
+            if !requestId.isEmpty, card.requestId == requestId { return true }
+            if let serverRequestId, card.serverRequestId == serverRequestId { return true }
+            return false
+        }?.id
+    }
+
+    /// Shows the card of one approval at the end of the thread. A request that a card shows already (a replay
+    /// after a reconnect) updates that card: a waiting card takes the new server request id.
+    /// Returns `true` when a new card shows.
+    @discardableResult
+    public mutating func addApproval(id: String, card: ChatApprovalCard, date: Date) -> Bool {
+        if let existing = approvalCardId(requestId: card.requestId, serverRequestId: card.serverRequestId),
+           let index = index(of: existing) {
+            guard messages[index].approval?.isWaiting == true else { return false }
+            if let serverRequestId = card.serverRequestId { messages[index].approval?.serverRequestId = serverRequestId }
+            messages[index].approval?.sessionId = card.sessionId
+            if messages[index].approval?.requestId.isEmpty == true {
+                messages[index].approval?.requestId = card.requestId
+            }
+            return false
+        }
+        messages.append(ChatMessage(id: id, role: .assistant, text: "", date: date, approval: card))
+        return true
+    }
+
+    public mutating func setApprovalState(_ state: ChatApprovalCard.State, id: String) {
+        guard let index = index(of: id), messages[index].approval != nil else { return }
+        messages[index].approval?.state = state
+    }
+
+    /// `true` while a card waits for the owner. The chats list shows "Approval needed".
+    public var hasWaitingApproval: Bool {
+        messages.contains { $0.approval?.isWaiting == true }
+    }
+
+    /// `request.cancel {id, method, reason}`: the server withdrew the request. A card that the owner answered keeps
+    /// its result. A timeout marks a waiting card "This request expired". Other reasons remove it.
+    @discardableResult
+    public mutating func withdrawApproval(serverRequestId: String, reason: String) -> Bool {
+        guard let index = messages.firstIndex(where: {
+            $0.approval?.serverRequestId == .string(serverRequestId)
+        }), let card = messages[index].approval else { return false }
+        switch card.state {
+        case .waiting:
+            if reason == "timeout" {
+                messages[index].approval?.state = .expired
+            } else {
+                messages.remove(at: index)
+            }
+            return true
+        case .sending, .answered, .expired, .cancelled:
+            return false
+        }
+    }
+
+    /// `approval.cancelled`: the server dropped these approvals and resolved them as deny. No ids means all.
+    @discardableResult
+    public mutating func cancelApprovals(requestIds: [String]) -> Bool {
+        let ids = Set(requestIds)
+        var changed = false
+        for index in messages.indices {
+            guard let card = messages[index].approval, card.isWaiting || isSending(card) else { continue }
+            guard ids.isEmpty || ids.contains(card.requestId) else { continue }
+            messages[index].approval?.state = .cancelled
+            changed = true
+        }
+        return changed
+    }
+
+    /// After a resume: a waiting card that the server does not list any more ended while the socket was closed.
+    @discardableResult
+    public mutating func expireApprovals(notIn open: Set<String>) -> Bool {
+        var changed = false
+        for index in messages.indices {
+            guard let card = messages[index].approval, card.isWaiting, !card.requestId.isEmpty,
+                  !open.contains(card.requestId) else { continue }
+            messages[index].approval?.state = .expired
+            changed = true
+        }
+        return changed
+    }
+
+    private func isSending(_ card: ChatApprovalCard) -> Bool {
+        if case .sending = card.state { return true }
+        return false
+    }
+
     public mutating func setUpload(_ upload: ChatAttachment.Upload, attachment: String, message id: String,
                                    refText: String? = nil, sessionId: String? = nil) {
         guard let index = index(of: id),
@@ -116,7 +209,7 @@ public struct ChatThread: Sendable, Equatable {
     public mutating func react(_ tapback: Tapback, id: String) -> Bool {
         guard let index = index(of: id) else { return false }
         let message = messages[index]
-        guard message.delivery != .sending, message.reply != .streaming else { return false }
+        guard message.delivery != .sending, message.reply != .streaming, message.approval == nil else { return false }
         messages[index].tapback = message.tapback == tapback ? nil : tapback
         return true
     }
@@ -171,9 +264,10 @@ public struct ChatThread: Sendable, Equatable {
             return true
         }
         // Issue #67: a command card is local. It keeps its place by date between the history rows.
-        var merged = history + kept.filter { $0.command == nil }
-        for card in kept where card.command != nil {
-            let index = merged.firstIndex { $0.command == nil && $0.date > card.date } ?? merged.endIndex
+        // Issue #104: an approval card is local too.
+        var merged = history + kept.filter { !$0.isLocalCard }
+        for card in kept where card.isLocalCard {
+            let index = merged.firstIndex { !$0.isLocalCard && $0.date > card.date } ?? merged.endIndex
             merged.insert(card, at: index)
         }
         // Issue #11: a prompt that the history answers has ended. A later turn must not ack it.
