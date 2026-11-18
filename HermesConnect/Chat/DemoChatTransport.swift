@@ -684,6 +684,14 @@ extension DemoChatTransport: ServerRequestTransport {
     func respondApproval(sessionId _: String, choice _: ApprovalChoice, requestId _: String?) async throws -> Int { 1 }
     func acknowledgeApproval(sessionId _: String, requestId _: String) async throws {}
     func pendingApprovals(sessionId _: String) async throws -> [ApprovalRequest] { [] }
+    /// Issue #117: the demo drops the value at once.
+    func answerValue(requestId _: JSONRPCID, value _: String) async throws {
+        try await Task.sleep(for: .milliseconds(300))
+    }
+
+    func answerClarify(requestId _: JSONRPCID, answers _: [String: String?]?, outcome _: String) async throws {
+        try await Task.sleep(for: .milliseconds(300))
+    }
 }
 
 /// Issue #64: each action succeeds after a short wait. Nothing is saved.

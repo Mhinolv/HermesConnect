@@ -114,24 +114,6 @@ public struct ChatApprovalCard: Sendable, Equatable {
     }
 }
 
-/// Issue #104: the one-line card for a `clarify`, `sudo` or `secret` request. The app answers it with an error
-/// at once, so Hermes does not wait. A full UI is a separate issue.
-enum UnsupportedServerRequest {
-    static let errorCode = -32601
-    static let errorMessage = "The iOS app cannot answer this request yet"
-
-    static func card(for kind: GatewayServerRequest.Kind) -> ChatCommandCard? {
-        let header: String
-        switch kind {
-        case .approval: return nil
-        case .clarify: header = "Question from Hermes"
-        case .sudo: header = "Password request from Hermes"
-        case .secret: header = "Secret request from Hermes"
-        }
-        return ChatCommandCard(command: header, output: "The app cannot answer this yet. Hermes did not wait.")
-    }
-}
-
 /// Issue #104: an approval that came while the socket was open. The app posts a local notification when it is in
 /// the background. The body has no command text.
 public struct ApprovalAlert: Sendable, Equatable, Identifiable {

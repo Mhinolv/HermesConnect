@@ -480,11 +480,25 @@ private struct Harness {
         guard case .serverRequest(let request) = try await harness.reader.nextEvent() else {
             Issue.record("expected a clarify request"); return
         }
-        #expect(request.kind == .clarify)
+        #expect(request.kind == .clarify(ClarifyRequest(sessionId: "s1", questions: [
+            ClarifyQuestion(qid: "q1", question: "Which?"),
+        ])))
         #expect(request.params["questions"]?.stringValue == nil)
         try await harness.client.respond(to: request.id, result: ["answers": ["q1": "A"], "outcome": "submitted"] as JSONValue)
         let answer = try #require(try await harness.socket.waitForSent { $0["id"] == "r-3" }.first)
         #expect(answer["result"]?["outcome"] == "submitted")
+    }
+
+    /// Issue #117: Send on a secret card answers `{"value": ...}` on the request id. Cancel on a question card sends
+    /// `{"outcome": "cancelled"}` with no answers.
+    @Test func secretAndClarifyAnswersGoOnTheRequestId() async throws {
+        let harness = try await Harness.connect()
+        try await harness.client.answerValue(requestId: .string("r-4"), value: "s3cret")
+        let value = try #require(try await harness.socket.waitForSent { $0["id"] == "r-4" }.first)
+        #expect(value["result"] == ["value": "s3cret"])
+        try await harness.client.answerClarify(requestId: .string("r-5"), answers: nil, outcome: "cancelled")
+        let cancel = try #require(try await harness.socket.waitForSent { $0["id"] == "r-5" }.first)
+        #expect(cancel["result"] == ["outcome": "cancelled"])
     }
 }
 
