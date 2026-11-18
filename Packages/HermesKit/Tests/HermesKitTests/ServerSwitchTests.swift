@@ -12,10 +12,10 @@ import Testing
         var book = ServerStateBook()
         book.record(.init(unreadIds: ["h1", "h2"], unreadChats: 2), for: home)
         book.record(.init(unreadIds: ["l1", "l2", "l3"], unreadChats: 2), for: lab)
-        // The active server uses the live count, not its old entry.
-        #expect(book.badgeCount(activeID: home, activeCount: 5) == 8)
-        #expect(book.badgeCount(activeID: vps, activeCount: 1) == 6)
-        #expect(book.badgeCount(activeID: nil, activeCount: 0) == 5)
+        // The active server uses the live count, not its old entry. Issue #122: "l3" is a cron run, not a chat.
+        #expect(book.badgeCount(activeID: home, activeCount: 5) == 7)
+        #expect(book.badgeCount(activeID: vps, activeCount: 1) == 5)
+        #expect(book.badgeCount(activeID: nil, activeCount: 0) == 4)
     }
 
     @Test func theDotShowsOnlyForUnreadChatsOfAnotherServer() {

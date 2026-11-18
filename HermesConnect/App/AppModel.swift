@@ -241,9 +241,9 @@ final class AppModel {
         ServerMenu(list: serverList, book: serverBook, activeChats: activeChats)
     }
 
-    /// The app icon badge: the unread sessions of all servers.
-    func badgeCount(activeUnread: Int) -> Int {
-        serverBook.badgeCount(activeID: profile?.id, activeCount: activeUnread)
+    /// The app icon badge: the unread chats of all servers. Issue #122: cron runs do not count.
+    func badgeCount(_ sessions: SessionListModel) -> Int {
+        serverBook.badgeCount(activeID: profile?.id, activeCount: sessions.chatsUnreadCount)
     }
 
     private func saveBook(_ book: ServerStateBook) {

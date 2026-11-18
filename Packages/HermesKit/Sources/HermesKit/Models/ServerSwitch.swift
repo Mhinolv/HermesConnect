@@ -21,9 +21,9 @@ public struct ServerChange: Sendable, Equatable {
 /// Issue #84: each server has its own cache folder. Background refresh updates the entry of a server that is not active.
 public struct ServerStateBook: Codable, Sendable, Equatable {
     public struct Entry: Codable, Sendable, Equatable {
-        /// The stored ids with the blue dot: chats and cron runs. The app icon badge counts them.
+        /// The stored ids with the blue dot: chats and cron runs. A switch back restores these dots.
         public var unreadIds: [String]
-        /// The unread chats (no cron runs). The server menu shows them.
+        /// The unread chats (no cron runs). The server menu and the app icon badge count them (issue #122).
         public var unreadChats: Int
         /// Issue #39: the sessions with queued messages. They send on the next connect to this server only.
         public var outboxIds: [String]
@@ -101,10 +101,11 @@ public struct ServerStateBook: Codable, Sendable, Equatable {
         entries = entries.filter { ids.contains($0.key) }
     }
 
-    /// The app icon badge: the unread sessions of all servers. `activeID` uses the live count of the list.
+    /// The app icon badge: the unread chats of all servers. `activeID` uses the live count of the list.
+    /// Issue #122: cron runs are a history record, so the badge does not count them.
     public func badgeCount(activeID: UUID?, activeCount: Int) -> Int {
         entries.reduce(activeCount) { total, item in
-            item.key == activeID ? total : total + item.value.unreadIds.count
+            item.key == activeID ? total : total + item.value.unreadChats
         }
     }
 
