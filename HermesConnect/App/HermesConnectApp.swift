@@ -204,24 +204,13 @@ struct RootView: View {
     @State private var launchDone = false
     /// Issue #16: the "Ask Hermes" shortcut puts its request here.
     var ask = AskHermesInbox.shared
+    /// Issue #124: the "Start Hands-Free" shortcut puts its request here.
+    var handsFree = HandsFreeInbox.shared
     /// Issue #84: a tapped notification of another server. The chat opens after the switch to that server.
     @State private var routeAfterSwitch: NotifiedChat?
 
     var body: some View {
-        TabView(selection: $tab) {
-            Tab("Chats", systemImage: "bubble.left.and.bubble.right", value: RootTab.chats) { chats }
-                .badge(RootTab.chats.badge(sessions))
-            Tab("Jobs", systemImage: "clock.arrow.circlepath", value: RootTab.jobs) {
-                JobsTab(model: jobs, sessions: sessions, link: link, path: $jobsPath,
-                        onSettings: { showSettings = true })
-            }
-            .badge(RootTab.jobs.badge(sessions))
-            // Issue #101: the Voice tab, after Jobs. The tab bar stays during a session.
-            Tab("Voice", systemImage: "waveform", value: RootTab.voice) {
-                VoiceTab(model: voice, link: link, activeUnreadChats: sessions.chatsUnreadCount,
-                         onSettings: { showSettings = true })
-            }
-        }
+        tabs
         // Issue #101: while voice mode runs, Chats and Jobs show the mini bar.
         .voiceMiniBar(voice, isEnabled: voice.isRunning && tab != .voice) { tab = .voice }
         // Issue #83: a switch ends the voice session. Its target choice belongs to the old server.
@@ -288,6 +277,27 @@ struct RootView: View {
             // A new server or a forgotten host key leaves the status idle. Connect when Settings closes.
             if !shown, model.isSetUp, model.connection == .idle { Task { await model.connect() } }
         }
+    }
+
+    /// Issue #73 and #101: Chats, Jobs and Voice.
+    /// Issue #124: "Start Hands-Free" waits for setup and App Lock, then starts on the Voice tab.
+    private var tabs: some View {
+        TabView(selection: $tab) {
+            Tab("Chats", systemImage: "bubble.left.and.bubble.right", value: RootTab.chats) { chats }
+                .badge(RootTab.chats.badge(sessions))
+            Tab("Jobs", systemImage: "clock.arrow.circlepath", value: RootTab.jobs) {
+                JobsTab(model: jobs, sessions: sessions, link: link, path: $jobsPath,
+                        onSettings: { showSettings = true })
+            }
+            .badge(RootTab.jobs.badge(sessions))
+            // Issue #101: the Voice tab, after Jobs. The tab bar stays during a session.
+            Tab("Voice", systemImage: "waveform", value: RootTab.voice) {
+                VoiceTab(model: voice, link: link, activeUnreadChats: sessions.chatsUnreadCount,
+                         onSettings: { showSettings = true })
+            }
+        }
+        .onChange(of: HandsFreeTrigger(pending: handsFree.pending?.id, lock: model.lock, phase: scenePhase),
+                  initial: true) { startHandsFree() }
     }
 
     /// The chats list with the pushed chats (issue #7). Issue #73: the Chats tab.
@@ -416,6 +426,30 @@ extension RootView {
         }
     }
 
+    /// Issue #124: run the "Start Hands-Free" request that waits. App Lock covers the app until Face ID, so the
+    /// microphone never opens before an unlock. No setup: show the setup screen and drop the request.
+    private func startHandsFree() {
+        guard scenePhase == .active else { return }
+        let locked = !ChatLaunch.isDemo && model.lock.locks(at: .now)
+        switch handsFree.next(isSetUp: model.isSetUp, isLocked: locked) {
+        case nil:
+            return
+        case .dropForSetup:
+            showSettings = false
+            showSetup = true
+        case .run(let request):
+            launchDone = true
+            showSettings = false
+            tab = .voice
+            let model = self.model, voice = self.voice
+            Task {
+                await HandsFreeLaunch.run(request, active: model.profile?.id, servers: Set(model.servers.map(\.id)),
+                                          switchServer: { await model.switchServer(to: $0) },
+                                          start: { await voice.startHandsFree(server: model.profile?.id) })
+            }
+        }
+    }
+
     /// Issue #15: schedule the background refresh on the way out. Back in the foreground, reconnect when
     /// the connection can be dead, and refresh the list. The chats catch up on the `connected` event.
     private func foregroundChange(_ phase: ScenePhase) {
@@ -437,6 +471,13 @@ extension RootView {
             break
         }
     }
+}
+
+/// Issue #124: a change of one of these runs the "Start Hands-Free" request that waits.
+private struct HandsFreeTrigger: Equatable {
+    var pending: UUID?
+    var lock: AppLockPolicy
+    var phase: ScenePhase
 }
 
 /// Issue #84: the chat of a tapped notification of another server.
