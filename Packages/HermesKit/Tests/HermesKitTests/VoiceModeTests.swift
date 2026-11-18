@@ -391,6 +391,23 @@ private final class Rig {
         #expect(rig.engine.bargeInCount == 1)
     }
 
+    /// Issue #101: Magic Tap sends the clip with no wait for the silence. It does nothing in other states.
+    @Test func sendClipEndsTheClipAtOnce() async throws {
+        let rig = Rig()
+        rig.engine.sendClip()
+        #expect(rig.engine.state == .idle)
+        await rig.engine.start(chat: rig.chat)
+        rig.run(1, decibels: -20)
+        rig.engine.sendClip()
+        #expect(rig.engine.clipEndCount == 1)
+        #expect(rig.engine.state == .transcribing)
+        #expect(!rig.microphone.isOpen)
+        try await until { rig.chat.turns.count == 1 }
+        #expect(rig.engine.state == .thinking)
+        rig.engine.sendClip()
+        #expect(rig.engine.clipEndCount == 1)
+    }
+
     @Test func aPhoneCallPausesPlaybackAndResumeListens() async throws {
         let rig = Rig()
         try await rig.reachSpeaking()

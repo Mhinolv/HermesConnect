@@ -8,6 +8,8 @@ struct HermesConnectApp: App {
     @State private var sessions: SessionListModel
     /// Issue #73: the job list of the Jobs tab.
     @State private var jobs: JobsModel
+    /// Issue #101: the Voice tab and its voice session.
+    @State private var voice: VoiceTabModel
     /// Made at launch, also for a relaunch in the background by a location event (issue #13).
     @State private var location: LocationController
     /// Issue #15: permission, badge and the tap route of local notifications.
@@ -27,6 +29,7 @@ struct HermesConnectApp: App {
             let demoJobs = JobsDemo.makeJobs() ?? ChatLaunch.makeOfflineJobs()
             sessions = demoSessions
             jobs = demoJobs
+            voice = VoiceTabModel(sessions: demoSessions)
             link = nil
             // The DEBUG demo conversation: no server, no App Lock, so screenshots show the chat.
             // Issue #66: the Servers screenshots use 3 servers.
@@ -63,6 +66,7 @@ struct HermesConnectApp: App {
         self.sessions = sessions
         let jobs = ChatLaunch.makeJobs(link: link, cache: caches.jobs)
         self.jobs = jobs
+        voice = VoiceTabModel.live(sessions: sessions, link: link)
         let notifications = NotificationController()
         self.notifications = notifications
         // Issue #104: an approval that comes while the app is in the background and the socket is open.
@@ -159,13 +163,13 @@ struct HermesConnectApp: App {
     @ViewBuilder private var scene: some View {
         Group {
             if usesAppLock {
-                RootView(sessions: sessions, jobs: jobs, link: link)
+                RootView(sessions: sessions, jobs: jobs, voice: voice, link: link)
                     .environment(model)
                     .environment(location)
                     .environment(notifications)
                     .appLock(model)
             } else {
-                RootView(sessions: sessions, jobs: jobs, link: link)
+                RootView(sessions: sessions, jobs: jobs, voice: voice, link: link)
                     .environment(model)
                     .environment(location)
                     .environment(notifications)
@@ -184,6 +188,8 @@ struct RootView: View {
     var sessions = ChatLaunch.makeOfflineSessions()
     /// Issue #73: the job list of the Jobs tab.
     var jobs = ChatLaunch.makeOfflineJobs()
+    /// Issue #101: the Voice tab and its voice session.
+    var voice = VoiceTabModel(sessions: ChatLaunch.makeOfflineSessions())
     /// The chat link. It follows the #4 endpoint ("Hermes ready").
     var link: LiveChatTransport?
     @State private var showSetup = false
@@ -209,7 +215,16 @@ struct RootView: View {
                         onSettings: { showSettings = true })
             }
             .badge(sessions.unreadCronRuns.count)
+            // Issue #101: the Voice tab, after Jobs. The tab bar stays during a session.
+            Tab("Voice", systemImage: "waveform", value: RootTab.voice) {
+                VoiceTab(model: voice, link: link, activeUnreadChats: sessions.chatsUnreadCount,
+                         onSettings: { showSettings = true })
+            }
         }
+        // Issue #101: while voice mode runs, Chats and Jobs show the mini bar.
+        .voiceMiniBar(voice, isEnabled: voice.isRunning && tab != .voice) { tab = .voice }
+        // Issue #83: a switch ends the voice session. Its target choice belongs to the old server.
+        .onChange(of: model.profile?.id, initial: true) { _, id in voice.serverChanged(id) }
         .sheet(isPresented: $showSetup) { SetupFlowView() }
         .sheet(isPresented: $showSettings) { SettingsView() }
         .hostTrustPresenter(enabled: !showSetup && !showSettings)

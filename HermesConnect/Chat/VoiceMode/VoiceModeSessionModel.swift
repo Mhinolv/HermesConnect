@@ -14,12 +14,20 @@ final class VoiceModeSessionModel {
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
 
     /// `speech` is the transport of the active server (`LiveChatTransport`).
-    init(speech: any VoiceStreamTransport, microphone: AVVoiceModeMicrophone = AVVoiceModeMicrophone()) {
+    /// Issue #101: `tuning` turns off speech barge-in while VoiceOver runs.
+    convenience init(speech: any VoiceStreamTransport, microphone: AVVoiceModeMicrophone = AVVoiceModeMicrophone(),
+                     tuning: VoiceModeTuning = VoiceModeTuning()) {
         let player = microphone.player
-        controller = VoiceModeController(
+        self.init(controller: VoiceModeController(
             microphone: microphone, player: player,
             makeSpeech: { try await speech.makeStreamedSpeech(player: $0) },
-            makeClipURL: { VoiceMemoFiles.newFile(in: VoiceMemoFiles.directory()) })
+            makeClipURL: { VoiceMemoFiles.newFile(in: VoiceMemoFiles.directory()) },
+            tuning: tuning))
+    }
+
+    /// Issue #101: tests give an engine with a fake microphone. The pause rules are the same.
+    init(controller: VoiceModeController) {
+        self.controller = controller
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil,
                                             queue: .main) { [weak self] note in
