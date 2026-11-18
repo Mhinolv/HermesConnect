@@ -224,13 +224,18 @@ final class FakePromptHold: VoicePromptHolding {
     }
 
     @Test func thePromptOverlayHidesTheToolLine() {
-        let loop = VoiceTabDisplay.make(state: .thinking, muted: false, thinkingSeconds: 3, tool: "web_search")
-        #expect(loop.showsTool)
-        let shown = VoiceTabDisplay.prompt(.listening, over: loop)
-        #expect(!shown.showsTool)
-        #expect(shown.title == "Hermes needs an answer")
-        #expect(shown.subtitle == "Listening")
-        #expect(!shown.muteEnabled)
+        // Issue #129: the overlay hides the running tool line and the "Used <tool>" line alike.
+        for running in [true, false] {
+            let loop = VoiceTabDisplay.make(state: .thinking, muted: false, thinkingSeconds: 3,
+                                            tool: ChatToolActivity(name: "web_search", isRunning: running))
+            #expect(loop.showsTool)
+            let shown = VoiceTabDisplay.prompt(.listening, over: loop)
+            #expect(!shown.showsTool)
+            #expect(shown.title == "Hermes needs an answer")
+            #expect(shown.subtitle == "Listening")
+            #expect(!shown.muteEnabled)
+            #expect(!shown.ringAccessibilityLabel.contains("web_search"))
+        }
     }
 
     // MARK: The coordinator
