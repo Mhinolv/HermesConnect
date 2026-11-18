@@ -648,6 +648,8 @@ extension DemoChatTransport: SessionActionsTransport {
 
     func closeSession(liveId _: String) async throws {}
 
+    func setSessionUnread(storedId _: String, unread _: Bool) async throws {}
+
     func deleteSession(storedId _: String) async throws {
         try await Task.sleep(for: .milliseconds(300))
     }
