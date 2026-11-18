@@ -242,7 +242,7 @@ private let secret = "sk-SECRET-TOKEN-123"
 
 @Suite struct ToolCallVoiceTabTests {
     @Test func handsFreeShowsTheToolUnderTheRingWhileThinking() {
-        let display = VoiceTabDisplay.make(state: .thinking, muted: false, thinkingSeconds: 6, tool: "web_search")
+        let display = VoiceTabDisplay.make(state: .thinking, muted: false, thinkingSeconds: 6, tool: .init(name: "web_search", isRunning: true))
         #expect(display.title == "Thinking…")
         #expect(display.subtitle == "Using web_search…")
         #expect(display.showsTool)
@@ -252,7 +252,7 @@ private let secret = "sk-SECRET-TOKEN-123"
         #expect(!after.showsTool)
         #expect(after.ringAccessibilityLabel == "Voice Mode, Thinking…")
         // Only the thinking state shows the tool.
-        #expect(VoiceTabDisplay.make(state: .speaking, muted: false, thinkingSeconds: 0, tool: "x").subtitle
+        #expect(VoiceTabDisplay.make(state: .speaking, muted: false, thinkingSeconds: 0, tool: .init(name: "x", isRunning: true)).subtitle
             == "Tap or speak to interrupt")
         // VoiceOver does not announce tools.
         #expect(VoiceTabDisplay.announcement(.thinking) == "Thinking")
@@ -260,7 +260,7 @@ private let secret = "sk-SECRET-TOKEN-123"
 
     @Test func liveShowsTheToolInPlaceOfStillWorking() throws {
         let display = try #require(VoiceTabDisplay.live(phase: .working, muted: false, speaking: false,
-                                                        idleWarning: false, stillWorking: true, tool: "web_search"))
+                                                        idleWarning: false, stillWorking: true, tool: .init(name: "web_search", isRunning: true)))
         #expect(display.title == "Hermes is working…")
         #expect(display.subtitle == "Using web_search…")
         #expect(display.liveAccessibilityLabel(elapsedSeconds: 5) == "Live Mode, Hermes is working…. Using web_search…, 0:05")
@@ -268,8 +268,109 @@ private let secret = "sk-SECRET-TOKEN-123"
                                                       idleWarning: false, stillWorking: true, tool: nil))
         #expect(after.subtitle == "Still working…")
         let live = try #require(VoiceTabDisplay.live(phase: .live, muted: false, speaking: false,
-                                                     idleWarning: false, stillWorking: false, tool: "x"))
+                                                     idleWarning: false, stillWorking: false, tool: .init(name: "x", isRunning: true)))
         #expect(live.subtitle == "Speak any time")
         #expect(VoiceTabDisplay.liveAnnouncement(.working) == "Hermes is working")
+    }
+}
+
+// Issue #129: the Voice tab keeps the last tool of the turn: "Using <tool>…", then "Used <tool>".
+@Suite struct LastToolTests {
+    let now = Date(timeIntervalSince1970: 1_763_290_000)
+
+    private func running() -> (ChatThread, ToolIds) {
+        var thread = ChatThread()
+        let ids = ToolIds()
+        thread.addOutgoing(id: "p1", text: "Find flights", date: now)
+        thread.beginTurn(promptId: "p1")
+        thread.apply(.messageStart(MessageStartPayload()), now: now, makeId: ids.callAsFunction)
+        return (thread, ids)
+    }
+
+    @Test func lastToolStaysAfterItEndsAndANewToolReplacesIt() throws {
+        var (thread, ids) = running()
+        let make = ids.callAsFunction
+        #expect(thread.toolActivity == nil)
+        thread.apply(try event("tool.start", #"{"tool_id":"t1","name":"web_search","args":{"q":"x"}}"#), now: now, makeId: make)
+        #expect(thread.toolActivity == ChatToolActivity(name: "web_search", isRunning: true))
+        #expect(thread.toolActivity?.line == "Using web_search…")
+        thread.apply(try event("tool.complete", #"{"tool_id":"t1","name":"web_search","summary":"Searched"}"#), now: now, makeId: make)
+        #expect(thread.toolActivity == ChatToolActivity(name: "web_search", isRunning: false))
+        #expect(thread.toolActivity?.line == "Used web_search")
+        thread.apply(try event("tool.start", #"{"tool_id":"t2","name":"browser"}"#), now: now, makeId: make)
+        #expect(thread.toolActivity?.line == "Using browser…")
+        thread.apply(try event("tool.complete", #"{"tool_id":"t2","name":"browser"}"#), now: now, makeId: make)
+        #expect(thread.toolActivity?.line == "Used browser")
+        // Text streams: the line stays until the reply plays or the turn ends.
+        thread.apply(.messageDelta(MessageDeltaPayload(text: "Here.", turnId: nil, segment: nil, offset: nil)),
+                     now: now, makeId: make)
+        #expect(thread.toolActivity?.line == "Used browser")
+        thread.apply(try event("message.complete", #"{"text":"Here.","status":"complete"}"#), now: now, makeId: make)
+        #expect(thread.toolActivity == nil)
+    }
+
+    @Test func aParallelToolThatStillRunsWinsOverTheEndedOne() throws {
+        var (thread, ids) = running()
+        let make = ids.callAsFunction
+        thread.apply(try event("tool.start", #"{"tool_id":"t1","name":"web_search"}"#), now: now, makeId: make)
+        thread.apply(try event("tool.start", #"{"tool_id":"t2","name":"browser"}"#), now: now, makeId: make)
+        thread.apply(try event("tool.complete", #"{"tool_id":"t2","name":"browser"}"#), now: now, makeId: make)
+        #expect(thread.toolActivity?.line == "Using web_search…")
+        thread.apply(try event("tool.complete", #"{"tool_id":"t1","name":"web_search"}"#), now: now, makeId: make)
+        #expect(thread.toolActivity?.line == "Used web_search")
+    }
+
+    @Test func aCompleteWithNoStartShowsUsed() throws {
+        var (thread, ids) = running()
+        thread.apply(try event("tool.complete", #"{"tool_id":"t9","name":"calendar"}"#), now: now,
+                     makeId: ids.callAsFunction)
+        #expect(thread.toolActivity?.line == "Used calendar")
+    }
+
+    @Test func theLineClearsWhenTheTurnFailsOrANewTurnStarts() throws {
+        var (thread, ids) = running()
+        let make = ids.callAsFunction
+        thread.apply(try event("tool.start", #"{"tool_id":"t1","name":"web_search"}"#), now: now, makeId: make)
+        thread.apply(try event("tool.complete", #"{"tool_id":"t1","name":"web_search"}"#), now: now, makeId: make)
+        thread.connectionLost(now: now, makeId: make)
+        #expect(thread.toolActivity == nil)
+        thread.addOutgoing(id: "p2", text: "Again", date: now)
+        thread.beginTurn(promptId: "p2")
+        thread.apply(.messageStart(MessageStartPayload()), now: now, makeId: make)
+        #expect(thread.toolActivity == nil)
+        // A late tool event of an ended turn does nothing.
+        var idle = ChatThread()
+        idle.apply(try event("tool.complete", #"{"tool_id":"t1","name":"web_search"}"#), now: now, makeId: make)
+        #expect(idle.toolActivity == nil)
+    }
+
+    @Test func handsFreeShowsUsedInPlaceOfHermesIsWorking() {
+        let used = VoiceTabDisplay.make(state: .thinking, muted: false, thinkingSeconds: 6,
+                                        tool: ChatToolActivity(name: "web_search", isRunning: false))
+        #expect(used.subtitle == "Used web_search")
+        #expect(used.showsTool)
+        #expect(used.ringAccessibilityLabel == "Voice Mode, Thinking…, Used web_search")
+        // After 10 s the tool line still wins over "Still working…".
+        let late = VoiceTabDisplay.make(state: .thinking, muted: false, thinkingSeconds: 30,
+                                        tool: ChatToolActivity(name: "web_search", isRunning: false))
+        #expect(late.subtitle == "Used web_search")
+        // The reply plays: the tool line goes.
+        let speaking = VoiceTabDisplay.make(state: .speaking, muted: false, thinkingSeconds: 0,
+                                            tool: ChatToolActivity(name: "web_search", isRunning: false))
+        #expect(speaking.subtitle == "Tap or speak to interrupt")
+        #expect(!speaking.showsTool)
+    }
+
+    @Test func liveShowsUsedInPlaceOfStillWorking() throws {
+        let used = try #require(VoiceTabDisplay.live(phase: .working, muted: false, speaking: false, idleWarning: false,
+                                                     stillWorking: true,
+                                                     tool: ChatToolActivity(name: "web_search", isRunning: false)))
+        #expect(used.subtitle == "Used web_search")
+        #expect(used.showsTool)
+        #expect(used.liveAccessibilityLabel(elapsedSeconds: 5) == "Live Mode, Hermes is working…. Used web_search, 0:05")
+        let speaking = try #require(VoiceTabDisplay.live(phase: .live, muted: false, speaking: true, idleWarning: false,
+                                                         stillWorking: false,
+                                                         tool: ChatToolActivity(name: "web_search", isRunning: false)))
+        #expect(speaking.subtitle == "Speak any time")
     }
 }

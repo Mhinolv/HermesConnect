@@ -72,9 +72,9 @@ public struct VoiceTabDisplay: Sendable, Equatable {
 
     /// - Parameters:
     ///   - afterBargeIn: a barge-in stopped the last reply, and no clip ended since then.
-    ///   - tool: issue #120, the tool that runs now in the target chat.
+    ///   - tool: issues #120 and #129, the last tool of the turn in the target chat ("Using…" or "Used…").
     public static func make(state: VoiceModeState, muted: Bool, thinkingSeconds: Int,
-                            afterBargeIn: Bool = false, tool: String? = nil) -> VoiceTabDisplay {
+                            afterBargeIn: Bool = false, tool: ChatToolActivity? = nil) -> VoiceTabDisplay {
         func session(_ ring: VoiceRingStyle, _ title: String, _ subtitle: String?, action: VoiceTabAction? = nil,
                      muteEnabled: Bool = true) -> VoiceTabDisplay {
             VoiceTabDisplay(ring: ring, title: title, subtitle: subtitle, action: action, isSession: true,
@@ -97,7 +97,7 @@ public struct VoiceTabDisplay: Sendable, Equatable {
             return session(.working, "Transcribing…", workingLine(thinkingSeconds, counting: false))
         case .thinking:
             if let tool {
-                var display = session(.working, "Thinking…", ChatToolText.runningLine(tool))
+                var display = session(.working, "Thinking…", tool.line)
                 display.showsTool = true
                 return display
             }
