@@ -57,12 +57,15 @@ public final class VoiceAudioRoute: Sendable {
     private let session: any VoiceAudioSession
     private let printsDiagnostics: Bool
     private let printLine: @Sendable (String) -> Void
+    private let processing: @Sendable () -> VoiceProcessingStatus
     private let log = HermesLog(category: "audio")
 
     public init(session: any VoiceAudioSession,
+                processing: @escaping @Sendable () -> VoiceProcessingStatus = { .off },
                 environment: [String: String] = ProcessInfo.processInfo.environment,
                 printLine: @escaping @Sendable (String) -> Void = { print($0) }) {
         self.session = session
+        self.processing = processing
         printsDiagnostics = environment[Self.diagnosticsKey] == "1"
         mode = environment[Self.modeKey].flatMap(VoiceAudioMode.init(rawValue:)) ?? .voiceChat
         self.printLine = printLine
@@ -80,6 +83,11 @@ public final class VoiceAudioRoute: Sendable {
         try session.setActive(true)
         report("active")
         keepSpeaker()
+    }
+
+    /// The engine of the microphone and the reply started (issue #127). The line shows its voice processing.
+    public func engineStarted() {
+        report("engine")
     }
 
     /// A reply starts to play.
@@ -110,13 +118,14 @@ public final class VoiceAudioRoute: Sendable {
     }
 
     private func report(_ event: String, reason: String? = nil) {
-        let line = Self.line(event: event, reason: reason, state: session.routeState)
+        let line = Self.line(event: event, reason: reason, state: session.routeState, processing: processing())
         log.notice(line)
         if printsDiagnostics { printLine("AUDIO_DIAG " + line) }
     }
 
     /// One diagnostic line: the event and the route. Port types and session settings only.
-    static func line(event: String, reason: String?, state: VoiceAudioRouteState) -> String {
+    static func line(event: String, reason: String?, state: VoiceAudioRouteState,
+                     processing: VoiceProcessingStatus = .off) -> String {
         var parts = ["event=\(event)"]
         if let reason { parts.append("reason=\(reason)") }
         parts.append("out=\(state.outputs.isEmpty ? "none" : state.outputs.joined(separator: ","))")
@@ -124,6 +133,7 @@ public final class VoiceAudioRoute: Sendable {
         parts.append("mode=\(state.mode)")
         parts.append("options=\(state.options.isEmpty ? "none" : state.options.joined(separator: ","))")
         parts.append("volume=\(String(format: "%.2f", state.volume))")
+        parts.append(processing.description)
         return parts.joined(separator: " ")
     }
 }

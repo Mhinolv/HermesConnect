@@ -24,7 +24,8 @@ public protocol StreamedSpeechPlaying: Sendable {
 public final class AVAudioEnginePCMPlayer: StreamedSpeechPlaying, @unchecked Sendable {
     // The engine calls come from one caller at a time (see the protocol). The lock guards the
     // counters only, because the node calls its completion handlers on its own thread.
-    private let engine: AVAudioEngine
+    /// Issue #127: Hands-Free gives the engine of its voice processing input, so the reply is the processed output.
+    public let engine: AVAudioEngine
     private let node = AVAudioPlayerNode()
     private var format: AVAudioFormat?
     private var decoder = PCM16Samples()

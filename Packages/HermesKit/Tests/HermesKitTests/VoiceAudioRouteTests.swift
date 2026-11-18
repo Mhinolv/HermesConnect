@@ -127,7 +127,7 @@ private final class Lines: @unchecked Sendable {
         let all = lines.all
         #expect(all.allSatisfy { $0.hasPrefix("AUDIO_DIAG event=") })
         #expect(all.first == "AUDIO_DIAG event=start out=Receiver category=AVAudioSessionCategoryPlayAndRecord "
-                    + "mode=default options=defaultToSpeaker,allowBluetoothHFP,duckOthers volume=0.50")
+                    + "mode=default options=defaultToSpeaker,allowBluetoothHFP,duckOthers volume=0.50 vp=off")
         #expect(all.contains { $0.hasPrefix("AUDIO_DIAG event=active out=Receiver") })
         #expect(all.contains { $0.hasPrefix("AUDIO_DIAG event=speaker out=Speaker") })
         #expect(all.contains { $0.hasPrefix("AUDIO_DIAG event=reply out=Speaker") })
@@ -163,5 +163,63 @@ private final class Lines: @unchecked Sendable {
         try route.activate()
         #expect(session.state.withLock { $0.mode } == .videoChat)
         #expect(VoiceAudioRoute(session: session, environment: ["HERMES_AUDIO_MODE": "bad"]).mode == .voiceChat)
+    }
+
+    @Test func theEngineLineShowsVoiceProcessingAndDucking() throws {
+        let lines = Lines()
+        let status = Mutex(VoiceProcessingStatus.off)
+        let route = VoiceAudioRoute(session: FakeVoiceAudioSession(outputs: [VoiceAudioRoute.speaker]),
+                                    processing: { status.withLock { $0 } },
+                                    environment: ["HERMES_AUDIO_DIAG": "1"]) { lines.add($0) }
+        try route.activate()
+        status.withLock { $0 = VoiceProcessingStatus(enabled: true, ducking: "min") }
+        route.engineStarted()
+        route.beforeReply()
+        let all = lines.all
+        #expect(all.first?.hasSuffix(" vp=off") == true)
+        #expect(all.contains { $0.hasPrefix("AUDIO_DIAG event=engine out=Speaker") && $0.hasSuffix(" vp=on ducking=min") })
+        #expect(all.last?.hasPrefix("AUDIO_DIAG event=reply") == true)
+        #expect(all.last?.hasSuffix(" vp=on ducking=min") == true)
+        #expect(VoiceProcessingStatus(enabled: true).description == "vp=on ducking=default")
+    }
+}
+
+@Suite struct VoiceInputMeterTests {
+    private func level(of samples: [Float], meter: VoiceInputMeter = VoiceInputMeter()) -> Float {
+        samples.withUnsafeBufferPointer { meter.record($0) }
+        return meter.level()
+    }
+
+    @Test func silenceIsTheRecorderFloor() {
+        #expect(VoiceInputMeter().level() == VoiceInputMeter.silence)
+        #expect(level(of: [Float](repeating: 0, count: 480)) == VoiceInputMeter.silence)
+    }
+
+    @Test func levelIsTheRMSInDecibels() {
+        #expect(abs(level(of: [Float](repeating: 0.1, count: 480)) - -20) < 0.01)
+        #expect(abs(level(of: [Float](repeating: -1, count: 480))) < 0.01)
+        // A full-scale sine has an RMS of 1/sqrt(2): -3 dBFS.
+        let sine = (0..<4_800).map { Float(sin(2 * Double.pi * 440 * Double($0) / 48_000)) }
+        #expect(abs(level(of: sine) - -3.01) < 0.05)
+    }
+
+    @Test func thresholdsKeepTheirMeaning() {
+        let tuning = VoiceModeTuning()
+        // Speech at -30 dBFS starts a clip but is not a barge-in. Speech at -20 dBFS is a barge-in.
+        let speech = level(of: [Float](repeating: 0.0316, count: 480))
+        #expect(speech >= tuning.speechDecibels && speech < tuning.bargeInDecibels)
+        #expect(level(of: [Float](repeating: 0.1, count: 480)) >= tuning.bargeInDecibels)
+        // Room noise at -55 dBFS is silence for the end of the turn.
+        #expect(level(of: [Float](repeating: 0.00178, count: 480)) < tuning.speechDecibels)
+    }
+
+    @Test func eachReadCoversTheSamplesSinceTheLastRead() {
+        let meter = VoiceInputMeter()
+        _ = level(of: [Float](repeating: 1, count: 480), meter: meter)
+        #expect(abs(level(of: [Float](repeating: 0.01, count: 480), meter: meter) - -40) < 0.01)
+        // No new samples: the last level stays.
+        #expect(abs(meter.level() - -40) < 0.01)
+        meter.reset()
+        #expect(meter.level() == VoiceInputMeter.silence)
     }
 }
