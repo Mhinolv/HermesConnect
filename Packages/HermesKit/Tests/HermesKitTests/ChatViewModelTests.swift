@@ -210,6 +210,20 @@ private final class Counter: @unchecked Sendable {
         #expect(vm.completedReplyId == vm.messages.last?.id)
     }
 
+    /// Issue #120: the Voice tab reads `runningTool`. The reply keeps its tools after `message.complete`.
+    @Test func runningToolFollowsTheToolEventsAndTheReplyKeepsTheTools() async throws {
+        let transport = FakeChatTransport()
+        let vm = model(transport)
+        await vm.send("hello")?.value
+        vm.receive(try event(#"{"type":"message.start","session_id":"s1","payload":{}}"#))
+        vm.receive(try event(#"{"type":"tool.start","session_id":"s1","payload":{"tool_id":"1","name":"web_search"}}"#))
+        #expect(vm.runningTool == "web_search")
+        vm.receive(try event(#"{"type":"tool.complete","session_id":"s1","payload":{"tool_id":"1","name":"web_search","duration_s":0.4,"summary":"Searched"}}"#))
+        #expect(vm.runningTool == nil)
+        vm.receive(try event(#"{"type":"message.complete","session_id":"s1","payload":{"text":"Done.","status":"complete"}}"#))
+        #expect(vm.messages.last?.tools == [ChatToolCall(id: "1", name: "web_search", summary: "Searched", duration: 0.4)])
+    }
+
     @Test func eventsOfOtherSessionsAreIgnored() async throws {
         let transport = FakeChatTransport()
         let vm = model(transport)

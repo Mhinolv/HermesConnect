@@ -60,13 +60,15 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
     /// Issue #117: a local secret, password or question card (`.assistant`, no `reply`). It never goes to the
     /// cache and never holds the answer.
     public var prompt: ChatPromptCard?
+    /// Issue #120: the tool calls of a reply, in call order. Set on `message.complete`. Empty for other messages.
+    public var tools: [ChatToolCall]
 
     public init(id: String, role: Role, text: String, date: Date, delivery: Delivery? = nil,
                 reply: Reply? = nil, userRowId: Int? = nil, promptId: String? = nil, voice: VoiceMemo? = nil,
                 attachments: [ChatAttachment] = [], spokenReply: SpokenReply? = nil,
                 agentAck: AgentAck? = nil, tapback: Tapback? = nil, command: ChatCommandCard? = nil,
                 quote: ChatQuote? = nil, approval: ChatApprovalCard? = nil,
-                prompt: ChatPromptCard? = nil) {
+                prompt: ChatPromptCard? = nil, tools: [ChatToolCall] = []) {
         self.id = id
         self.role = role
         self.text = text
@@ -84,6 +86,7 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
         self.quote = quote
         self.approval = approval
         self.prompt = prompt
+        self.tools = tools
     }
 
     /// Issue #67, #104, #117: a command card, an approval card or a prompt card. Local cards keep their place by

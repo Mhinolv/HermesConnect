@@ -286,7 +286,7 @@ private final class QuoteCounter: @unchecked Sendable {
         #expect(loaded[3].quote == ChatQuote(messageId: nil, author: .user, time: "9:41 AM", excerpt: "x"))
         store.saveTranscript(loaded, sessionId: "k1")
         let raw = try String(contentsOf: url, encoding: .utf8)
-        #expect(raw.contains(#""version":6"#))
+        #expect(raw.contains(#""version":\#(SessionCache.formatVersion)"#))
     }
 }
 

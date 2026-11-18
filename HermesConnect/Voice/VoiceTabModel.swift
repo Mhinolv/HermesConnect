@@ -89,9 +89,13 @@ final class VoiceTabModel {
     var bargeInCount: Int { controller?.bargeInCount ?? 0 }
     var clipEndCount: Int { controller?.clipEndCount ?? 0 }
 
-    var display: VoiceTabDisplay {
-        let display = loopDisplay
-        // Issue #121: a card waits. The title says so, the ring follows the prompt step, and Mute is off.
+    /// Issue #120: the line under the ring shows the tool that runs now in the session chat.
+    var display: VoiceTabDisplay { withPrompt(loopDisplay(tool: sessionChat?.runningTool)) }
+    /// Issue #120: the mini bar does not show the tool.
+    var miniBarDisplay: VoiceTabDisplay { withPrompt(loopDisplay(tool: nil)) }
+
+    /// Issue #121: a card waits. The title says so, the ring follows the prompt step, and Mute is off.
+    private func withPrompt(_ display: VoiceTabDisplay) -> VoiceTabDisplay {
         guard let prompts, prompts.item != nil else { return display }
         return .prompt(prompts.phase, over: display)
     }
@@ -100,15 +104,16 @@ final class VoiceTabModel {
     var promptItem: VoicePromptItem? { prompts?.item }
     var promptPhase: VoicePromptPhase { prompts?.phase ?? .waiting }
 
-    private var loopDisplay: VoiceTabDisplay {
+    private func loopDisplay(tool: String?) -> VoiceTabDisplay {
         if let live = liveController, let display = VoiceTabDisplay.live(
             phase: live.phase, muted: live.muted, speaking: live.speaking, idleWarning: live.idleWarning,
-            stillWorking: live.stillWorking, failure: live.failure) {
+            stillWorking: live.stillWorking, failure: live.failure, tool: tool) {
             return display
         }
         let afterBargeIn = clipEndsAtBargeIn != nil && clipEndsAtBargeIn == controller?.clipEndCount
         return VoiceTabDisplay.make(state: state, muted: controller?.muted ?? false,
-                                    thinkingSeconds: controller?.thinkingSeconds ?? 0, afterBargeIn: afterBargeIn)
+                                    thinkingSeconds: controller?.thinkingSeconds ?? 0, afterBargeIn: afterBargeIn,
+                                    tool: tool)
     }
 
     // MARK: Target chat
