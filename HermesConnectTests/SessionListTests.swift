@@ -108,6 +108,34 @@ import UIKit
     }
 }
 
+/// Issue #94: the "More" menu of the Chats list.
+@MainActor
+@Suite struct ChatsMoreMenuTests {
+    @Test func theMenuTextsFollowTheDesignNotes() {
+        #expect(ChatsMoreText.more == "More")
+        #expect(ChatsMoreText.hint == "Shows chat actions.")
+        #expect(ChatsMoreText.markAllRead == "Mark All as Read")
+        #expect(ChatsMoreText.selectChats == "Select Chats")
+        #expect(ChatsMoreText.announcement == "All chats marked as read")
+    }
+
+    @Test func theListRendersWithTheMenuOnAndOff() {
+        let unread = [SessionListItem(id: "k1", title: "Trip", preview: "Book it", source: "ios", isUnread: true)]
+        let cronOnly = [SessionListItem(id: "k2", title: "Digest", source: "cron", isUnread: true)]
+        for rows in [unread, cronOnly] {
+            let model = SessionListModel(transport: OfflineChatTransport(), chatTransport: OfflineChatTransport(),
+                                         cache: InMemorySessionCacheStore(sessions: rows))
+            #expect(model.canMarkAllRead == (rows == unread))
+            let host = UIHostingController(rootView: NavigationStack {
+                SessionListScreen(model: model)
+            }.environment(AppModel.preview(setUp: true)))
+            host.view.frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+            host.view.layoutIfNeeded()
+            #expect(host.view.bounds.width == 402)
+        }
+    }
+}
+
 /// Issue #64: the texts and states of rename, archive and delete.
 @MainActor
 @Suite struct SessionActionsUITests {

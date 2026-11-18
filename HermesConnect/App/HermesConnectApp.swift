@@ -276,7 +276,8 @@ struct RootView: View {
                 if model.isSetUp {
                     SessionListScreen(model: sessions, link: link, query: ChatLaunch.demoSearch,
                                       onSettings: { showSettings = true },
-                                      onNewChat: { path.append(.new(UUID().uuidString)) })
+                                      onNewChat: { path.append(.new(UUID().uuidString)) },
+                                      onMarkedAllRead: recordActiveServerState)
                 } else {
                     ContentUnavailableView {
                         Label("Set Up Hermes", systemImage: "key.horizontal")
@@ -324,6 +325,11 @@ extension RootView {
             chat.clearNewChatRequest(request)
             path.append(.new(UUID().uuidString))
         }
+    }
+
+    /// Issue #94: after "Mark All as Read", the server book entry of the active server has no unread chat.
+    private func recordActiveServerState() {
+        ServerSwitchGlue.recordActiveState(model: model, sessions: sessions)
     }
 
     /// Issue #15 and #84: the route of a tapped notification (design notes, "Tap on a notification").

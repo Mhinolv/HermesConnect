@@ -30,6 +30,13 @@ enum ServerSwitchGlue {
         }
     }
 
+    /// Issue #94: write the live state of the active server to the server book ("Mark All as Read").
+    /// A launch carries the dots of that entry, so a stale entry would bring the cleared dots back.
+    static func recordActiveState(model: AppModel, sessions: SessionListModel) {
+        guard let id = model.profile?.id else { return }
+        model.recordServerState(sessions.serverState(fallback: model.serverBook.entry(for: id)), for: id)
+    }
+
     /// The active server changed. `AppModel` calls it before the new connect starts.
     static func apply(_ change: ServerChange, model: AppModel, sessions: SessionListModel, jobs: JobsModel,
                       caches: ServerCaches) {

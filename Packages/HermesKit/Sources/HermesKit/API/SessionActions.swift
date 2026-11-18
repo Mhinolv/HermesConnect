@@ -14,6 +14,8 @@ public protocol SessionActionsTransport: Sendable {
     func deleteSession(storedId: String) async throws
     /// `GET /api/sessions?archived=only&order=recent`: the newest archived rows and the total count.
     func fetchArchivedSessions(limit: Int) async throws -> ArchivedSessions
+    /// Issue #94: `PATCH /api/sessions/{stored id}` with `unread`. The read state of the desktop app follows.
+    func setSessionUnread(storedId: String, unread: Bool) async throws
 }
 
 /// One page of archived sessions (issue #64).
@@ -129,6 +131,10 @@ extension LiveChatTransport: SessionActionsTransport {
             // Live in another client of this server (for example the desktop app). The REST path deletes it.
             try await withREST { try await $0.deleteSession(storedSessionId: storedId) }
         }
+    }
+
+    public func setSessionUnread(storedId: String, unread: Bool) async throws {
+        try await withREST { try await $0.setSessionUnread(storedSessionId: storedId, unread: unread) }
     }
 
     public func fetchArchivedSessions(limit: Int) async throws -> ArchivedSessions {

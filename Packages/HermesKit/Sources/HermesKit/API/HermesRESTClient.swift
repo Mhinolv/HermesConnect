@@ -202,7 +202,18 @@ public struct HermesRESTClient: Sendable {
         var request = request(path: "/api/sessions/\(try Self.pathComponent(storedSessionId))", query: [])
         request.httpMethod = "PATCH"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(SessionRenameBody(title: title, identity: identity))
+        request.httpBody = try JSONEncoder().encode(SessionPatchBody(title: title, identity: identity))
+        try await mutate(request)
+    }
+
+    /// Issue #94: `PATCH /api/sessions/{id}` with `unread` (`sessions.py:933-942`), fenced like `renameSession`.
+    /// The desktop app shows the same read state.
+    public func setSessionUnread(storedSessionId: String, unread: Bool) async throws {
+        let identity = try await mutationIdentity(storedSessionId: storedSessionId)
+        var request = request(path: "/api/sessions/\(try Self.pathComponent(storedSessionId))", query: [])
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(SessionPatchBody(unread: unread, identity: identity))
         try await mutate(request)
     }
 
@@ -252,18 +263,27 @@ public struct HermesRESTClient: Sendable {
         var detail: String?
     }
 
-    private struct SessionRenameBody: Encodable {
-        var title: String
+    /// The body of a fenced `PATCH /api/sessions/{id}`. Only the fields that are set go out.
+    private struct SessionPatchBody: Encodable {
+        var title: String?
+        var unread: Bool?
         var identity: SessionMutationIdentity
 
+        init(title: String? = nil, unread: Bool? = nil, identity: SessionMutationIdentity) {
+            self.title = title
+            self.unread = unread
+            self.identity = identity
+        }
+
         private enum CodingKeys: String, CodingKey {
-            case title, requestId = "request_id", expectedRevision = "expected_revision"
+            case title, unread, requestId = "request_id", expectedRevision = "expected_revision"
             case expectedGeneration = "expected_generation"
         }
 
         func encode(to encoder: any Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encode(title, forKey: .title)
+            try container.encodeIfPresent(title, forKey: .title)
+            try container.encodeIfPresent(unread, forKey: .unread)
             try container.encode(identity.requestId, forKey: .requestId)
             try container.encode(identity.expectedRevision, forKey: .expectedRevision)
             try container.encodeIfPresent(identity.expectedGeneration, forKey: .expectedGeneration)
