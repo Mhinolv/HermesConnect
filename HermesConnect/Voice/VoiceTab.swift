@@ -27,6 +27,10 @@ struct VoiceTab: View {
         .task(id: statusKey) { await model.refreshLiveStatus() }
         // Issue #102: the engine also ends by itself (idle, background, a phone call, the server).
         .onChange(of: model.isLiveRunning) { _, running in if !running { model.liveDidStop() } }
+        // Issue #121: the loop ended by itself (silence, "stop"): the card hides from the tab.
+        .onChange(of: model.isRunning) { _, running in if !running { model.stopPrompts() } }
+        // Issue #121: haptic `.warning` when a card shows.
+        .sensoryFeedback(.warning, trigger: model.prompts?.shownCount ?? 0)
         .onChange(of: model.liveController?.phase) { _, phase in
             if let phase, let text = VoiceTabDisplay.liveAnnouncement(phase) {
                 AccessibilityNotification.Announcement(text).post()
@@ -73,7 +77,12 @@ struct VoiceTab: View {
             choose: { choosing = true },
             settings: onSettings,
             select: { model.select($0) },
-            dismissToast: { model.clearLiveToast() })
+            dismissToast: { model.clearLiveToast() },
+            prompt: VoicePromptActions(
+                choose: { model.answerPrompt($0) },
+                sendValue: { model.sendPrompt(value: $0) },
+                sendAnswers: { model.sendPrompt(typed: $0) },
+                cancel: { model.cancelPrompt() }))
     }
 }
 
@@ -97,6 +106,9 @@ struct VoiceScreenState {
     var showsLiveCapsule = false
     /// "Live Mode Ended, 4:12".
     var toast: String?
+    /// Issue #121: the Hermes card that waits, and its step.
+    var prompt: VoicePromptItem?
+    var promptPhase: VoicePromptPhase = .waiting
 }
 
 extension VoiceScreenState {
@@ -108,7 +120,7 @@ extension VoiceScreenState {
                   liveLine: model.liveAvailability.line(server: server, selected: model.mode == .live),
                   liveElapsed: model.liveElapsed,
                   showsLiveCapsule: model.isLiveRunning && live?.phase != .failed,
-                  toast: model.liveToast)
+                  toast: model.liveToast, prompt: model.promptItem, promptPhase: model.promptPhase)
     }
 
     /// The #98 engine has no audio level. The live ring bends a little, more while Hermes talks.
@@ -130,6 +142,8 @@ struct VoiceScreenActions {
     /// Issue #102: the mode picker.
     var select: (VoiceTabMode) -> Void = { _ in }
     var dismissToast: () -> Void = {}
+    /// Issue #121: the buttons and fields of the card.
+    var prompt = VoicePromptActions()
 }
 
 /// The Quiet Ring layout: the ring at 40 % of the height, the title, then the controls above the tab bar.
@@ -140,12 +154,87 @@ struct VoiceScreen: View {
     var actions = VoiceScreenActions()
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Issue #121: Mute and End hide while the keyboard shows.
+    @State private var keyboardShown = false
+    @State private var promptEditing = false
 
     private var display: VoiceTabDisplay { state.display }
     /// AX5: the ring is 160 pt. The keys stay 64 pt.
-    private var ringSize: CGFloat { typeSize.isAccessibilitySize ? 160 : 200 }
+    /// Issue #121: 96 pt while a card waits.
+    private var ringSize: CGFloat { state.prompt != nil ? 96 : (typeSize.isAccessibilitySize ? 160 : 200) }
+    private var ringFrame: CGFloat { state.prompt != nil ? 120 : 240 }
 
     var body: some View {
+        content
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            keyboardShown = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            keyboardShown = false
+        }
+    }
+
+    @ViewBuilder private var content: some View {
+        if let prompt = state.prompt {
+            promptLayout(prompt)
+        } else {
+            loopLayout
+        }
+    }
+
+    /// Issue #121: the 96 pt ring, "Hermes needs an answer", then the card. The controls stay under it.
+    private func promptLayout(_ prompt: VoicePromptItem) -> some View {
+        VStack(spacing: 0) {
+            if state.showsLiveCapsule {
+                LiveCapsule(elapsed: state.liveElapsed)
+                    .padding(.top, 8)
+            }
+            ScrollView {
+                VStack(spacing: 12) {
+                    ring
+                    titles
+                    VoicePromptCardView(item: prompt, phase: state.promptPhase, actions: promptActions)
+                        .id(prompt.id)
+                }
+                .padding(.top, 8)
+                .frame(maxWidth: .infinity)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            if !keyboardShown, !promptEditing {
+                controls
+                    .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+                    .padding(.vertical, 12)
+            }
+        }
+        .padding(.horizontal, 16)
+        .background(Color(uiColor: .systemBackground))
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { toolbar }
+        .accessibilityAction(.escape, actions.end)
+    }
+
+    private var promptActions: VoicePromptActions {
+        var prompt = actions.prompt
+        prompt.editing = { promptEditing = $0 }
+        return prompt
+    }
+
+    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
+        // The server name with the #83 menu.
+        ToolbarItem(placement: .topBarLeading) {
+            ServerTitle(title: "Voice", link: link, activeUnreadChats: activeUnreadChats,
+                        onManage: actions.settings)
+                .fixedSize()
+                .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            AudioRoutePicker()
+                .frame(width: 32, height: 32)
+                .accessibilityLabel("Audio Output")
+        }
+    }
+
+    private var loopLayout: some View {
         GeometryReader { proxy in
             VStack(spacing: 0) {
                 if state.showsLiveCapsule {
@@ -179,20 +268,7 @@ struct VoiceScreen: View {
         .animation(.easeInOut(duration: 0.25), value: state.toast)
         .background(Color(uiColor: .systemBackground))
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            // The server name with the #83 menu.
-            ToolbarItem(placement: .topBarLeading) {
-                ServerTitle(title: "Voice", link: link, activeUnreadChats: activeUnreadChats,
-                            onManage: actions.settings)
-                    .fixedSize()
-                    .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                AudioRoutePicker()
-                    .frame(width: 32, height: 32)
-                    .accessibilityLabel("Audio Output")
-            }
-        }
+        .toolbar { toolbar }
         .accessibilityAction(.magicTap, actions.magic)
         .accessibilityAction(.escape, actions.end)
     }
@@ -203,7 +279,7 @@ struct VoiceScreen: View {
                 QuietRing(style: display.ring, level: state.level, diameter: ringSize)
                 if !reduceMotion { BargeInHalo(trigger: state.bargeIns, diameter: ringSize) }
             }
-            .frame(width: 240, height: 240)
+            .frame(width: ringFrame, height: ringFrame)
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
