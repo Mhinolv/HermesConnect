@@ -86,14 +86,17 @@ import UIKit
         let plus = try #require(bar.leftStackView.arrangedSubviews.first)
         controller.voice.startTapMode()
         bar.layoutIfNeeded()
-        #expect(controller.recordingBarMode == .tap)
+        #expect(controller.recordingBarMode == .locked)
         #expect(!isShown(plus), "the + button shows while a memo records")
         let row = try #require(bar.middleContentView as? VoiceRecordingBar)
         row.layoutIfNeeded()
-        let line = centerY(row, in: bar)
-        for view in [row.cancelButton, row.sendButton] {
+        // Issue #103: the locked keys (Delete, Pause, Send) share one center line under the capsule.
+        let line = centerY(row.sendButton, in: bar)
+        for view in [row.deleteButton, row.middleButton] {
             #expect(abs(centerY(view, in: bar) - line) <= 1)
+            #expect(view.frame.width == VoiceRecordingBar.keySize)
         }
+        #expect(row.frame.height >= row.height(for: .locked) - 1)
         controller.voice.cancel()
         bar.layoutIfNeeded()
         #expect(isShown(plus), "the + button comes back after the recording")
