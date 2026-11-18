@@ -58,16 +58,23 @@ public struct VoiceTabDisplay: Sendable, Equatable {
     public var muteEnabled: Bool
     /// Issue #102: a live session. End uses `phone.down.fill` and the live capsule shows.
     public var isLive = false
+    /// Issue #120: the subtitle is the tool line ("Using web_search…"). One line with a middle cut.
+    public var showsTool = false
 
-    /// The VoiceOver label of the ring: "Voice Mode, <state>".
-    public var ringAccessibilityLabel: String { "Voice Mode, \(title)" }
+    /// The VoiceOver label of the ring: "Voice Mode, <state>". Issue #120: the tool line follows the state.
+    public var ringAccessibilityLabel: String {
+        guard showsTool, let subtitle else { return "Voice Mode, \(title)" }
+        return "Voice Mode, \(title), \(subtitle)"
+    }
 
     /// Seconds of thinking before the sub line says "Still working…".
     public static let stillWorkingSeconds = 10
 
-    /// - Parameter afterBargeIn: a barge-in stopped the last reply, and no clip ended since then.
+    /// - Parameters:
+    ///   - afterBargeIn: a barge-in stopped the last reply, and no clip ended since then.
+    ///   - tool: issue #120, the tool that runs now in the target chat.
     public static func make(state: VoiceModeState, muted: Bool, thinkingSeconds: Int,
-                            afterBargeIn: Bool = false) -> VoiceTabDisplay {
+                            afterBargeIn: Bool = false, tool: String? = nil) -> VoiceTabDisplay {
         func session(_ ring: VoiceRingStyle, _ title: String, _ subtitle: String?, action: VoiceTabAction? = nil,
                      muteEnabled: Bool = true) -> VoiceTabDisplay {
             VoiceTabDisplay(ring: ring, title: title, subtitle: subtitle, action: action, isSession: true,
@@ -89,6 +96,11 @@ public struct VoiceTabDisplay: Sendable, Equatable {
         case .transcribing:
             return session(.working, "Transcribing…", workingLine(thinkingSeconds, counting: false))
         case .thinking:
+            if let tool {
+                var display = session(.working, "Thinking…", ChatToolText.runningLine(tool))
+                display.showsTool = true
+                return display
+            }
             return session(.working, "Thinking…", workingLine(thinkingSeconds, counting: true))
         case .speaking:
             return session(.speaking, "Speaking", "Tap or speak to interrupt")

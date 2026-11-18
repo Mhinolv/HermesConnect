@@ -15,6 +15,8 @@ public final class ChatViewModel {
     public private(set) var messages: [ChatMessage] = []
     public private(set) var turn: ChatTurnPhase = .idle
     public private(set) var statusLine: String?
+    /// Issue #120: the tool that runs now in this chat. The Voice tab shows "Using <tool>…".
+    public private(set) var runningTool: String?
     /// The session title, or `nil` for a new chat ("New Chat").
     public private(set) var title: String?
     /// The last reply that ended. VoiceOver reads it once.
@@ -1238,6 +1240,7 @@ public final class ChatViewModel {
         if messages != thread.messages { messages = thread.messages }
         if turn != thread.turn { turn = thread.turn }
         if statusLine != thread.statusLine { statusLine = thread.statusLine }
+        if runningTool != thread.runningTool { runningTool = thread.runningTool }
     }
 
     /// The thread state that is not drawn yet (tests).
