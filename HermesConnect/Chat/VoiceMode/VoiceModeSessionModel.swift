@@ -94,7 +94,7 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
         usesVoiceProcessing = environment["HERMES_AUDIO_VP"] != "0"
         let processing = processing
         route = VoiceAudioRoute(session: SystemVoiceAudioSession(), processing: { processing.value.withLock { $0 } },
-                                environment: environment)
+                                environment: environment, diagnostics: .shared)
     }
 
     var access: VoiceModeMicrophoneAccess {
@@ -356,5 +356,21 @@ final class SystemVoiceAudioSession: VoiceAudioSession {
         case .unknown: "unknown"
         @unknown default: "other\(reason.rawValue)"
         }
+    }
+}
+
+/// Issue #130: `AVAudioSession.sharedInstance()` for bubble playback and auto-play. It keeps no state.
+final class SystemVoicePlaybackSession: VoicePlaybackSession {
+    var routeState: VoiceAudioRouteState { SystemVoiceAudioSession().routeState }
+
+    var isOtherAudioPlaying: Bool { AVAudioSession.sharedInstance().isOtherAudioPlaying }
+
+    func setPlaybackCategory(duckOthers: Bool) throws {
+        try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio,
+                                                        options: duckOthers ? [.duckOthers] : [])
+    }
+
+    func setActive(_ active: Bool) throws {
+        try AVAudioSession.sharedInstance().setActive(active)
     }
 }

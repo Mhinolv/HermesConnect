@@ -59,12 +59,15 @@ public final class VoiceAudioRoute: Sendable {
     private let printLine: @Sendable (String) -> Void
     private let processing: @Sendable () -> VoiceProcessingStatus
     private let log = HermesLog(category: "audio")
+    private let diagnostics: AudioDiagnosticsFile?
 
     public init(session: any VoiceAudioSession,
                 processing: @escaping @Sendable () -> VoiceProcessingStatus = { .off },
                 environment: [String: String] = ProcessInfo.processInfo.environment,
+                diagnostics: AudioDiagnosticsFile? = nil,
                 printLine: @escaping @Sendable (String) -> Void = { print($0) }) {
         self.session = session
+        self.diagnostics = diagnostics
         self.processing = processing
         printsDiagnostics = environment[Self.diagnosticsKey] == "1"
         mode = environment[Self.modeKey].flatMap(VoiceAudioMode.init(rawValue:)) ?? .voiceChat
@@ -120,6 +123,7 @@ public final class VoiceAudioRoute: Sendable {
     private func report(_ event: String, reason: String? = nil) {
         let line = Self.line(event: event, reason: reason, state: session.routeState, processing: processing())
         log.notice(line)
+        diagnostics?.append("handsfree " + line)
         if printsDiagnostics { printLine("AUDIO_DIAG " + line) }
     }
 
