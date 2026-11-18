@@ -10,16 +10,17 @@ import UIKit
 
 private final class StatusService: LiveModeService, @unchecked Sendable {
     let lock = NSLock()
-    var status: LiveModeStatus
+    var status: VoiceLiveStatus?
     var offers: [String] = []
 
-    init(_ status: LiveModeStatus) { self.status = status }
+    init(_ status: VoiceLiveStatus?) { self.status = status }
 
-    func liveModeStatus() async throws -> LiveModeStatus { lock.withLock { status } }
+    func voiceLiveStatus() async throws -> VoiceLiveStatus? { lock.withLock { status } }
 
-    func createLiveModeSession(sdp: String, history _: [LiveModeHistoryMessage]) async throws -> LiveModeAnswer {
-        lock.withLock { offers.append(sdp) }
-        return LiveModeAnswer(sessionId: "s", sdp: "answer")
+    func createVoiceLiveSession(offerSDP: String, history _: [VoiceLiveHistoryItem]) async throws
+        -> VoiceLiveSessionAnswer {
+        lock.withLock { offers.append(offerSDP) }
+        return VoiceLiveSessionAnswer(sessionId: "s", sdp: "answer")
     }
 }
 
@@ -50,7 +51,7 @@ private final class StubConnection: LiveModeConnection {
     }
 
     @Test func unavailableStatusStartsNothingAndShowsTheReason() async throws {
-        let off = StatusService(LiveModeStatus(mode: "chained", available: false, reason: "GPT-Live is off on this server."))
+        let off = StatusService(VoiceLiveStatus(mode: .chained, available: false, reason: "GPT-Live is off on this server."))
         let (model, chat) = session(off, connection: StubConnection())
         _ = chat
         #expect(model.availabilityText == "Not connected")
@@ -60,8 +61,18 @@ private final class StubConnection: LiveModeConnection {
         #expect(model.availabilityText == "GPT-Live is off on this server.")
     }
 
+    @Test func olderServerStartsNothing() async throws {
+        let older = StatusService(nil)
+        let (model, chat) = session(older, connection: StubConnection())
+        _ = chat
+        await model.start()
+        #expect(!model.controller.isActive)
+        #expect(older.offers.isEmpty)
+        #expect(model.availabilityText == "This Hermes version has no Live mode.")
+    }
+
     @Test func availableStatusStartsWithTheCostAndEndCloses() async throws {
-        let service = StatusService(LiveModeStatus(available: true))
+        let service = StatusService(VoiceLiveStatus(mode: .gptLive, available: true))
         let connection = StubConnection()
         let (model, chat) = session(service, connection: connection)
         _ = chat
@@ -81,7 +92,7 @@ private final class StubConnection: LiveModeConnection {
 
     @Test func backgroundAndPhoneCallEndTheSession() async throws {
         for note in [UIApplication.didEnterBackgroundNotification, AVAudioSession.interruptionNotification] {
-            let service = StatusService(LiveModeStatus(available: true))
+            let service = StatusService(VoiceLiveStatus(mode: .gptLive, available: true))
             let connection = StubConnection()
             let (model, chat) = session(service, connection: connection)
             _ = chat
@@ -99,7 +110,7 @@ private final class StubConnection: LiveModeConnection {
     }
 
     @Test func microphoneOffStartsNoSession() async throws {
-        let service = StatusService(LiveModeStatus(available: true))
+        let service = StatusService(VoiceLiveStatus(mode: .gptLive, available: true))
         let (model, chat) = session(service, connection: StubConnection(), microphone: false)
         _ = chat
         await model.start()
@@ -112,13 +123,13 @@ private final class StubConnection: LiveModeConnection {
 
     @Test func viewScreenshots() async throws {
         let folder = ProcessInfo.processInfo.environment["HERMES_SCREENS_DIR"].map { URL(fileURLWithPath: $0) }
-        let off = StatusService(LiveModeStatus(mode: "chained", available: false, reason: "GPT-Live is off on this server."))
+        let off = StatusService(VoiceLiveStatus(mode: .chained, available: false, reason: "GPT-Live is off on this server."))
         let (offModel, offChat) = session(off, connection: StubConnection())
         _ = offChat
         await offModel.refreshStatus()
         try shoot(offModel, "unavailable", folder)
 
-        let service = StatusService(LiveModeStatus(available: true))
+        let service = StatusService(VoiceLiveStatus(mode: .gptLive, available: true))
         let connection = StubConnection()
         let (model, chat) = session(service, connection: connection)
         _ = chat

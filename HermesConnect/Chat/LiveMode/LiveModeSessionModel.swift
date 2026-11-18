@@ -12,8 +12,10 @@ import UIKit
 @MainActor @Observable
 final class LiveModeSessionModel {
     let controller: LiveModeController
-    /// The last status of this server. `nil` until the first check, or when the check failed.
-    private(set) var status: LiveModeStatus?
+    /// The last status of this server. `nil` until the first check, when the check failed, or on an older server.
+    private(set) var status: VoiceLiveStatus?
+    /// The last check found an older Hermes with no `voice-live` routes.
+    private(set) var isOlderServer = false
     private(set) var isCheckingStatus = false
     /// The owner refused the microphone. The view shows "Microphone Access Off".
     var microphoneDenied = false
@@ -53,6 +55,7 @@ final class LiveModeSessionModel {
     /// "About $0.05 a minute", or why Live is not available.
     var availabilityText: String {
         if isCheckingStatus, status == nil { return "Checking…" }
+        if isOlderServer { return LiveModeStatusText.olderServer }
         guard let status else { return "Not connected" }
         return status.available ? LiveModeFormat.costCaption : status.unavailableText
     }
@@ -61,9 +64,11 @@ final class LiveModeSessionModel {
         isCheckingStatus = true
         defer { isCheckingStatus = false }
         do {
-            status = try await service.liveModeStatus()
+            status = try await service.voiceLiveStatus()
+            isOlderServer = status == nil
         } catch {
             status = nil
+            isOlderServer = false
         }
     }
 

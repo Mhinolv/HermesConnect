@@ -44,7 +44,7 @@ public protocol LiveModeHermes: AnyObject {
     /// `session.interrupt`: a new delegation replaces the turn that runs.
     func stopReply()
     /// Text turns of the chat, to seed the voice model.
-    func liveHistory() -> [LiveModeHistoryMessage]
+    func liveHistory() -> [VoiceLiveHistoryItem]
 }
 
 public enum LiveModeEndReason: Sendable, Equatable {
@@ -224,7 +224,7 @@ public final class LiveModeController {
             do {
                 let offer = try await connection.makeOffer()
                 guard let self, self.epoch == epoch else { connection.close(); return }
-                let answer = try await service.createLiveModeSession(sdp: offer, history: history)
+                let answer = try await service.createVoiceLiveSession(offerSDP: offer, history: history)
                 guard self.epoch == epoch else { connection.close(); return }
                 try await connection.applyAnswer(answer.sdp)
                 guard self.epoch == epoch else { connection.close(); return }
@@ -293,7 +293,9 @@ public final class LiveModeController {
 
     private static func failureText(_ error: any Error) -> String {
         switch error {
-        case LiveModeError.refused(let text): text
+        case VoiceLiveSessionError.unavailable(let detail), VoiceLiveSessionError.vendor(let detail),
+             VoiceLiveSessionError.badOffer(let detail):
+            detail.flatMap { $0.isEmpty ? nil : $0 } ?? "The server could not start Live mode."
         case LiveModeError.microphoneDenied: "Microphone Access Off"
         default: "Live mode could not connect."
         }

@@ -195,15 +195,15 @@ public enum LiveModeText {
 
     /// Seed history for a new session from the chat: text turns only, newest kept (`toLiveHistory`).
     public static func history(_ messages: [ChatMessage], maxMessages: Int = 24,
-                               maxCharacters: Int = 6_000) -> [LiveModeHistoryMessage] {
-        var result: [LiveModeHistoryMessage] = []
+                               maxCharacters: Int = 6_000) -> [VoiceLiveHistoryItem] {
+        var result: [VoiceLiveHistoryItem] = []
         var budget = maxCharacters
         for message in messages.reversed() where message.voice == nil && message.command == nil {
             let text = String(collapse(message.text).prefix(1_200))
             guard !text.isEmpty else { continue }
             if result.count >= maxMessages || budget - text.count < 0 { break }
             budget -= text.count
-            result.insert(LiveModeHistoryMessage(role: message.role == .user ? "user" : "assistant", text: text), at: 0)
+            result.insert(VoiceLiveHistoryItem(role: message.role == .user ? .user : .assistant, text: text), at: 0)
         }
         return result
     }

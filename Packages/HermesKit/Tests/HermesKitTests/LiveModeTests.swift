@@ -1,5 +1,4 @@
 import Foundation
-import Synchronization
 import Testing
 @testable import HermesKit
 
@@ -10,85 +9,11 @@ private let liveToken = String(repeating: "0f", count: 32)
 private let offer = "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\n"
     + "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:1\r\n"
 
-private final class LiveHTTP: HTTPDataLoading, Sendable {
-    private let requests = Mutex<[URLRequest]>([])
-    let status: Int
-    let body: String
-
-    init(status: Int = 200, body: String) {
-        self.status = status
-        self.body = body
-    }
-
-    var recorded: [URLRequest] { requests.withLock { $0 } }
-
-    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        requests.withLock { $0.append(request) }
-        return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil,
-                                                 headerFields: nil)!)
-    }
-}
-
-@Suite struct LiveModeRESTTests {
-    private func client(_ loader: LiveHTTP) throws -> HermesRESTClient {
-        HermesRESTClient(endpoint: try GatewayEndpoint(port: 8123, token: liveToken), loader: loader)
-    }
-
-    @Test func statusDecodesAvailableAndUnavailable() async throws {
-        let ready = LiveHTTP(body: #"{"ok":true,"mode":"gpt-live","available":true,"reason":null,"model":"gpt-live-1","voice":"marin"}"#)
-        let status = try await client(ready).liveModeStatusCall()
-        #expect(status == LiveModeStatus(mode: "gpt-live", available: true, model: "gpt-live-1", voice: "marin"))
-        let request = try #require(ready.recorded.first)
-        #expect(request.url?.path == "/api/audio/voice-live/status")
-        #expect(request.value(forHTTPHeaderField: "X-Hermes-Session-Token") == liveToken)
-
-        let off = LiveHTTP(body: #"{"ok":true,"mode":"chained","available":false,"reason":"No OpenAI key"}"#)
-        let offStatus = try await client(off).liveModeStatusCall()
-        #expect(!offStatus.available)
-        #expect(offStatus.unavailableText == "No OpenAI key")
-        #expect(LiveModeStatus.unavailable(nil).unavailableText == "Not available on this server")
-    }
-
-    @Test func olderHermesWithNoRouteIsUnavailable() async throws {
-        let status = try await client(LiveHTTP(status: 404, body: "{}")).liveModeStatusCall()
-        #expect(!status.available)
-        #expect(status.reason == "This Hermes version has no Live mode.")
-    }
-
-    @Test func sessionSendsTheOfferByteExactAndReturnsTheAnswer() async throws {
-        let loader = LiveHTTP(body: #"{"ok":true,"session":{"id":"sess_1"},"transport":{"type":"answer","sdp":"v=0\r\nanswer\r\n"}}"#)
-        let history = [LiveModeHistoryMessage(role: "user", text: "Hi"),
-                       LiveModeHistoryMessage(role: "assistant", text: "Hello.")]
-        let answer = try await client(loader).liveModeSessionCall(sdp: offer, history: history)
-        #expect(answer == LiveModeAnswer(sessionId: "sess_1", sdp: "v=0\r\nanswer\r\n"))
-
-        let request = try #require(loader.recorded.first)
-        #expect(request.httpMethod == "POST")
-        #expect(request.url?.path == "/api/audio/voice-live/session")
-        #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
-        let body = try #require(request.httpBody)
-        let object = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
-        let sent = try #require(object["sdp"] as? String)
-        // Byte-exact: the same UTF-8 bytes, with the trailing CRLF.
-        #expect(Data(sent.utf8) == Data(offer.utf8))
-        #expect(sent.hasSuffix("\r\n"))
-        let seeds = try #require(object["history"] as? [[String: Any]])
-        #expect(seeds.count == 2)
-        #expect(seeds[1]["role"] as? String == "assistant")
-        #expect((seeds[1]["content"] as? [[String: String]])?.first == ["type": "output_text", "text": "Hello."])
-    }
-
-    @Test func refusedSessionShowsTheServerReason() async throws {
-        let loader = LiveHTTP(status: 503, body: #"{"detail":"GPT-Live needs an OpenAI API key"}"#)
-        await #expect(throws: LiveModeError.refused("GPT-Live needs an OpenAI API key")) {
-            _ = try await client(loader).liveModeSessionCall(sdp: offer, history: [])
-        }
-        await #expect(throws: LiveModeError.noAnswer) {
-            _ = try await client(LiveHTTP(body: #"{"ok":true}"#)).liveModeSessionCall(sdp: offer, history: [])
-        }
-        await #expect(throws: HermesAPIError.unauthorized) {
-            _ = try await client(LiveHTTP(status: 401, body: "{}")).liveModeSessionCall(sdp: offer, history: [])
-        }
+@Suite struct LiveModeServiceTests {
+    @Test func statusTextOfUnavailableAndOlderServers() {
+        #expect(VoiceLiveStatus(mode: .chained, available: false, reason: " No OpenAI key ").unavailableText == "No OpenAI key")
+        #expect(VoiceLiveStatus(mode: .chained, available: false).unavailableText == "Not available on this server")
+        #expect(LiveModeStatusText.olderServer == "This Hermes version has no Live mode.")
     }
 
     @Test func delegationPromptUsesSurfaceVoiceLive() async throws {
@@ -184,9 +109,9 @@ private final class LiveHTTP: HTTPDataLoading, Sendable {
                         ChatMessage(id: "2", role: .assistant, text: "Reply", date: date),
                         ChatMessage(id: "3", role: .user, text: "   ", date: date)]
         let history = LiveModeText.history(messages)
-        #expect(history == [LiveModeHistoryMessage(role: "user", text: "Old"),
-                            LiveModeHistoryMessage(role: "assistant", text: "Reply")])
-        #expect(LiveModeText.history(messages, maxMessages: 1) == [LiveModeHistoryMessage(role: "assistant", text: "Reply")])
+        #expect(history == [VoiceLiveHistoryItem(role: .user, text: "Old"),
+                            VoiceLiveHistoryItem(role: .assistant, text: "Reply")])
+        #expect(LiveModeText.history(messages, maxMessages: 1) == [VoiceLiveHistoryItem(role: .assistant, text: "Reply")])
     }
 
     @Test func formats() {
@@ -242,18 +167,19 @@ private final class FakeConnection: LiveModeConnection {
 private final class FakeLiveService: LiveModeService, @unchecked Sendable {
     let lock = NSLock()
     var offers: [String] = []
-    var histories: [[LiveModeHistoryMessage]] = []
+    var histories: [[VoiceLiveHistoryItem]] = []
     var error: (any Error)?
 
-    func liveModeStatus() async throws -> LiveModeStatus { LiveModeStatus(available: true) }
+    func voiceLiveStatus() async throws -> VoiceLiveStatus? { VoiceLiveStatus(mode: .gptLive, available: true) }
 
-    func createLiveModeSession(sdp: String, history: [LiveModeHistoryMessage]) async throws -> LiveModeAnswer {
+    func createVoiceLiveSession(offerSDP sdp: String, history: [VoiceLiveHistoryItem]) async throws
+        -> VoiceLiveSessionAnswer {
         try lock.withLock {
             offers.append(sdp)
             histories.append(history)
             if let error { throw error }
         }
-        return LiveModeAnswer(sessionId: "sess_1", sdp: "answer-sdp")
+        return VoiceLiveSessionAnswer(sessionId: "sess_1", sdp: "answer-sdp")
     }
 }
 
@@ -272,7 +198,7 @@ private final class FakeHermes: LiveModeHermes {
 
     func replyProgress(promptId: String) -> LiveReplyProgress { progress[promptId] ?? .waiting }
     func stopReply() { stops += 1 }
-    func liveHistory() -> [LiveModeHistoryMessage] { [LiveModeHistoryMessage(role: "user", text: "Earlier")] }
+    func liveHistory() -> [VoiceLiveHistoryItem] { [VoiceLiveHistoryItem(role: .user, text: "Earlier")] }
 }
 
 @MainActor
@@ -319,7 +245,7 @@ private final class FakeHermes: LiveModeHermes {
     @Test func startSendsTheOfferUnchangedWithTheChatHistory() async throws {
         let h = try await live()
         #expect(h.service.offers == [offer])
-        #expect(h.service.histories == [[LiveModeHistoryMessage(role: "user", text: "Earlier")]])
+        #expect(h.service.histories == [[VoiceLiveHistoryItem(role: .user, text: "Earlier")]])
         #expect(h.controller.display == .live)
         #expect(h.controller.display?.label == "Live. Speak any time.")
         h.clock.advance(65.4)
@@ -480,7 +406,7 @@ private final class FakeHermes: LiveModeHermes {
 
     @Test func refusedSessionFailsAndTryAgainStartsANewSession() async throws {
         let h = harness()
-        h.service.error = LiveModeError.refused("No OpenAI key")
+        h.service.error = VoiceLiveSessionError.unavailable(detail: "No OpenAI key")
         h.controller.start()
         try await settle { h.controller.phase == .failed }
         #expect(h.controller.failure == "No OpenAI key")
@@ -493,6 +419,20 @@ private final class FakeHermes: LiveModeHermes {
         // "End" in the failed state hides the panel with no toast.
         h.controller.end(.hangUp)
         #expect(h.controller.lastEnd?.reason == .hangUp)
+    }
+
+    @Test func vendorRefusalWithNoDetailShowsADefault() async throws {
+        let h = harness()
+        h.service.error = VoiceLiveSessionError.vendor(detail: nil)
+        h.controller.start()
+        try await settle { h.controller.phase == .failed }
+        #expect(h.controller.failure == "The server could not start Live mode.")
+    }
+
+    @Test func liveChatTransportIsTheLiveService() {
+        // #97 owns the two calls. The engine uses them through `LiveModeService`.
+        let service: (any LiveModeService)? = LiveChatTransport()
+        #expect(service != nil)
     }
 
     @Test func micDeniedShowsTheMicText() async throws {

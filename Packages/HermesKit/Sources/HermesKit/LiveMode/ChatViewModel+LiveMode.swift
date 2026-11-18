@@ -14,7 +14,7 @@ extension ChatViewModel: LiveModeHermes {
         _ = stop()
     }
 
-    public func liveHistory() -> [LiveModeHistoryMessage] {
+    public func liveHistory() -> [VoiceLiveHistoryItem] {
         LiveModeText.history(messages)
     }
 }
