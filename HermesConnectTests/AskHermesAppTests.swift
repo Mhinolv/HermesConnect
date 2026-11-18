@@ -10,7 +10,7 @@ import UserNotifications
 @Suite(.serialized) struct AskHermesAppTests {
     @Test func twoShortcutsWithTheDesignPhrasesAndSymbols() {
         let shortcuts = HermesShortcuts.appShortcuts
-        #expect(shortcuts.count == 2)
+        #expect(shortcuts.count == 3)
         #expect(HermesShortcuts.shortcutTileColor == .blue)
         #expect(String(localized: AskHermesIntent.title) == "Ask Hermes")
         #expect(String(localized: ReadHermesIntent.title) == "Read Hermes")
