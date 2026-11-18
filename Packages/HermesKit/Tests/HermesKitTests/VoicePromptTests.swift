@@ -167,6 +167,72 @@ final class FakePromptHold: VoicePromptHolding {
         #expect(two.waitingPrompts.first?.takesSpokenAnswer == false)
     }
 
+    // MARK: Negation (QA 121-1 defect 1)
+
+    private func allChoices() throws -> VoicePromptItem {
+        let vm = model(FakeApprovalTransport())
+        vm.receive(try approval(choices: ["once", "session", "always", "deny"]))
+        return try #require(vm.waitingPrompts.first)
+    }
+
+    @Test(arguments: ["don't allow", "Don’t allow.", "dont allow", "do not allow that", "never allow", "not allow once",
+                      "do not always allow", "don't allow this chat", "I won't allow it", "no, allow once",
+                      "can't allow", "not now, always", "nope always", "don't deny", "allow once, no deny"])
+    func aNegationNeverAllows(_ said: String) throws {
+        let item = try allChoices()
+        let answer = VoicePromptSpeech.match(said, for: item)
+        #expect(answer != .approval(.once) && answer != .approval(.session) && answer != .approval(.always),
+                "\"\(said)\" gave \(String(describing: answer))")
+    }
+
+    @Test func aNegationWithNoClearDenyGivesNoAnswer() throws {
+        let item = try allChoices()
+        for said in ["don't allow", "do not allow that", "never allow", "not allow once", "do not always allow"] {
+            #expect(VoicePromptSpeech.match(said, for: item) == nil, "\"\(said)\"")
+        }
+    }
+
+    @Test func clearPhrasesStillMatch() throws {
+        let item = try allChoices()
+        #expect(VoicePromptSpeech.match("no", for: item) == .approval(.deny))
+        #expect(VoicePromptSpeech.match("No.", for: item) == .approval(.deny))
+        #expect(VoicePromptSpeech.match("deny", for: item) == .approval(.deny))
+        #expect(VoicePromptSpeech.match("no, deny it", for: item) == .approval(.deny))
+        #expect(VoicePromptSpeech.match("allow once", for: item) == .approval(.once))
+        #expect(VoicePromptSpeech.match("yes allow once", for: item) == .approval(.once))
+        #expect(VoicePromptSpeech.match("always allow", for: item) == .approval(.always))
+        #expect(VoicePromptSpeech.match("for this chat", for: item) == .approval(.session))
+    }
+
+    @Test func aClarifyAnswerWithANegationOrTwoChoicesGivesNoAnswer() throws {
+        let vm = model(FakeApprovalTransport())
+        vm.receive(try clarify(choices: ["Work", "Personal"]))
+        let item = try #require(vm.waitingPrompts.first)
+        #expect(VoicePromptSpeech.match("not work", for: item) == nil)
+        #expect(VoicePromptSpeech.match("don't pick personal", for: item) == nil)
+        #expect(VoicePromptSpeech.match("never the first", for: item) == nil)
+        #expect(VoicePromptSpeech.match("work or personal", for: item) == nil)
+        #expect(VoicePromptSpeech.match("personal", for: item) == .clarify(qid: "q1", choice: "Personal"))
+        // A choice that holds a negation word still matches when the owner says exactly that choice.
+        let yesNo = model(FakeApprovalTransport())
+        yesNo.receive(try clarify(choices: ["Yes", "No", "Not sure"]))
+        let other = try #require(yesNo.waitingPrompts.first)
+        #expect(VoicePromptSpeech.match("No.", for: other) == .clarify(qid: "q1", choice: "No"))
+        #expect(VoicePromptSpeech.match("not sure", for: other) == .clarify(qid: "q1", choice: "Not sure"))
+        #expect(VoicePromptSpeech.match("yes", for: other) == .clarify(qid: "q1", choice: "Yes"))
+        #expect(VoicePromptSpeech.match("not yes", for: other) == nil)
+    }
+
+    @Test func thePromptOverlayHidesTheToolLine() {
+        let loop = VoiceTabDisplay.make(state: .thinking, muted: false, thinkingSeconds: 3, tool: "web_search")
+        #expect(loop.showsTool)
+        let shown = VoiceTabDisplay.prompt(.listening, over: loop)
+        #expect(!shown.showsTool)
+        #expect(shown.title == "Hermes needs an answer")
+        #expect(shown.subtitle == "Listening")
+        #expect(!shown.muteEnabled)
+    }
+
     // MARK: The coordinator
 
     @Test func aSpokenChoiceAnswersTheApprovalOnTheRequestIdThenTheLoopGoesOn() async throws {

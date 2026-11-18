@@ -149,9 +149,10 @@ public enum VoicePromptSpeech {
         return ".?!".contains(last) ? trimmed : trimmed + "."
     }
 
-    /// Lower case words, with no punctuation.
+    /// Lower case words, with no punctuation. An apostrophe joins its word: "don't" is "dont".
     static func words(_ text: String) -> [String] {
         text.lowercased()
+            .filter { $0 != "'" && $0 != "\u{2019}" }
             .map { $0.isLetter || $0.isNumber ? $0 : " " }
             .reduce(into: "") { $0.append($1) }
             .split(separator: " ").map(String.init)
@@ -165,38 +166,67 @@ public enum VoicePromptSpeech {
     private static let ordinals = [["first", "one", "1"], ["second", "two", "2"], ["third", "three", "3"],
                                    ["fourth", "four", "4"], ["fifth", "five", "5"]]
 
-    /// The answer in a transcript, or `nil` when it matches no offered choice.
+    /// Words that turn an answer around (QA 121-1 defect 1). An answer with one of them never allows.
+    static let negations: Set<String> = [
+        "no", "nope", "nah", "not", "never", "neither", "nor", "dont", "doesnt", "didnt", "wont", "wouldnt",
+        "cant", "cannot", "couldnt", "shouldnt", "isnt", "arent", "aint",
+    ]
+
+    /// A whole answer that means deny.
+    private static let denyAnswers: [[String]] = [["no"], ["nope"], ["no", "thanks"], ["no", "thank", "you"]]
+
+    /// The answer in a transcript, or `nil` when it matches no offered choice or is not clear.
+    ///
+    /// Safety first: an allow choice needs a clear allow phrase with no negation and no deny word. A negation
+    /// gives deny only with a clear deny phrase ("no", "no, deny"). Anything else gives no answer: the voice asks
+    /// again, or the card waits for a tap.
     public static func match(_ transcript: String, for item: VoicePromptItem) -> VoicePromptAnswer? {
         let said = words(transcript)
         guard !said.isEmpty else { return nil }
         if said == ["stop"] { return .stop }
+        let negationWords = Set(said).intersection(negations)
         switch item.card {
         case .approval(let card):
             let offered = Set(card.choices)
-            // Deny first: "no" never allows. Then the longer phrases, so "always allow" is not "allow once".
-            let rules: [(ApprovalChoice, [[String]])] = [
-                (.deny, [["deny"], ["no"]]),
-                (.always, [["always"]]),
-                (.session, [["this", "chat"]]),
-                (.once, [["allow", "once"], ["once"], ["allow"]]),
-            ]
-            for (choice, phrases) in rules where offered.contains(choice) {
-                if phrases.contains(where: { contains(said, phrase: $0) }) { return .approval(choice) }
+            let saysDeny = said.contains("deny")
+            // The allow choices that the owner named. Plain "allow" is "allow once".
+            var allows: Set<ApprovalChoice> = []
+            if said.contains("always") { allows.insert(.always) }
+            if contains(said, phrase: ["this", "chat"]) { allows.insert(.session) }
+            if said.contains("once") { allows.insert(.once) }
+            if allows.isEmpty, said.contains("allow") { allows.insert(.once) }
+            let deny: VoicePromptAnswer? = offered.contains(.deny) ? .approval(.deny) : nil
+            if denyAnswers.contains(said) { return deny }
+            if !negationWords.isEmpty {
+                // "no, deny it" is clear. "don't deny" and "don't allow" are not.
+                let plainNo = negationWords.isSubset(of: ["no", "nope"])
+                return plainNo && saysDeny && allows.isEmpty ? deny : nil
             }
-            return nil
+            if saysDeny { return allows.isEmpty ? deny : nil }
+            // One allow choice only: "always allow once" is not clear.
+            guard allows.count == 1, let choice = allows.first, offered.contains(choice) else { return nil }
+            return .approval(choice)
         case .prompt:
             guard let question = item.spokenQuestion else { return nil }
-            // The longest choice that the owner said, so "Work" does not win over "Work trip".
+            // The exact choice text wins, also a choice such as "No" or "Not sure".
+            if let exact = question.choices.first(where: { words($0) == said }) {
+                return .clarify(qid: question.qid, choice: exact)
+            }
+            guard negationWords.isEmpty else { return nil }
+            // The choices that the owner said. A choice inside a longer one that was said ("Work" in "Work trip")
+            // does not count. Two different choices are not clear.
             let hits = question.choices.filter { contains(said, phrase: words($0)) }
-            if let best = hits.max(by: { words($0).count < words($1).count }) {
-                return .clarify(qid: question.qid, choice: best)
+            let named = hits.filter { hit in
+                !hits.contains { $0 != hit && contains(words($0), phrase: words(hit)) }
             }
-            for (index, names) in ordinals.enumerated() where index < question.choices.count {
-                if said.count <= 2, names.contains(where: { said.contains($0) }) {
-                    return .clarify(qid: question.qid, choice: question.choices[index])
-                }
+            if !named.isEmpty {
+                return named.count == 1 ? .clarify(qid: question.qid, choice: named[0]) : nil
             }
-            return nil
+            guard said.count <= 2 else { return nil }
+            let picked = ordinals.indices.filter { index in
+                index < question.choices.count && ordinals[index].contains(where: { said.contains($0) })
+            }
+            return picked.count == 1 ? .clarify(qid: question.qid, choice: question.choices[picked[0]]) : nil
         }
     }
 }
