@@ -210,12 +210,12 @@ struct RootView: View {
     var body: some View {
         TabView(selection: $tab) {
             Tab("Chats", systemImage: "bubble.left.and.bubble.right", value: RootTab.chats) { chats }
-                .badge(sessions.chatsUnreadCount)
+                .badge(RootTab.chats.badge(sessions))
             Tab("Jobs", systemImage: "clock.arrow.circlepath", value: RootTab.jobs) {
                 JobsTab(model: jobs, sessions: sessions, link: link, path: $jobsPath,
                         onSettings: { showSettings = true })
             }
-            .badge(sessions.unreadCronRuns.count)
+            .badge(RootTab.jobs.badge(sessions))
             // Issue #101: the Voice tab, after Jobs. The tab bar stays during a session.
             Tab("Voice", systemImage: "waveform", value: RootTab.voice) {
                 VoiceTab(model: voice, link: link, activeUnreadChats: sessions.chatsUnreadCount,
@@ -266,8 +266,8 @@ struct RootView: View {
         .onChange(of: ask.pending, initial: true) { askHermes() }
         .onChange(of: model.lock) { askHermes() }
         .onChange(of: scenePhase) { askHermes() }
-        // Issue #83: the app icon badge counts the unread sessions of all servers.
-        .onChange(of: model.badgeCount(activeUnread: sessions.unreadCount), initial: true) { _, count in
+        // Issue #83, #122: the app icon badge counts the unread chats of all servers.
+        .onChange(of: model.badgeCount(sessions), initial: true) { _, count in
             if !ChatLaunch.isDemo { notifications?.setBadge(count) }
         }
         // Issue #83: a switch closes the open chat (its draft stays) and shows the root of both tabs.

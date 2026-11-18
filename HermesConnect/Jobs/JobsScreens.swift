@@ -7,6 +7,16 @@ enum RootTab: Hashable {
     case jobs
     /// Issue #101.
     case voice
+
+    /// The number on the tab bar item. Zero shows no badge.
+    /// Issue #122: job runs are a history record, not a to-do. Only the Chats tab has a badge.
+    @MainActor
+    func badge(_ sessions: SessionListModel) -> Int {
+        switch self {
+        case .chats: sessions.chatsUnreadCount
+        case .jobs, .voice: 0
+        }
+    }
 }
 
 /// A screen in the Jobs stack: a job with its runs, or the read-only output of one run.
@@ -18,7 +28,7 @@ enum JobsRoute: Hashable {
 /// The Jobs tab: the job list, then the job screen, then the run screen (issue #73). Read-only.
 struct JobsTab: View {
     let model: JobsModel
-    /// The cron runs with the blue dot. Opening a run clears it.
+    /// The chats of the server menu. Opening a run marks its session read.
     var sessions = ChatLaunch.makeOfflineSessions()
     var link: LiveChatTransport?
     @Binding var path: [JobsRoute]
@@ -27,13 +37,11 @@ struct JobsTab: View {
     var body: some View {
         NavigationStack(path: $path) {
             JobsListScreen(model: model, link: link, query: JobsDemo.search,
-                           unreadJobIds: model.unreadJobIds(sessions.unreadCronRuns),
                            activeUnreadChats: sessions.chatsUnreadCount, onSettings: onSettings)
                 .navigationDestination(for: JobsRoute.self) { route in
                     switch route {
                     case .job(let job):
-                        JobScreen(jobs: model, job: job, link: link,
-                                  unreadRunIds: Set(sessions.unreadCronRuns.map(\.id)))
+                        JobScreen(jobs: model, job: job, link: link)
                     case .run(let run, let jobName):
                         CronRunScreen(model: CronRunTranscriptModel(run: run, transport: model.transport),
                                       jobName: jobName, link: link)
@@ -48,18 +56,15 @@ struct JobsTab: View {
 struct JobsListScreen: View {
     let model: JobsModel
     var link: LiveChatTransport?
-    /// Jobs with an unread run get the blue dot.
-    var unreadJobIds: Set<String> = []
     /// Issue #83: the unread chats of the active server, for the server menu.
     var activeUnreadChats = 0
     var onSettings: () -> Void = {}
     @State private var query: String
 
-    init(model: JobsModel, link: LiveChatTransport? = nil, query: String = "", unreadJobIds: Set<String> = [],
+    init(model: JobsModel, link: LiveChatTransport? = nil, query: String = "",
          activeUnreadChats: Int = 0, onSettings: @escaping () -> Void = {}) {
         self.model = model
         self.link = link
-        self.unreadJobIds = unreadJobIds
         self.activeUnreadChats = activeUnreadChats
         self.onSettings = onSettings
         _query = State(initialValue: query)
@@ -78,7 +83,7 @@ struct JobsListScreen: View {
             case .rows:
                 ForEach(model.filtered(query)) { job in
                     NavigationLink(value: JobsRoute.job(job)) {
-                        JobRow(job: job, isUnread: unreadJobIds.contains(job.id))
+                        JobRow(job: job)
                     }
                 }
             case .empty, .noResults, .error:
@@ -121,31 +126,27 @@ struct JobsListScreen: View {
 }
 
 /// One job: the name and the last run time, then the status and the schedule (like `SessionRow`, no dot).
+/// Issue #122: job rows have no unread dot.
 struct JobRow: View {
     let job: CronJob
-    /// A run that the owner did not open yet: the blue dot, as in the chats list.
-    var isUnread = false
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            UnreadDot(isUnread: isUnread)
-            VStack(alignment: .leading, spacing: 2) {
-                header
-                statusLine
+        VStack(alignment: .leading, spacing: 2) {
+            header
+            statusLine
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            if case .failed(let error) = job.status {
+                Text(error)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                if case .failed(let error) = job.status {
-                    Text(error)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                    .lineLimit(1)
             }
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(JobsText.accessibilityLabel(job, isUnread: isUnread))
+        .accessibilityLabel(JobsText.accessibilityLabel(job))
     }
 
     @ViewBuilder private var header: some View {
@@ -198,15 +199,12 @@ struct JobStatusSymbol: View {
 struct JobScreen: View {
     let jobs: JobsModel
     var link: LiveChatTransport?
-    /// Runs that the owner did not open yet get the blue dot.
-    var unreadRunIds: Set<String> = []
     @State private var runs: CronRunsModel
     private let initial: CronJob
 
-    init(jobs: JobsModel, job: CronJob, link: LiveChatTransport? = nil, unreadRunIds: Set<String> = []) {
+    init(jobs: JobsModel, job: CronJob, link: LiveChatTransport? = nil) {
         self.jobs = jobs
         self.link = link
-        self.unreadRunIds = unreadRunIds
         initial = job
         _runs = State(initialValue: jobs.runs(for: job))
     }
@@ -244,7 +242,7 @@ struct JobScreen: View {
                 case .rows, .noResults:
                     ForEach(runs.runs) { run in
                         NavigationLink(value: JobsRoute.run(run, jobName: job.displayName)) {
-                            RunRow(run: run, isUnread: unreadRunIds.contains(run.id))
+                            RunRow(run: run)
                         }
                     }
                 case .empty:
@@ -276,18 +274,15 @@ struct JobScreen: View {
 }
 
 /// One run: the date and time, the status from the title, and 2 lines of the preview.
+/// Issue #122: run rows have no unread dot.
 struct RunRow: View {
     let run: CronRun
-    var isUnread = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            UnreadDot(isUnread: isUnread)
-            content
-        }
-        .padding(.vertical, 2)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(JobsText.accessibilityLabel(run, isUnread: isUnread))
+        content
+            .padding(.vertical, 2)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(JobsText.accessibilityLabel(run))
     }
 
     private var content: some View {
@@ -314,18 +309,6 @@ struct RunRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
         }
-    }
-}
-
-/// The blue dot of an unread row, as in `SessionRow`. The space stays when it is read, so rows line up.
-struct UnreadDot: View {
-    let isUnread: Bool
-
-    var body: some View {
-        Circle()
-            .fill(isUnread ? Color.blue : Color.clear)
-            .frame(width: 10, height: 10)
-            .padding(.top, 6)
     }
 }
 
@@ -420,18 +403,16 @@ enum JobsText {
     }
 
     /// "<name>, <status>, <schedule>, last run <time>" (issue #73 design notes, VoiceOver).
-    static func accessibilityLabel(_ job: CronJob, isUnread: Bool = false, now: Date = Date()) -> String {
-        var parts = isUnread ? ["Unread"] : []
-        parts += [job.displayName, job.status.detailText]
+    static func accessibilityLabel(_ job: CronJob, now: Date = Date()) -> String {
+        var parts = [job.displayName, job.status.detailText]
         if case .failed(let error) = job.status { parts.append(error) }
         if !job.scheduleText.isEmpty { parts.append(job.scheduleText) }
         if let date = job.lastRunAt { parts.append("last run \(SessionRowText.time(date, now: now))") }
         return parts.joined(separator: ", ")
     }
 
-    static func accessibilityLabel(_ run: CronRun, isUnread: Bool = false) -> String {
-        var parts = isUnread ? ["Unread"] : []
-        parts.append(dateTime(run.startedAt))
+    static func accessibilityLabel(_ run: CronRun) -> String {
+        var parts = [dateTime(run.startedAt)]
         if let text = run.status.text { parts.append(text) }
         let preview = runPreview(run)
         if !preview.isEmpty { parts.append(preview) }

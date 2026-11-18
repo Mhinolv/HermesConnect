@@ -142,18 +142,20 @@ import UIKit
         // A cron run that the list does not have yet still opens read-only.
         #expect(JobsRouting.path(forSession: "cron_zz_1", sessions: sessions, jobs: jobs)
             == [.run(CronRun(id: "cron_zz_1", source: "cron"), jobName: "Untitled")])
-        // Badges: Chats counts chats, Jobs counts cron runs. The job row gets the dot.
-        #expect(sessions.chatsUnreadCount == 1)
-        #expect(sessions.unreadCronRuns.count == 1)
-        #expect(jobs.unreadJobIds(sessions.unreadCronRuns) == ["a1"])
-        #expect(JobsText.accessibilityLabel(job, isUnread: true, now: now).hasPrefix("Unread, Morning Zillow"))
+        // Issue #122: the Chats tab counts chats. The Jobs tab has no badge for an unread run.
+        #expect(RootTab.chats.badge(sessions) == 1)
+        #expect(RootTab.jobs.badge(sessions) == 0)
+        #expect(RootTab.voice.badge(sessions) == 0)
+        // Job rows and run rows have no unread dot, and VoiceOver does not say "Unread".
+        #expect(JobsText.accessibilityLabel(job, now: now).hasPrefix("Morning Zillow"))
+        #expect(!JobsText.accessibilityLabel(CronRun(session: run)).contains("Unread"))
         // The chats list and the launch route skip the cron run.
         #expect(sessions.filtered("").map(\.id) == ["k1"])
         let launch = SessionListModel(transport: OfflineChatTransport(), chatTransport: OfflineChatTransport(),
                                       cache: InMemorySessionCacheStore(sessions: [run], activeSessionId: run.id))
         #expect(ChatLaunch.cachedLaunchRoute(launch) == nil)
-        render(JobsListScreen(model: jobs, unreadJobIds: ["a1"]))
-        render(JobScreen(jobs: jobs, job: job, unreadRunIds: [run.id]))
+        render(JobsListScreen(model: jobs))
+        render(JobScreen(jobs: jobs, job: job))
     }
 
     @Test func rootViewHasTheJobsTab() {

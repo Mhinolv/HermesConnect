@@ -139,11 +139,6 @@ public final class JobsModel {
         return jobs.first { $0.name?.trimmingCharacters(in: .whitespacesAndNewlines) == title }
     }
 
-    /// Issue #73: the ids of the jobs with an unread run (blue dot on the job row).
-    public func unreadJobIds(_ unreadRuns: [SessionListItem]) -> Set<String> {
-        Set(unreadRuns.compactMap { job(forRun: $0)?.id })
-    }
-
     /// The run history of one job. Each call gives a new model with the cached runs.
     public func runs(for job: CronJob) -> CronRunsModel {
         CronRunsModel(job: job, transport: transport, cache: cache.pinned())
