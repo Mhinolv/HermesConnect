@@ -40,7 +40,7 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Hermes sends your location to your own Hermes server so that your agent can answer location questions.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Hermes records voice memos that you send to your agent.</string>
+	<string>Hermes records voice memos that you send to your agent, and uses the microphone in Live voice mode.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Hermes attaches photos that you choose to your messages.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
