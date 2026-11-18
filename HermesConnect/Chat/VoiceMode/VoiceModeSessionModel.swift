@@ -17,7 +17,8 @@ final class VoiceModeSessionModel {
     /// Issue #101: `tuning` turns off speech barge-in while VoiceOver runs.
     convenience init(speech: any VoiceStreamTransport, microphone: AVVoiceModeMicrophone = AVVoiceModeMicrophone(),
                      tuning: VoiceModeTuning = VoiceModeTuning()) {
-        let player = microphone.player
+        // Issue #127: each reply checks the output route before it plays.
+        let player = microphone.replyPlayer
         self.init(controller: VoiceModeController(
             microphone: microphone, player: player,
             makeSpeech: { try await speech.makeStreamedSpeech(player: $0) },
@@ -59,11 +60,18 @@ final class VoiceModeSessionModel {
 /// The microphone of voice mode: `AVAudioRecorder` with the memo settings of #9 (`AVVoiceRecorder.settings`).
 /// The audio session stays active for the whole loop: `.playAndRecord` with `.voiceChat`, so the echo of
 /// the reply is lower for barge-in. Bluetooth and the speaker work. Other audio ducks.
+/// Issue #127: `VoiceAudioRoute` keeps a receiver-only route on the speaker and writes the route diagnostics.
 @MainActor
 final class AVVoiceModeMicrophone: VoiceModeMicrophone {
     /// The reply player. It stops with the session.
     let player = AVAudioEnginePCMPlayer()
+    let route = VoiceAudioRoute(session: SystemVoiceAudioSession())
+    /// `player` with the route check before each reply.
+    private(set) lazy var replyPlayer: any StreamedSpeechPlaying = VoiceRoutePlayer(base: player) { [route] in
+        route.beforeReply()
+    }
     private var recorder: AVAudioRecorder?
+    private var routeObserver: NSObjectProtocol?
 
     struct StartFailed: Error {}
 
@@ -80,13 +88,19 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
     }
 
     func activate() throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .voiceChat,
-                                options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
-        try session.setActive(true)
+        try route.activate()
+        guard routeObserver == nil else { return }
+        routeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [route] note in
+            let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
+                .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+            route.routeChanged(reason: reason.map(SystemVoiceAudioSession.name) ?? "unknown")
+        }
     }
 
     func deactivate() {
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        routeObserver = nil
         discardClip()
         player.shutdown()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -120,5 +134,57 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
         guard let recorder, recorder.isRecording else { return VoiceWaveform.floorDecibels }
         recorder.updateMeters()
         return recorder.averagePower(forChannel: 0)
+    }
+}
+
+/// Issue #127: `AVAudioSession.sharedInstance()` for `VoiceAudioRoute`. It keeps no state.
+final class SystemVoiceAudioSession: VoiceAudioSession {
+    var routeState: VoiceAudioRouteState {
+        let session = AVAudioSession.sharedInstance()
+        return VoiceAudioRouteState(outputs: session.currentRoute.outputs.map(\.portType.rawValue),
+                                    category: session.category.rawValue, mode: session.mode.rawValue,
+                                    options: Self.names(session.categoryOptions), volume: session.outputVolume)
+    }
+
+    func setVoiceCategory(mode: VoiceAudioMode) throws {
+        let sessionMode: AVAudioSession.Mode = switch mode {
+        case .voiceChat: .voiceChat
+        case .videoChat: .videoChat
+        case .default: .default
+        }
+        try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: sessionMode,
+                                                        options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
+    }
+
+    func setActive(_ active: Bool) throws {
+        try AVAudioSession.sharedInstance().setActive(active)
+    }
+
+    func overrideOutputToSpeaker() throws {
+        try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
+    }
+
+    static func names(_ options: AVAudioSession.CategoryOptions) -> [String] {
+        let known: [(AVAudioSession.CategoryOptions, String)] = [
+            (.mixWithOthers, "mixWithOthers"), (.duckOthers, "duckOthers"),
+            (.allowBluetoothHFP, "allowBluetoothHFP"), (.defaultToSpeaker, "defaultToSpeaker"),
+            (.interruptSpokenAudioAndMixWithOthers, "interruptSpokenAudio"),
+            (.allowBluetoothA2DP, "allowBluetoothA2DP"), (.allowAirPlay, "allowAirPlay"),
+        ]
+        return known.filter { options.contains($0.0) }.map(\.1)
+    }
+
+    static func name(_ reason: AVAudioSession.RouteChangeReason) -> String {
+        switch reason {
+        case .newDeviceAvailable: "newDeviceAvailable"
+        case .oldDeviceUnavailable: "oldDeviceUnavailable"
+        case .categoryChange: "categoryChange"
+        case .override: "override"
+        case .wakeFromSleep: "wakeFromSleep"
+        case .noSuitableRouteForCategory: "noSuitableRouteForCategory"
+        case .routeConfigurationChange: "routeConfigurationChange"
+        case .unknown: "unknown"
+        @unknown default: "other\(reason.rawValue)"
+        }
     }
 }
