@@ -19,6 +19,7 @@
 #   --hermes PATH            Pass an explicit Hermes binary to the gate.
 #   --port N                 Fixed Hermes port for this key (1024-65535). Default: the slot
 #                            port, 47100 + (slot as an integer) % 100.
+#   --no-location            The gate refuses the phone location (a team server).
 #   --remove                 Remove the key. Do not add it.
 #   --dry-run                Print the authorized_keys line. Change nothing.
 set -euo pipefail
@@ -30,6 +31,7 @@ COPY_GATE=1
 HERMES_PATH=""
 PORT=""
 PORT_GIVEN=0
+NO_LOCATION=0
 REMOVE=0
 DRY_RUN=0
 KEY_ARG=""
@@ -48,7 +50,8 @@ while [ $# -gt 0 ]; do
     --port) [ $# -ge 2 ] || die "--port needs a value"; PORT="$2"; PORT_GIVEN=1; shift 2 ;;
     --remove) REMOVE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    --no-location) NO_LOCATION=1; shift ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     -) [ -z "$KEY_ARG" ] || die "give one key line"; KEY_ARG="-"; shift ;;
     -*) die "unknown option: $1" ;;
     *) [ -z "$KEY_ARG" ] || die "give one key line (quote it)"; KEY_ARG="$1"; shift ;;
@@ -138,6 +141,7 @@ fi
 
 GATE_CMD="$GATE_DEST --slot $SLOT --port $PORT"
 [ -z "$HERMES_PATH" ] || GATE_CMD="$GATE_CMD --hermes $HERMES_PATH"
+[ "$NO_LOCATION" -eq 0 ] || GATE_CMD="$GATE_CMD --no-location"
 # permitopen names one port: the phone key reaches only its own hermes serve, not the dashboard or other ports.
 # permitlisten on a privileged port blocks every remote (-R) forward: the phone key gets no reverse tunnel.
 OPTIONS="restrict,port-forwarding,permitopen=\"127.0.0.1:$PORT\",permitlisten=\"127.0.0.1:1\",command=\"$GATE_CMD\""

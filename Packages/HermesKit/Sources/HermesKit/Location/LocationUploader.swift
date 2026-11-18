@@ -9,14 +9,20 @@ public enum LocationUploadError: Error, Sendable, Equatable, CustomStringConvert
     /// The upload took longer than the background time limit.
     case timedOut
 
+    /// Issue #92: the gate code of a server that does not accept location (gate option `--no-location`).
+    public static let locationOffCode = "location-off"
+
     /// False if a second try with the same fix cannot work. The app then drops that fix.
     public var isRetryable: Bool {
-        if case .connection(.gateError("bad-location")) = self { return false }
+        if case .connection(.gateError(let code)) = self, code == "bad-location" || code == Self.locationOffCode {
+            return false
+        }
         return true
     }
 
     public var description: String {
-        switch self {
+        if self == .connection(.gateError(Self.locationOffCode)) { return "This server does not accept location." }
+        return switch self {
         case .notSetUp: "Hermes is not set up."
         case .connection(let error): error.description
         case .timedOut: "The server did not answer in time."

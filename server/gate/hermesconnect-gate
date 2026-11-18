@@ -25,6 +25,8 @@ Gate options (set by install.sh in the ``command=`` value, never by the phone):
                      ``permitopen`` of the key line. Default: the slot port,
                      47100 + (slot as an integer) % 100.
   --hermes <path>    Hermes binary. Default: the same search as Hermes Desktop.
+  --no-location      Refuse ``location`` with ``ERROR location-off`` (issue #92). Use it on a
+                     team server, so that no phone location is stored there.
 
 Environment for tests only: ``HERMESCONNECT_READY_TIMEOUT`` (seconds).
 """
@@ -586,6 +588,9 @@ def validate_location(raw):
 
 
 def cmd_location(options):
+    if options["no_location"]:
+        # Issue #92: a team server. Store nothing. The app turns sharing off for this server.
+        raise GateError("location-off", "this server does not accept location")
     raw = read_stdin(LOCATION_MAX_BYTES)
     if raw is None:
         raise GateError("bad-location", "the input is larger than %d bytes" % LOCATION_MAX_BYTES)
@@ -620,13 +625,17 @@ HANDLERS = {"serve": cmd_serve, "location": cmd_location, "ping": cmd_ping}
 
 
 def parse_options(argv):
-    options = {"slot": DEFAULT_SLOT, "hermes": None, "port": None}
+    options = {"slot": DEFAULT_SLOT, "hermes": None, "port": None, "no_location": False}
     i = 0
     while i < len(argv):
         word = argv[i]
         if word in ("--slot", "--hermes", "--port") and i + 1 < len(argv):
             options[word[2:]] = argv[i + 1]
             i += 2
+            continue
+        if word == "--no-location":
+            options["no_location"] = True
+            i += 1
             continue
         raise GateError("bad-config", "unknown gate option", exit_code=2)
     if not SLOT_RE.fullmatch(options["slot"]):

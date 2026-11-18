@@ -162,6 +162,28 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.lines()[0].rsplit(" ", 1)[1], "my-phone-id")
 
+    def test_no_location_goes_into_the_gate_command(self):
+        # Issue #92: a team server key. The gate gets --no-location from the command= value only.
+        result = self.install("--no-location", self.line)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.lines(), [self.expected_line(extra=" --no-location")])
+        result = self.install("--hermes", "/opt/hermes/bin/hermes", "--no-location", self.line)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.lines(), [self.expected_line(extra=" --hermes /opt/hermes/bin/hermes --no-location")])
+        # An install without the option makes the line of a personal server again.
+        self.assertEqual(self.install(self.line).returncode, 0)
+        self.assertEqual(self.lines(), [self.expected_line()])
+
+    def test_no_location_line_runs_the_gate_that_refuses_location(self):
+        self.assertEqual(self.install("--no-location", self.line).returncode, 0)
+        command = re.search(r'command="([^"]*)"', self.lines()[0]).group(1).split()
+        self.assertEqual(command[-1], "--no-location")
+        env = dict(os.environ, SSH_ORIGINAL_COMMAND="location", HOME=self.tmp)
+        result = subprocess.run([sys.executable] + command, input=b"{}", env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=60)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b"ERROR location-off", result.stderr)
+
     def test_hermes_option_is_passed_to_gate(self):
         result = self.install("--hermes", "/opt/hermes/bin/hermes", self.line)
         self.assertEqual(result.returncode, 0, result.stderr)

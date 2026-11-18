@@ -1,5 +1,6 @@
 import HermesKit
 import SwiftUI
+import UIKit
 
 /// Issue #66: Settings > Servers. One row for each server in the order added, then "Add Server".
 struct ServersSection: View {
@@ -107,6 +108,7 @@ struct ServerDetailView: View {
             } footer: {
                 if isDuplicate { Text(Self.duplicateFooter) }
             }
+            ServerLocationSection(serverID: serverID)
             Section {
                 if let hostKey = server.hostKey {
                     NavigationLink {
@@ -214,8 +216,48 @@ struct ServerDetailView: View {
     }
 }
 
+/// Issue #92: the "Share Location" switch of one server, in the server detail. Off for a new server.
+struct ServerLocationSection: View {
+    @Environment(LocationController.self) private var location: LocationController?
+    @Environment(\.openURL) private var openURL
+    let serverID: UUID
+    @State private var accessOff = false
+
+    static let title = "Share Location"
+    static let onFooter = "Hermes sends your location to this server when you move a long distance or arrive at a place."
+    static let offFooter = "This server does not get your location."
+
+    /// The footer of the switch. A refusal of the gate (`--no-location`) or another upload error shows under it.
+    static func footer(isOn: Bool, status: LocationShareStatus) -> String {
+        let text = isOn ? onFooter : offFooter
+        guard let error = status.lastError else { return text }
+        return "\(text)\nLast error: \(error)"
+    }
+
+    var body: some View {
+        if let location {
+            Section {
+                Toggle(Self.title, isOn: Binding(
+                    get: { location.isSharing(server: serverID) },
+                    set: { if !location.setSharing($0, server: serverID) { accessOff = true } }
+                ))
+            } footer: {
+                Text(Self.footer(isOn: location.isSharing(server: serverID), status: location.status(server: serverID)))
+            }
+            .alert("Location Access Off", isPresented: $accessOff) {
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Allow location access for Hermes in Settings.")
+            }
+        }
+    }
+}
+
 #if DEBUG
-/// DEBUG only: the issue #66 screenshots. `HERMES_DEMO_SERVERS=<list|detail|remove|new-server|one>`.
+/// DEBUG only: the issue #66 screenshots. `HERMES_DEMO_SERVERS=<list|detail|remove|new-server|one|share>`.
 enum ServersDemo: String {
     /// Settings with 3 servers. The second is active.
     case list
@@ -227,6 +269,8 @@ enum ServersDemo: String {
     case newServer = "new-server"
     /// Settings with one server (the migrated profile) and the checkmark.
     case one
+    /// Issue #92: the "Share Location" section of the first server alone (for AX5).
+    case share
 
     static var current: ServersDemo? {
         ProcessInfo.processInfo.environment["HERMES_DEMO_SERVERS"].flatMap(ServersDemo.init(rawValue:))
@@ -254,5 +298,6 @@ struct ServerViews_Previews: PreviewProvider {
                 .navigationDestination(for: UUID.self) { ServerDetailView(serverID: $0) }
         }
         .environment(model)
+        .environment(LocationController.preview(servers: model.servers, sharing: [model.servers[0].id]))
     }
 }

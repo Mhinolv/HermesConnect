@@ -17,7 +17,7 @@ struct LocationAccessSheet: View {
                     .font(.title2.bold())
                     .multilineTextAlignment(.center)
                     .accessibilityAddTraits(.isHeader)
-                Text("Hermes sends your location to your own server when you move or arrive at a place. Your agent uses it to answer questions about where you are.")
+                Text("Hermes sends your location to this server when you move or arrive at a place. Your agent uses it to answer questions about where you are.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -59,7 +59,7 @@ private struct LocationAccessPrompt: ViewModifier {
                 LocationAccessSheet()
             }
             .onChange(of: model.connection) { _, state in
-                if case .connected = state { location.didConnect() }
+                if case .connected = state { location.didConnect(server: model.profile?.id) }
             }
             // Issue #51: `initial` covers the first launch, which can start in the active phase.
             .onChange(of: scenePhase, initial: true) { _, phase in
