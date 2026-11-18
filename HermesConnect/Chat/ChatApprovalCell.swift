@@ -155,6 +155,9 @@ final class ChatApprovalCell: MessageContentCell {
 
     override func setupSubviews() {
         super.setupSubviews()
+        // Issue #111: MessageKit's `messageContainerView` is a `UIImageView`, which takes no touches by default.
+        // Without this, a tap never gets to the buttons or the command.
+        messageContainerView.isUserInteractionEnabled = true
         for label in [titleLabel, bodyLabel, commandLabel, resultLabel] {
             label.numberOfLines = 0
             label.adjustsFontForContentSizeCategory = false
