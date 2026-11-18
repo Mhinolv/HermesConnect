@@ -52,6 +52,30 @@ public struct ApprovalRequest: Decodable, Sendable, Equatable {
         case allowSession = "allow_session", allowPermanent = "allow_permanent", toolName = "tool_name"
     }
 
+    public init(sessionId: String, requestId: String, command: String = "", description: String = "",
+                choices: [ApprovalChoice] = ApprovalChoice.allCases, allowSession: Bool? = nil,
+                allowPermanent: Bool? = nil, toolName: String? = nil) {
+        self.sessionId = sessionId
+        self.requestId = requestId
+        self.command = command
+        self.description = description
+        self.choices = choices
+        self.allowSession = allowSession
+        self.allowPermanent = allowPermanent
+        self.toolName = toolName
+    }
+
+    /// Issue #104: a snapshot `pending_approval` or an `approval.pending` entry. It can omit `session_id` and
+    /// `request_id`, so `sessionId` fills them. `nil` for a value that is not an object.
+    public init?(pending: JSONValue, sessionId: String) {
+        guard case .object(var fields) = pending else { return nil }
+        if fields["session_id"]?.stringValue == nil { fields["session_id"] = .string(sessionId) }
+        if fields["request_id"]?.stringValue == nil { fields["request_id"] = .string("") }
+        guard let data = try? JSONEncoder().encode(JSONValue.object(fields)),
+              let request = try? JSONDecoder().decode(ApprovalRequest.self, from: data) else { return nil }
+        self = request
+    }
+
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sessionId = try container.decode(String.self, forKey: .sessionId)
@@ -111,5 +135,17 @@ public struct GatewayServerRequest: Sendable, Equatable {
         case "secret": kind = .secret
         default: throw GatewayError.unsupportedServerRequest(method)
         }
+    }
+
+    /// Issue #104: an `open_requests` entry of a resume snapshot. `nil` for a method that this client does not
+    /// handle, or for bad params.
+    public init?(open entry: OpenRequestEntry) {
+        try? self.init(id: .string(entry.id), method: entry.method, params: .object(entry.params))
+    }
+
+    /// The approval params, for an `approval` request.
+    public var approval: ApprovalRequest? {
+        if case .approval(let request) = kind { return request }
+        return nil
     }
 }

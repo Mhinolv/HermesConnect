@@ -65,6 +65,11 @@ struct HermesConnectApp: App {
         self.jobs = jobs
         let notifications = NotificationController()
         self.notifications = notifications
+        // Issue #104: an approval that comes while the app is in the background and the socket is open.
+        sessions.onApprovalRequest = { alert in
+            let server = live.profile.map { NotificationServer($0, serverCount: live.servers.count) }
+            notifications.postApproval(alert, server: server)
+        }
         // Issue #83: a switch resets the lists before the new connect. Issue #84: each server keeps its folder.
         // "Remove Server" deletes its folder, its delivered notifications and its slash catalog.
         // Issue #92: it also deletes its "Share Location" setting and its pending fix.

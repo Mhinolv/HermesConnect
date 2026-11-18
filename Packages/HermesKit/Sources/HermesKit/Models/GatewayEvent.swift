@@ -190,6 +190,26 @@ public struct RequestCancelPayload: Decodable, Sendable, Equatable {
     public var reason: String
 }
 
+/// Issue #104: `approval.cancelled` (`contracts/events.py:560-576`). The server dropped pending approvals
+/// (interrupt, reap, teardown) and resolved them as deny. `requestIds` are approval queue ids.
+public struct ApprovalCancelledPayload: Decodable, Sendable, Equatable {
+    public var reason: String?
+    public var requestIds: [String]
+
+    public init(reason: String? = nil, requestIds: [String] = []) {
+        self.reason = reason
+        self.requestIds = requestIds
+    }
+
+    private enum CodingKeys: String, CodingKey { case reason, requestIds = "request_ids" }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        reason = try? container.decodeIfPresent(String.self, forKey: .reason)
+        requestIds = (try? container.decodeIfPresent([String].self, forKey: .requestIds)) ?? []
+    }
+}
+
 /// One `params` object of an event frame (`apps/shared/src/gateway-events.ts:57-83`).
 public struct GatewayEvent: Decodable, Sendable, Equatable {
     public enum Kind: Sendable, Equatable {
@@ -204,6 +224,7 @@ public struct GatewayEvent: Decodable, Sendable, Equatable {
         case statusUpdate(StatusUpdatePayload)
         case sessionTitle(SessionTitlePayload)
         case requestCancel(RequestCancelPayload)
+        case approvalCancelled(ApprovalCancelledPayload)
         case sessionsChanged
         case cronChanged
         /// Any other type, or a known type with a payload that did not decode.
@@ -249,6 +270,7 @@ public struct GatewayEvent: Decodable, Sendable, Equatable {
         case "status.update": payload(StatusUpdatePayload.self).map(Kind.statusUpdate)
         case "session.title": payload(SessionTitlePayload.self).map(Kind.sessionTitle)
         case "request.cancel": payload(RequestCancelPayload.self).map(Kind.requestCancel)
+        case "approval.cancelled": payload(ApprovalCancelledPayload.self).map(Kind.approvalCancelled)
         case "sessions.changed": .sessionsChanged
         case "cron.changed": .cronChanged
         default: nil

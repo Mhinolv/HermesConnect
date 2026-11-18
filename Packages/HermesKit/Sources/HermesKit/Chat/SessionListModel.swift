@@ -563,6 +563,17 @@ public final class SessionListModel {
 
     // MARK: Chats
 
+    /// Issue #104: `true` while an approval card waits in the chat of this stored id. The row shows
+    /// "Approval needed".
+    public func needsApproval(_ id: String) -> Bool {
+        existingChat(for: id)?.hasWaitingApproval ?? false
+    }
+
+    /// Issue #104: the app posts a local notification for an approval that comes while it is in the background.
+    @ObservationIgnored public var onApprovalRequest: (@MainActor (ApprovalAlert) -> Void)? {
+        didSet { chats.values.forEach { $0.onApprovalRequest = onApprovalRequest } }
+    }
+
     /// The chat of a stored session. The same id gives the same model. A new chat that got this
     /// stored id from `session.create` is the same model too.
     public func chat(for id: String) -> ChatViewModel {
@@ -571,6 +582,7 @@ public final class SessionListModel {
         // Issue #84: the chat keeps the folder of its server, also after a switch.
         let chat = ChatViewModel(transport: chatTransport, storedSessionId: id, title: title, cache: cache.pinned(),
                                  transcription: transcription)
+        chat.onApprovalRequest = onApprovalRequest
         chat.startEvents()
         chats[id] = chat
         return chat
@@ -588,6 +600,7 @@ public final class SessionListModel {
 
     /// Uses `chat` for the session `id` (the DEBUG demo seeds its thread this way).
     public func register(_ chat: ChatViewModel, for id: String) {
+        chat.onApprovalRequest = onApprovalRequest
         chat.startEvents()
         chats[id] = chat
     }
@@ -601,6 +614,7 @@ public final class SessionListModel {
         let keeps = !chats.values.contains { $0.keepsNewChat }
         let chat = ChatViewModel(transport: chatTransport, cache: cache.pinned(), keepsNewChat: keeps,
                                  transcription: transcription)
+        chat.onApprovalRequest = onApprovalRequest
         chat.startEvents()
         chats[key] = chat
         return chat

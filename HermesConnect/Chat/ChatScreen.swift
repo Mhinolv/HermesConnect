@@ -398,6 +398,12 @@ enum ChatLaunch {
         let active = scenario.showsList || scenario == .empty ? nil : DemoChatTransport.storedId
         let cache = InMemorySessionCacheStore(sessions: rows, activeSessionId: active)
         let sessions = SessionListModel(transport: transport, chatTransport: transport, cache: cache)
+        if scenario == .approvalsList, let first = rows.first {
+            // Issue #104: the first chat waits for an approval, so its row shows "Approval needed".
+            let waiting = ChatViewModel(transport: transport, storedSessionId: first.id, title: first.title,
+                                        messages: DemoChatTransport.approvalMessages(now: Date(), done: false))
+            sessions.register(waiting, for: first.id)
+        }
         guard !scenario.showsList, scenario != .empty else { return sessions }
         let seeds = QuoteDemo.messages(transport.seedMessages(now: scenario.catchesUp ? DemoChatTransport.seedDate : Date()))
         let model = ChatViewModel(transport: transport, storedSessionId: DemoChatTransport.storedId,

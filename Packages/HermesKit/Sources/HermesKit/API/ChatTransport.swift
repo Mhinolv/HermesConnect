@@ -4,11 +4,43 @@ import Foundation
 public struct ChatSessionRef: Sendable, Equatable {
     public var liveId: String
     public var storedId: String?
+    /// Issue #104: the server requests that still wait (`open_requests` of the snapshot, protocol 4.2).
+    /// `nil` when the server did not send the key (an older server).
+    public var openRequests: [GatewayServerRequest]?
+    /// Issue #104: the snapshot `pending_approval`. It has no JSON-RPC id: answer it with `approval.respond`.
+    public var pendingApproval: ApprovalRequest?
 
-    public init(liveId: String, storedId: String? = nil) {
+    public init(liveId: String, storedId: String? = nil, openRequests: [GatewayServerRequest]? = nil,
+                pendingApproval: ApprovalRequest? = nil) {
         self.liveId = liveId
         self.storedId = storedId
+        self.openRequests = openRequests
+        self.pendingApproval = pendingApproval
     }
+
+    /// Issue #104: the open requests and the pending approval of a `session.resume` snapshot.
+    public init(snapshot: LiveSessionSnapshot, storedId: String?) {
+        let open = snapshot.openRequests.map { $0.compactMap(GatewayServerRequest.init(open:)) }
+        self.init(liveId: snapshot.sessionId, storedId: snapshot.storedSessionId ?? storedId, openRequests: open,
+                  pendingApproval: snapshot.pendingApproval.flatMap {
+                      ApprovalRequest(pending: .object($0), sessionId: snapshot.sessionId)
+                  })
+    }
+}
+
+/// Issue #104: the calls of an approval card and of the requests that the app cannot show
+/// (docs/hermes-protocol.md 3.11). `GatewayClient` and `LiveChatTransport` conform. Tests use a fake.
+public protocol ServerRequestTransport: Sendable {
+    /// Answers an `approval` server request on its JSON-RPC id with `{choice}`.
+    func answerApproval(requestId: JSONRPCID, choice: ApprovalChoice) async throws
+    /// Answers a server request with an error. For `approval` that is a withdrawal, not a deny.
+    func rejectServerRequest(_ id: JSONRPCID, code: Int, message: String) async throws
+    /// `approval.respond {session_id, choice, request_id?}`. Returns `resolved`, the count of approvals it ended.
+    func respondApproval(sessionId: String, choice: ApprovalChoice, requestId: String?) async throws -> Int
+    /// `approval.received {session_id, request_id}`: the card is on screen.
+    func acknowledgeApproval(sessionId: String, requestId: String) async throws
+    /// `approval.pending {session_id}`: every unresolved approval of the session.
+    func pendingApprovals(sessionId: String) async throws -> [ApprovalRequest]
 }
 
 /// What the chat screen needs from the gateway. `GatewayClient` conforms. Tests and the
@@ -76,7 +108,7 @@ extension GatewayClient: ChatTransport {
     public func resumeSession(storedId: String, source: String) async throws -> ChatSessionRef {
         let snapshot = try await resumeSession(SessionResumeParams(storedSessionId: storedId, source: source,
                                                                    omitMessages: true, inlineImages: false))
-        return ChatSessionRef(liveId: snapshot.sessionId, storedId: snapshot.storedSessionId ?? storedId)
+        return ChatSessionRef(snapshot: snapshot, storedId: storedId)
     }
 
     public func submitPrompt(sessionId: String, text: String, retryBeforeRowId: Int?) async throws -> Int? {
@@ -108,6 +140,64 @@ extension GatewayClient: ChatTransport {
     public func history(sessionId: String) async throws -> [TranscriptMessage] {
         try await sessionHistory(sessionId: sessionId).messages
     }
+}
+
+extension GatewayClient: ServerRequestTransport {
+    public func answerApproval(requestId: JSONRPCID, choice: ApprovalChoice) async throws {
+        try await respond(to: requestId, result: ApprovalAnswer(choice: choice))
+    }
+
+    public func rejectServerRequest(_ id: JSONRPCID, code: Int, message: String) async throws {
+        try await reject(id, code: code, message: message)
+    }
+
+    public func respondApproval(sessionId: String, choice: ApprovalChoice, requestId: String?) async throws -> Int {
+        let params = ApprovalRespondParams(sessionId: sessionId, choice: choice, requestId: requestId)
+        return try await call("approval.respond", params: params, as: ApprovalRespondResult.self).resolved ?? 0
+    }
+
+    public func acknowledgeApproval(sessionId: String, requestId: String) async throws {
+        _ = try await call("approval.received", params: ApprovalReceivedParams(sessionId: sessionId, requestId: requestId),
+                           as: JSONValue.self)
+    }
+
+    public func pendingApprovals(sessionId: String) async throws -> [ApprovalRequest] {
+        let result = try await call("approval.pending", params: SessionIdParams(sessionId: sessionId),
+                                    as: ApprovalPendingResult.self)
+        return (result.approvals ?? []).compactMap { ApprovalRequest(pending: $0, sessionId: sessionId) }
+    }
+}
+
+/// `approval.respond` params (`methods_prompt.py:1332-1344`).
+struct ApprovalRespondParams: Encodable, Sendable {
+    var sessionId: String
+    var choice: ApprovalChoice
+    var requestId: String?
+
+    private enum CodingKeys: String, CodingKey { case sessionId = "session_id", choice, requestId = "request_id" }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sessionId, forKey: .sessionId)
+        try container.encode(choice, forKey: .choice)
+        if let requestId, !requestId.isEmpty { try container.encode(requestId, forKey: .requestId) }
+    }
+}
+
+struct ApprovalRespondResult: Decodable, Sendable {
+    var resolved: Int?
+}
+
+/// `approval.received` params (`methods_prompt.py:1321-1329`).
+struct ApprovalReceivedParams: Encodable, Sendable {
+    var sessionId: String
+    var requestId: String
+
+    private enum CodingKeys: String, CodingKey { case sessionId = "session_id", requestId = "request_id" }
+}
+
+struct ApprovalPendingResult: Decodable, Sendable {
+    var approvals: [JSONValue]?
 }
 
 extension GatewayClient: SessionsTransport {
