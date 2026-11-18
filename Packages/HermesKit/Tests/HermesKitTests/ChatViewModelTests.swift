@@ -220,7 +220,10 @@ private final class Counter: @unchecked Sendable {
         #expect(vm.runningTool == "web_search")
         vm.receive(try event(#"{"type":"tool.complete","session_id":"s1","payload":{"tool_id":"1","name":"web_search","duration_s":0.4,"summary":"Searched"}}"#))
         #expect(vm.runningTool == nil)
+        // Issue #129: the last tool stays as "Used web_search" until the turn ends.
+        #expect(vm.toolActivity == ChatToolActivity(name: "web_search", isRunning: false))
         vm.receive(try event(#"{"type":"message.complete","session_id":"s1","payload":{"text":"Done.","status":"complete"}}"#))
+        #expect(vm.toolActivity == nil)
         #expect(vm.messages.last?.tools == [ChatToolCall(id: "1", name: "web_search", summary: "Searched", duration: 0.4)])
     }
 

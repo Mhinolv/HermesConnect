@@ -30,6 +30,8 @@ public struct ChatThread: Sendable, Equatable {
     public private(set) var statusLine: String?
     /// Issue #120: the name of the tool that runs now, for the Voice tab. `nil` between tools.
     public private(set) var runningTool: String?
+    /// Issue #129: the last tool of the turn. It stays after `tool.complete` ("Used web_search") until the turn ends.
+    public private(set) var toolActivity: ChatToolActivity?
 
     /// The incoming bubble of the current turn.
     private var replyId: String?
@@ -375,6 +377,7 @@ public struct ChatThread: Sendable, Equatable {
         openToolIds.removeAll { $0 == tool.toolId }
         openToolIds.append(tool.toolId)
         runningTool = turnTools.first { $0.id == tool.toolId }?.name
+        toolActivity = runningTool.map { ChatToolActivity(name: $0, isRunning: true) }
     }
 
     /// Issue #120: the summary and the duration. A `tool.complete` with no `tool.start` still adds the tool.
@@ -390,6 +393,10 @@ public struct ChatThread: Sendable, Equatable {
         openToolIds.removeAll { $0 == tool.toolId }
         let open = openToolIds.last
         runningTool = open.flatMap { id in turnTools.first { $0.id == id }?.name }
+        // Issue #129: a tool that still runs wins. Else the tool that ended now stays as "Used <tool>".
+        let ended = turnTools.first { $0.id == tool.toolId }?.name
+        toolActivity = runningTool.map { ChatToolActivity(name: $0, isRunning: true) }
+            ?? ended.map { ChatToolActivity(name: $0, isRunning: false) }
     }
 
     /// Issue #120: the tools of the turn go on its reply.
@@ -515,6 +522,7 @@ public struct ChatThread: Sendable, Equatable {
         replyId = nil
         statusLine = nil
         runningTool = nil
+        toolActivity = nil
         turnTools = []
         openToolIds = []
         turn = .idle

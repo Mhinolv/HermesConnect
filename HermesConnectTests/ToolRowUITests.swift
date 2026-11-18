@@ -166,9 +166,9 @@ import UIKit
                 screen.window.isHidden = true
             }
         }
-        let handsFree = VoiceTabDisplay.make(state: .thinking, muted: false, thinkingSeconds: 6, tool: "web_search")
+        let handsFree = VoiceTabDisplay.make(state: .thinking, muted: false, thinkingSeconds: 6, tool: .init(name: "web_search", isRunning: true))
         let live = try #require(VoiceTabDisplay.live(phase: .working, muted: false, speaking: false, idleWarning: false,
-                                                     stillWorking: false, tool: "web_search"))
+                                                     stillWorking: false, tool: .init(name: "web_search", isRunning: true)))
         let app = AppModel.preview(setUp: true, hostKey: .sample)
         app.previewConnection(.connected(gateVersion: "demo"))
         for (name, display, mode) in [("voice-hands-free-tool", handsFree, VoiceTabMode.handsFree),

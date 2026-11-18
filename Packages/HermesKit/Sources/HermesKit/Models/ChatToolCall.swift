@@ -85,3 +85,20 @@ public enum ChatToolText {
         return String(trimmed.prefix(limit - 1)) + "…"
     }
 }
+
+/// Issue #129: the last tool of the current turn, for the Voice tab. Name only, no args or results.
+public struct ChatToolActivity: Sendable, Equatable {
+    public var name: String
+    /// `true` from `tool.start` to `tool.complete`.
+    public var isRunning: Bool
+
+    public init(name: String, isRunning: Bool) {
+        self.name = name
+        self.isRunning = isRunning
+    }
+
+    /// "Using web_search…" while the tool runs, "Used web_search" after it ends.
+    public var line: String {
+        isRunning ? ChatToolText.runningLine(name) : "Used \(name)"
+    }
+}

@@ -17,6 +17,8 @@ public final class ChatViewModel {
     public private(set) var statusLine: String?
     /// Issue #120: the tool that runs now in this chat. The Voice tab shows "Using <tool>…".
     public private(set) var runningTool: String?
+    /// Issue #129: the last tool of the turn for the Voice tab ("Using <tool>…", then "Used <tool>").
+    public private(set) var toolActivity: ChatToolActivity?
     /// The session title, or `nil` for a new chat ("New Chat").
     public private(set) var title: String?
     /// The last reply that ended. VoiceOver reads it once.
@@ -1241,6 +1243,7 @@ public final class ChatViewModel {
         if turn != thread.turn { turn = thread.turn }
         if statusLine != thread.statusLine { statusLine = thread.statusLine }
         if runningTool != thread.runningTool { runningTool = thread.runningTool }
+        if toolActivity != thread.toolActivity { toolActivity = thread.toolActivity }
     }
 
     /// The thread state that is not drawn yet (tests).
