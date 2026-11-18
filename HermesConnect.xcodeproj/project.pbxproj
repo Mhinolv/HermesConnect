@@ -87,6 +87,7 @@
 		CFB55369F229DCF8B92BA398 /* ChatBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12550753F6EF1111C87EA8A8 /* ChatBubble.swift */; };
 		D05B3CDCC1F08777E64FB0EA /* QuoteReplyUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDE579CB5319529770EC56B9 /* QuoteReplyUITests.swift */; };
 		D079943BAE0C42A8E25FFAB2 /* DeviceKeyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEE713B92846B56241CD9612 /* DeviceKeyView.swift */; };
+		D3C83D81BF20C117EE089D9F /* GlassCapsuleUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21CB2B15AAB6C075D05718C4 /* GlassCapsuleUITests.swift */; };
 		D4366E8BE2F65577400AC2B0 /* AttachmentBubbles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DEAF65581DD2EF4020516B9 /* AttachmentBubbles.swift */; };
 		DC807288C7246595D35CD72E /* LocationSettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E583F634243E84B759FCEC6 /* LocationSettingsSection.swift */; };
 		E230335998617506596F1F26 /* HermesConnectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80A034BAA06291CE4BB4106 /* HermesConnectTests.swift */; };
@@ -123,6 +124,7 @@
 		125D46AA18FD0FD7BA397180 /* ReceivedFileViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceivedFileViews.swift; sourceTree = "<group>"; };
 		143272B6E3876A758485C76A /* LiveModeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveModeView.swift; sourceTree = "<group>"; };
 		1A26C38F7103D242B9AFB6E1 /* ChatScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatScreen.swift; sourceTree = "<group>"; };
+		21CB2B15AAB6C075D05718C4 /* GlassCapsuleUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassCapsuleUITests.swift; sourceTree = "<group>"; };
 		23D8BC56827006B8AA57FFA8 /* ChatCommandCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatCommandCell.swift; sourceTree = "<group>"; };
 		251E221809E08D66325EFA17 /* AttachmentDemo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentDemo.swift; sourceTree = "<group>"; };
 		27E6BC84392DF022945BB39D /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
@@ -324,6 +326,7 @@
 				3CC37AE546D860D850B01DF6 /* ChatKeyboardTests.swift */,
 				374BF43FD2955A3BD85FD6CE /* ChatLayoutTests.swift */,
 				87A09D6455E55C265FDC2453 /* ChatTitleLayoutTests.swift */,
+				21CB2B15AAB6C075D05718C4 /* GlassCapsuleUITests.swift */,
 				C80A034BAA06291CE4BB4106 /* HermesConnectTests.swift */,
 				28B1C90A221FE6DC8C6F7FBB /* JobsTabTests.swift */,
 				B469A699145C4EF6725641D4 /* LiveModeTeardownTests.swift */,
@@ -650,6 +653,7 @@
 				6B3BAAF9D9A1330659C6C1D4 /* ChatKeyboardTests.swift in Sources */,
 				0106964C809B96A3721F8C1A /* ChatLayoutTests.swift in Sources */,
 				C22EF287150D4F0311D19F2D /* ChatTitleLayoutTests.swift in Sources */,
+				D3C83D81BF20C117EE089D9F /* GlassCapsuleUITests.swift in Sources */,
 				E230335998617506596F1F26 /* HermesConnectTests.swift in Sources */,
 				78FCF0957FD462CDA9260EC1 /* JobsTabTests.swift in Sources */,
 				E8E8A3EA74CF347BCC711165 /* LiveModeTeardownTests.swift in Sources */,

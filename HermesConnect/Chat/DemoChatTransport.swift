@@ -38,7 +38,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case listLoading = "list-loading"
         /// Seeded thread with voice memos in each state (issue #9). The composer shows the mic.
         case voice
-        /// Seeded thread with hands-free recording at 0:12 (Cancel, timer, waveform, Send).
+        /// Seeded thread with locked recording at 0:12 (Delete, Pause, Send).
         case recording
         /// Seeded thread with a held recording and the finger part way to cancel ("Slide to Cancel").
         case hold

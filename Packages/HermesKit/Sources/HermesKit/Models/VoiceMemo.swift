@@ -46,8 +46,10 @@ public enum VoiceMemoLimits {
     public static let warningAt: TimeInterval = 570
     /// A press longer than this records while held. A shorter press starts hands-free recording.
     public static let holdThreshold: TimeInterval = 0.3
-    /// A slide left of this many points cancels a held recording.
-    public static let cancelDistance: Double = 80
+    /// Issue #103: a slide left of this many points arms the cancel of a held recording. Release deletes it.
+    public static let cancelDistance: Double = 100
+    /// Issue #103: a slide up of this many points locks a held recording (hands-free).
+    public static let lockDistance: Double = 60
     /// The MIME type of an AAC clip in an `.m4a` container (docs/hermes-protocol.md 3.9 step 2).
     public static let mimeType = "audio/mp4"
     /// The bar count of the bubble waveform.
