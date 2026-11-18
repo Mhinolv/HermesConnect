@@ -753,3 +753,46 @@ private func chatEvent(_ json: String) throws -> GatewayClientEvent {
         #expect(rig.vm.saveVoiceModeAudio(SpokenAudio(data: Data([2]), mimeType: "audio/wav"), promptId: "m2") == nil)
     }
 }
+
+/// Issue #121: a Hermes prompt holds the hands-free loop.
+@MainActor
+@Suite(.timeLimit(.minutes(1))) struct VoiceModePromptHoldTests {
+    @Test func aHoldClosesTheMicAndStopsTheIdleEndUntilTheRelease() async throws {
+        let rig = Rig()
+        await rig.engine.start(chat: rig.chat)
+        #expect(rig.microphone.isOpen)
+        rig.engine.holdForPrompt()
+        #expect(rig.engine.promptHold)
+        #expect(!rig.microphone.isOpen, "the mic closes while the card waits")
+        // A card can wait 300 s. The 30 s idle end does not run.
+        rig.run(40, decibels: -20)
+        #expect(rig.engine.state == .listening)
+        #expect(rig.engine.clipEndCount == 0, "no clip records while the card waits")
+        rig.engine.releasePrompt()
+        #expect(!rig.engine.promptHold)
+        #expect(rig.microphone.isOpen, "the loop listens again after the answer")
+        rig.run(29.9, decibels: -60)
+        #expect(rig.engine.state == .listening, "the idle timer starts again at the release")
+        rig.engine.end()
+    }
+
+    @Test func aTurnThatEndsWhileHeldListensOnlyAfterTheRelease() async throws {
+        let rig = Rig()
+        try await rig.reachSpeaking()
+        rig.engine.holdForPrompt()
+        #expect(!rig.microphone.isOpen, "no barge-in monitor while the card waits")
+        rig.speech?.push(.ended)
+        try await until("listening") { rig.engine.state == .listening }
+        #expect(!rig.microphone.isOpen)
+        rig.engine.releasePrompt()
+        #expect(rig.microphone.isOpen)
+        rig.engine.end()
+        #expect(!rig.engine.promptHold)
+    }
+
+    @Test func aHoldDoesNothingWhenTheLoopIsOff() {
+        let rig = Rig()
+        rig.engine.holdForPrompt()
+        #expect(!rig.engine.promptHold)
+    }
+}

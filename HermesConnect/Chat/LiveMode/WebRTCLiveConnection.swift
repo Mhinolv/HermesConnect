@@ -139,6 +139,13 @@ final class WebRTCLiveConnection: LiveModeConnection {
         micTrack?.isEnabled = !muted
     }
 
+    /// Issue #121: the voice of the live model holds while a Hermes prompt waits.
+    func setRemoteAudioHeld(_ held: Bool) {
+        for receiver in peer?.receivers ?? [] {
+            (receiver.track as? RTCAudioTrack)?.isEnabled = !held
+        }
+    }
+
     /// Stops the mic track, closes the data channel and the peer, then gives the audio session back.
     func close() {
         guard !closed else { return }

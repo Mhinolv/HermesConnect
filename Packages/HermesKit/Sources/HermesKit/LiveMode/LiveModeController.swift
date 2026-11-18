@@ -25,8 +25,14 @@ public protocol LiveModeConnection: AnyObject {
     /// Sends one text message on the data channel. `false` if the channel is not open.
     @discardableResult func send(_ text: String) -> Bool
     func setMuted(_ muted: Bool)
+    /// Issue #121: holds the voice of the live model while a Hermes prompt waits.
+    func setRemoteAudioHeld(_ held: Bool)
     /// Stops the mic and closes the peer. No media flows after this.
     func close()
+}
+
+extension LiveModeConnection {
+    public func setRemoteAudioHeld(_: Bool) {}
 }
 
 /// The reply of a delegated Hermes turn, as the chat shows it.
@@ -150,6 +156,8 @@ public final class LiveModeController {
     @ObservationIgnored private var transcript: [LiveModeFragment] = []
     @ObservationIgnored private var delegation: Delegation?
     @ObservationIgnored private var eventCounter = 0
+    /// Issue #121: a Hermes prompt waits. The mic and the remote audio hold, and the idle timer stops.
+    @ObservationIgnored public private(set) var promptHold = false
     @ObservationIgnored private let log = HermesLog(category: "live-mode")
 
     private struct Delegation {
@@ -263,9 +271,30 @@ public final class LiveModeController {
     public func toggleMute() {
         guard phase != .idle, phase != .failed else { return }
         muted.toggle()
-        connection?.setMuted(muted)
+        connection?.setMuted(muted || promptHold)
         send(.mute(muted, eventId: nextEventId(muted ? "mute" : "unmute")))
         lastActivity = now()
+    }
+
+    /// Issue #121: a Hermes prompt waits. The mic and the voice of the live model hold. No speech goes to the live
+    /// model while the card shows, so a secret typed on the screen never reaches it.
+    public func holdForPrompt() {
+        guard isActive, !promptHold else { return }
+        promptHold = true
+        connection?.setMuted(true)
+        connection?.setRemoteAudioHeld(true)
+        idleWarning = false
+        log.info("live session held for a prompt")
+    }
+
+    /// The prompt ended: the mic and the remote audio come back, and the idle timer starts again.
+    public func releasePrompt() {
+        guard promptHold else { return }
+        promptHold = false
+        connection?.setMuted(muted)
+        connection?.setRemoteAudioHeld(false)
+        lastActivity = now()
+        log.info("live session prompt released")
     }
 
     private func fail(_ text: String) {
@@ -286,6 +315,7 @@ public final class LiveModeController {
         speaking = false
         idleWarning = false
         stillWorking = false
+        promptHold = false
         if let connection { closeConnection(connection, sendClose: sendClose) }
         connection = nil
     }
@@ -525,8 +555,8 @@ public final class LiveModeController {
             }
         case .live, .working:
             pumpDelegation(at: time)
-            // Idle: no speech and no Hermes work.
-            if delegation != nil || speaking {
+            // Idle: no speech, no Hermes work, and no prompt that waits (issue #121).
+            if delegation != nil || speaking || promptHold {
                 lastActivity = time
                 if idleWarning { idleWarning = false }
                 return
@@ -548,3 +578,5 @@ public final class LiveModeController {
         }
     }
 }
+
+extension LiveModeController: VoicePromptHolding {}

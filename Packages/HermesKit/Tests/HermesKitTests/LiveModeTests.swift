@@ -147,6 +147,8 @@ private final class FakeConnection: LiveModeConnection {
     }
 
     func setMuted(_ value: Bool) { muted.append(value) }
+    var remoteHeld: [Bool] = []
+    func setRemoteAudioHeld(_ held: Bool) { remoteHeld.append(held) }
     func close() { closed = true }
 
     func emit(_ event: LiveModeLinkEvent) { onEvent?(event) }
@@ -627,5 +629,48 @@ private final class FakeHermes: LiveModeHermes {
         let id = await vm.sendLiveDelegation("Hello", voiceContext: "")
         #expect(vm.messages.first?.delivery == .failed)
         #expect(vm.liveReplyProgress(promptId: id) == .failed)
+    }
+}
+
+/// Issue #121: a Hermes prompt holds the live session.
+extension LiveModeControllerTests {
+    @Test func aPromptHoldsTheMicAndTheRemoteAudioAndStopsTheIdleTimer() async throws {
+        let h = try await live()
+        h.controller.holdForPrompt()
+        #expect(h.controller.promptHold)
+        #expect(h.connection.muted.last == true, "no speech goes to the live model while the card waits")
+        #expect(h.connection.remoteHeld == [true])
+        // A card can wait 300 s. The 60 s idle end does not run.
+        for _ in 0..<30 {
+            h.clock.advance(10)
+            h.controller.tick()
+        }
+        #expect(h.controller.phase == .live)
+        #expect(h.controller.display == .live, "no idle warning while the card waits")
+        // A tap on Mute while held keeps the mic closed.
+        h.controller.toggleMute()
+        #expect(h.connection.muted.last == true)
+        h.controller.toggleMute()
+        #expect(h.connection.muted.last == true)
+        h.controller.releasePrompt()
+        #expect(!h.controller.promptHold)
+        #expect(h.connection.muted.last == false, "the mic comes back after the answer")
+        #expect(h.connection.remoteHeld == [true, false])
+        h.clock.advance(44)
+        h.controller.tick()
+        #expect(h.controller.display == .live, "the idle timer starts again at the release")
+        h.clock.advance(17)
+        h.controller.tick()
+        #expect(h.controller.lastEnd?.reason == .idle)
+    }
+
+    @Test func aReleaseKeepsTheOwnersMute() async throws {
+        let h = try await live()
+        h.controller.toggleMute()
+        h.controller.holdForPrompt()
+        h.controller.releasePrompt()
+        #expect(h.connection.muted.last == true)
+        h.controller.end(.hangUp)
+        #expect(!h.controller.promptHold)
     }
 }
