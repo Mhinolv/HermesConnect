@@ -50,6 +50,11 @@ final class FakeGatewaySocket: GatewayWebSocket, @unchecked Sendable {
         inboxContinuation.yield(.text(json))
     }
 
+    /// Issue #97: a binary frame, for example `speak-stream` PCM.
+    func pushBinary(_ data: Data) {
+        inboxContinuation.yield(.data(data))
+    }
+
     func pushReady(heartbeat: Bool? = true, epoch: String = "0123456789abcdef0123456789abcdef") {
         let heartbeatField = heartbeat.map { ",\"heartbeat\":\($0)" } ?? ""
         push("""

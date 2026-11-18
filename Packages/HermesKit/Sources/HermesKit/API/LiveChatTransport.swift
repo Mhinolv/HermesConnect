@@ -21,7 +21,7 @@ public enum ChatLinkStatus: Sendable, Equatable {
 ///   A second refusal before a good connect is `.failed`.
 /// - A send on a dropped socket reconnects once when the reason allows it.
 @MainActor @Observable
-public final class LiveChatTransport: ChatTransport, SessionsTransport, ReceivedFileDownloading {
+public final class LiveChatTransport: ChatTransport, SessionsTransport, ReceivedFileDownloading, VoiceStreamTransport {
     public private(set) var status: ChatLinkStatus = .notConnected
 
     /// Each read gives a new stream, so the session list and each chat read every event (issue #7).
@@ -38,10 +38,15 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
     /// The app asks the #4 bootstrap for a new Hermes session (`AppModel.renewHermesSession`).
     @ObservationIgnored public var onStaleToken: (@MainActor () async -> Void)?
 
+    /// Issue #97: opens the `speak-stream` sockets on the same forward.
+    @ObservationIgnored private let audioConnector: any GatewayWebSocketConnecting
+
     public init(makeClient: @escaping @Sendable (GatewayEndpoint) -> GatewayClient = { GatewayClient(endpoint: $0) },
-                makeREST: @escaping @Sendable (GatewayEndpoint) -> HermesRESTClient = { HermesRESTClient(endpoint: $0) }) {
+                makeREST: @escaping @Sendable (GatewayEndpoint) -> HermesRESTClient = { HermesRESTClient(endpoint: $0) },
+                audioConnector: any GatewayWebSocketConnecting = URLSessionGatewayConnector()) {
         self.makeClient = makeClient
         self.makeREST = makeREST
+        self.audioConnector = audioConnector
     }
 
     /// `true` for errors that mean "the token is not valid any more".
@@ -235,6 +240,38 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
             if Self.isStaleToken(error), endpoint == self.endpoint, status == .ready { staleToken() }
             throw error
         }
+    }
+
+    // MARK: VoiceStreamTransport (issue #97)
+
+    public func voiceConfig() async throws -> VoiceClientConfig {
+        try await withREST { try await $0.voiceConfig() }
+    }
+
+    public func voiceLiveStatus() async throws -> VoiceLiveStatus? {
+        try await withREST { try await $0.voiceLiveStatus() }
+    }
+
+    public func createVoiceLiveSession(offerSDP: String, history: [VoiceLiveHistoryItem]) async throws
+        -> VoiceLiveSessionAnswer {
+        try await withREST { try await $0.createVoiceLiveSession(offerSDP: offerSDP, history: history) }
+    }
+
+    /// A speaker for one reply on the current endpoint: `speak-stream`, then `POST /api/audio/speak` as the
+    /// fallback. A refused token asks for a new session once, as a socket refusal does.
+    public func makeStreamedSpeech(player: any StreamedSpeechPlaying) throws -> StreamedSpeech {
+        guard let endpoint else { throw SpeechStreamError.offline }
+        let connector = audioConnector
+        let rest = makeREST(endpoint)
+        return StreamedSpeech(
+            open: { try await SpeakStreamConnection.open(endpoint: endpoint, connector: connector) },
+            fallback: { try await rest.speak(text: $0) },
+            player: player,
+            onUnauthorized: { [weak self] in await self?.speechRefused(endpoint) })
+    }
+
+    private func speechRefused(_ refused: GatewayEndpoint) {
+        if refused == endpoint, status == .ready { staleToken() }
     }
 
     // MARK: SessionsTransport
