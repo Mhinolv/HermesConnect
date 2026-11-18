@@ -89,8 +89,8 @@ final class VoiceTabModel {
     var bargeInCount: Int { controller?.bargeInCount ?? 0 }
     var clipEndCount: Int { controller?.clipEndCount ?? 0 }
 
-    /// Issue #120: the line under the ring shows the tool that runs now in the session chat.
-    var display: VoiceTabDisplay { withPrompt(loopDisplay(tool: sessionChat?.runningTool)) }
+    /// Issues #120 and #129: the line under the ring shows the last tool of the turn in the session chat.
+    var display: VoiceTabDisplay { withPrompt(loopDisplay(tool: sessionChat?.toolActivity)) }
     /// Issue #120: the mini bar does not show the tool.
     var miniBarDisplay: VoiceTabDisplay { withPrompt(loopDisplay(tool: nil)) }
 
@@ -104,7 +104,7 @@ final class VoiceTabModel {
     var promptItem: VoicePromptItem? { prompts?.item }
     var promptPhase: VoicePromptPhase { prompts?.phase ?? .waiting }
 
-    private func loopDisplay(tool: String?) -> VoiceTabDisplay {
+    private func loopDisplay(tool: ChatToolActivity?) -> VoiceTabDisplay {
         if let live = liveController, let display = VoiceTabDisplay.live(
             phase: live.phase, muted: live.muted, speaking: live.speaking, idleWarning: live.idleWarning,
             stillWorking: live.stillWorking, failure: live.failure, tool: tool) {
