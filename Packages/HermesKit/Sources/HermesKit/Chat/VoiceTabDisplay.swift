@@ -56,6 +56,8 @@ public struct VoiceTabDisplay: Sendable, Equatable {
     public var muteOn: Bool
     /// `false` when Mute does nothing (Paused, error).
     public var muteEnabled: Bool
+    /// Issue #102: a live session. End uses `phone.down.fill` and the live capsule shows.
+    public var isLive = false
 
     /// The VoiceOver label of the ring: "Voice Mode, <state>".
     public var ringAccessibilityLabel: String { "Voice Mode, \(title)" }
