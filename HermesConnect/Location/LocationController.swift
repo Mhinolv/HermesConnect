@@ -46,8 +46,11 @@ struct BackgroundTasks {
 /// Automatic location sharing (issue #13, research.md D4).
 ///
 /// When sharing is on and iOS gives access, Core Location reports significant location changes and visits.
-/// These also wake the app after iOS ended it. Each fix goes to `LocationSharing`, which sends it through the
+/// These also wake the app after iOS ended it. Each fix goes to `LocationFanOut`, which sends it through the
 /// gate `location` command. The controller never logs a fix.
+///
+/// Issue #92: "Share Location" is a setting of each server, off for a new server. Each fix goes to each server
+/// with the setting on, whatever server is active, and never to a server with it off.
 ///
 /// Issue #51: in the foreground, full-accuracy updates also run (`kCLLocationAccuracyBest`, every 50 m).
 /// App open and connect each request one new fix, which goes without the rate limit. The background uses only
@@ -92,10 +95,15 @@ final class LocationController: NSObject {
     private(set) var access: Access
     /// False when the owner turned off Precise Location for Hermes in iOS Settings.
     private(set) var isPreciseAllowed: Bool
-    /// Settings > Location > "Share Location Automatically". Off until the owner turns it on.
-    private(set) var isEnabled: Bool
+    /// Issue #92: true when one or more saved servers have "Share Location" on. Core Location runs only then.
+    private(set) var isEnabled = false
+    /// Issue #92: the servers with "Share Location" on (`LocationServerSettings`).
+    private(set) var sharingIDs: Set<UUID> = []
     private(set) var precision: LocationPrecision
+    /// Settings > Location: the latest upload of the servers with sharing on.
     private(set) var status = LocationShareStatus()
+    /// Issue #92: the upload state of each saved server, for the server detail.
+    private(set) var serverStatus: [UUID: LocationShareStatus] = [:]
     private(set) var manualSend: ManualSend = .idle
     /// True while the "Location Access Off" alert shows.
     var showsAccessOffAlert = false
@@ -103,7 +111,11 @@ final class LocationController: NSObject {
     private(set) var wantsPrompt = false
 
     @ObservationIgnored private let manager: any LocationManaging
-    @ObservationIgnored private let sharing: LocationSharing
+    @ObservationIgnored private let sharing: LocationFanOut
+    @ObservationIgnored private let settings: any LocationServerSettingsStore
+    @ObservationIgnored private let servers: any ServerListStore
+    /// The server that was connected when the "Share Your Location" sheet showed. "Allow" turns sharing on for it.
+    @ObservationIgnored private var promptServer: UUID?
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let background: BackgroundTasks
     /// The owner tapped "Send Location Now". The next fix goes at once, without the rate limit.
@@ -118,7 +130,8 @@ final class LocationController: NSObject {
     /// The iOS background task of each upload. An entry is removed when the task ends, so it ends only once.
     @ObservationIgnored private var backgroundTasks: [UUID: UIBackgroundTaskIdentifier] = [:]
 
-    static let enabledKey = "locationSharingEnabled"
+    /// The one switch of the builds before issue #92. The migrated server keeps its value.
+    static let enabledKey = DefaultsLocationServerSettingsStore.legacyEnabledKey
     static let precisionKey = "locationPrecision"
     static let promptShownKey = "locationPromptShown"
     static let alwaysAskedKey = "locationAlwaysAsked"
@@ -129,17 +142,19 @@ final class LocationController: NSObject {
     /// A fresh request ends after this time. Then the rate limit applies again.
     static let freshRequestWindow: TimeInterval = 120
 
-    init(manager: any LocationManaging, sharing: LocationSharing, defaults: UserDefaults = .standard,
-         background: BackgroundTasks = .none) {
+    init(manager: any LocationManaging, sharing: LocationFanOut, settings: any LocationServerSettingsStore,
+         servers: any ServerListStore, defaults: UserDefaults = .standard, background: BackgroundTasks = .none) {
         self.manager = manager
         self.sharing = sharing
+        self.settings = settings
+        self.servers = servers
         self.defaults = defaults
         self.background = background
         access = Access(manager.authorizationStatus)
         isPreciseAllowed = manager.accuracyAuthorization == .fullAccuracy
-        isEnabled = defaults.bool(forKey: Self.enabledKey)
         precision = defaults.string(forKey: Self.precisionKey).flatMap(LocationPrecision.init(rawValue:)) ?? .precise
         super.init()
+        reloadSettings()
         manager.delegate = self
         // `requestLocation` and the foreground updates use this. Significant changes and visits do not.
         manager.desiredAccuracy = kCLLocationAccuracyBest
@@ -149,42 +164,52 @@ final class LocationController: NSObject {
         Task { await refreshStatus() }
     }
 
-    /// The app on a device. Each upload loads the saved profile and the device key, so it also works after a
-    /// relaunch in the background. It opens its own SSH connection with the pinned host key.
+    /// The app on a device. Each upload loads its own server profile and the device key, so it also works after a
+    /// relaunch in the background. It opens its own SSH connection with the pinned host key of that server.
+    /// Issue #92: never the active server alone. `LocationFanOut` picks the servers with sharing on.
     static func live() -> LocationController {
-        let servers = try? FileServerListStore.applicationSupport()
+        let servers: any ServerListStore = (try? FileServerListStore.applicationSupport()) ?? InMemoryServerListStore()
         let keys = KeychainDeviceKeyStore.system()
-        let uploader = GateLocationUploader(connector: HostConnector(transport: CitadelSSHTransport())) {
-            guard let profile = (try? servers?.load())?.active, let key = try? keys.loadKey() else { return nil }
-            return LocationCredentials(profile: profile, key: key)
-        }
-        let store: any LocationStateStore = (try? FileLocationStateStore.applicationSupport()) ?? InMemoryLocationStateStore()
-        return LocationController(manager: CLLocationManager(), sharing: LocationSharing(store: store, uploader: uploader),
+        let connector = HostConnector(transport: CitadelSSHTransport())
+        let settings = DefaultsLocationServerSettingsStore(defaults: .standard)
+        let fanOut = LocationFanOut(servers: servers, settings: settings, store: { id in
+            if let file = try? FileLocationStateStore.applicationSupport(server: id) { return file }
+            return InMemoryLocationStateStore()
+        }, uploader: { id in
+            GateLocationUploader.forServer(id, connector: connector, servers: servers, keys: keys)
+        })
+        return LocationController(manager: CLLocationManager(), sharing: fanOut, settings: settings, servers: servers,
                                   background: .live)
     }
 
     // MARK: Owner actions
 
-    /// The "Share Location Automatically" toggle.
-    func setEnabled(_ enabled: Bool) {
-        guard enabled else {
-            isEnabled = false
-            defaults.set(false, forKey: Self.enabledKey)
-            updateMonitoring()
-            run { sharing, _ in await sharing.discardPending() }
-            return
+    func isSharing(server id: UUID) -> Bool { sharingIDs.contains(id) }
+
+    func status(server id: UUID) -> LocationShareStatus { serverStatus[id] ?? LocationShareStatus() }
+
+    /// Issue #92: the "Share Location" switch of one server. False when iOS location access is off: sharing
+    /// stays off, and the server detail shows the "Location Access Off" alert.
+    @discardableResult
+    func setSharing(_ on: Bool, server id: UUID) -> Bool {
+        guard on else {
+            save { $0.setSharing(false, server: id) }
+            run { sharing, _ in await sharing.discardPending(server: id) }
+            return true
         }
-        if access == .off {
-            showsAccessOffAlert = true
-            return
-        }
-        isEnabled = true
-        defaults.set(true, forKey: Self.enabledKey)
+        if access == .off { return false }
+        save { $0.setSharing(true, server: id) }
         if access == .notDetermined {
             manager.requestWhenInUseAuthorization()
         }
-        updateMonitoring()
         askForAlwaysIfNeeded()
+        return true
+    }
+
+    /// "Remove Server": forget its setting and its pending fix.
+    func serverRemoved(_ id: UUID) {
+        setSharing(false, server: id)
+        serverStatus[id] = nil
     }
 
     func setPrecision(_ precision: LocationPrecision) {
@@ -192,22 +217,25 @@ final class LocationController: NSObject {
         defaults.set(precision.rawValue, forKey: Self.precisionKey)
     }
 
-    /// "Allow Location Access" on the "Share Your Location" sheet.
+    /// "Allow Location Access" on the "Share Your Location" sheet: sharing turns on for the connected server.
     func allowFromPrompt() {
+        let server = promptServer
         closePrompt()
-        setEnabled(true)
+        if let server { setSharing(true, server: server) }
     }
 
     /// "Not Now" on the sheet, or a swipe down. The sheet does not show again.
     func closePrompt() {
         wantsPrompt = false
+        promptServer = nil
         defaults.set(true, forKey: Self.promptShownKey)
     }
 
-    /// The app connected to Hermes. The first time, ask the owner about location. Then request a new fix and
-    /// send the waiting fix.
-    func didConnect() {
-        if !defaults.bool(forKey: Self.promptShownKey), access == .notDetermined, !isEnabled {
+    /// The app connected to `server`. The first time, ask the owner about location for it. Then request a new
+    /// fix and send the waiting fixes.
+    func didConnect(server: UUID?) {
+        if let server, !defaults.bool(forKey: Self.promptShownKey), access == .notDetermined, !isEnabled {
+            promptServer = server
             wantsPrompt = true
         }
         requestFreshFix()
@@ -233,8 +261,10 @@ final class LocationController: NSObject {
         run { sharing, precision in _ = await sharing.flush(precision: precision) }
     }
 
-    /// "Send Location Now": get one fix and send it once, without the rate limit.
+    /// "Send Location Now": get one fix and send it once to each server with sharing on, without the rate limit.
     func sendCurrentLocation() {
+        // Issue #92: no server with sharing on, so no server may get the fix. Settings disables the button.
+        guard isEnabled || access == .off else { return }
         switch access {
         case .off:
             showsAccessOffAlert = true
@@ -275,8 +305,8 @@ final class LocationController: NSObject {
         if oneShotPending {
             oneShotPending = false
             run { [weak self] sharing, precision in
-                let result = await sharing.submit(latest, precision: precision, force: true)
-                self?.manualSend = result == .sent ? .sent : .notDelivered
+                let results = await sharing.submit(latest, precision: precision, force: true)
+                self?.manualSend = results.values.contains(.sent) ? .sent : .notDelivered
             }
         } else if isEnabled {
             run { sharing, precision in _ = await sharing.submit(latest, precision: precision, force: fresh) }
@@ -293,6 +323,23 @@ final class LocationController: NSObject {
     // MARK: Private
 
     private var monitors: Bool { isEnabled && access.allowsUpdates }
+
+    /// Change the saved settings, then follow them.
+    private func save(_ change: (inout LocationServerSettings) -> Void) {
+        var saved = settings.load()
+        change(&saved)
+        settings.save(saved)
+        reloadSettings()
+    }
+
+    /// Read the settings and the server list again. A gate with `--no-location` turns sharing off for its server
+    /// (`LocationFanOut`), and a removed server no longer counts.
+    private func reloadSettings() {
+        let saved = settings.load()
+        sharingIDs = saved.sharingIDs
+        isEnabled = !saved.targets(in: (try? servers.load()) ?? ServerList()).isEmpty
+        updateMonitoring()
+    }
 
     private func updateMonitoring() {
         if monitors {
@@ -338,7 +385,7 @@ final class LocationController: NSObject {
     ///
     /// If iOS ends the background time first, the expiration handler cancels the upload (the SSH connection
     /// closes) and ends the task at once. `LocationSharing` keeps the fix as unsent, so the next connect sends it.
-    private func run(_ work: @escaping @MainActor (LocationSharing, LocationPrecision) async -> Void) {
+    private func run(_ work: @escaping @MainActor (LocationFanOut, LocationPrecision) async -> Void) {
         let sharing = sharing
         let precision = precision
         let id = UUID()
@@ -364,7 +411,13 @@ final class LocationController: NSObject {
     }
 
     private func refreshStatus() async {
-        status = await sharing.status
+        reloadSettings()
+        status = await sharing.combinedStatus()
+        var statuses: [UUID: LocationShareStatus] = [:]
+        for server in ((try? servers.load()) ?? ServerList()).servers {
+            statuses[server.id] = await sharing.status(server: server.id)
+        }
+        serverStatus = statuses
     }
 
     /// Wait for the uploads that run now. For tests.
@@ -418,14 +471,22 @@ extension LocationController {
     }
 
     /// A controller with a fake location manager and fake uploads, for previews and screenshots.
+    /// With no `servers`, one migrated server that shares when `enabled` is true.
     static func preview(access: CLAuthorizationStatus = .authorizedAlways, precise: Bool = true, enabled: Bool = true,
-                        state: LocationShareState = LocationShareState()) -> LocationController {
+                        state: LocationShareState = LocationShareState(), servers: [ServerProfile]? = nil,
+                        sharing ids: Set<UUID>? = nil) -> LocationController {
         let defaults = UserDefaults(suiteName: "preview-location") ?? .standard
         defaults.removePersistentDomain(forName: "preview-location")
-        defaults.set(enabled, forKey: enabledKey)
         let manager = PreviewLocationManager(status: access, accuracy: precise ? .fullAccuracy : .reducedAccuracy)
-        let sharing = LocationSharing(store: InMemoryLocationStateStore(state), uploader: ScriptedLocationUploader())
-        return LocationController(manager: manager, sharing: sharing, defaults: defaults)
+        let list = ServerList(servers: servers ?? [ServerProfile(id: ServerProfile.legacyID, host: "vps.example.com")])
+        let serverStore = InMemoryServerListStore(list)
+        let settings = InMemoryLocationServerSettingsStore(LocationServerSettings(
+            sharingIDs: ids ?? (enabled ? Set(list.servers.prefix(1).map(\.id)) : [])))
+        let fanOut = LocationFanOut(servers: serverStore, settings: settings,
+                                    store: { _ in InMemoryLocationStateStore(state) },
+                                    uploader: { _ in ScriptedLocationUploader() })
+        return LocationController(manager: manager, sharing: fanOut, settings: settings, servers: serverStore,
+                                  defaults: defaults)
     }
 
     /// Show the "Share Your Location" sheet, for previews and screenshots.

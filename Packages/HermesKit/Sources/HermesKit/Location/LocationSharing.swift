@@ -178,9 +178,12 @@ public protocol LocationStateStore: Sendable {
 /// iOS protects the file until the first unlock, the same class as the device key (research.md D1).
 public struct FileLocationStateStore: LocationStateStore {
     public let fileURL: URL
+    /// Issue #92: a file that `load` reads when `fileURL` is missing. Saves go to `fileURL` only.
+    public let fallbackURL: URL?
 
-    public init(fileURL: URL) {
+    public init(fileURL: URL, fallbackURL: URL? = nil) {
         self.fileURL = fileURL
+        self.fallbackURL = fallbackURL
     }
 
     public static func applicationSupport() throws -> FileLocationStateStore {
@@ -190,7 +193,8 @@ public struct FileLocationStateStore: LocationStateStore {
     }
 
     public func load() -> LocationShareState {
-        guard let data = try? Data(contentsOf: fileURL),
+        let url = FileManager.default.fileExists(atPath: fileURL.path) ? fileURL : (fallbackURL ?? fileURL)
+        guard let data = try? Data(contentsOf: url),
               let state = try? JSONDecoder().decode(LocationShareState.self, from: data) else {
             return LocationShareState()
         }

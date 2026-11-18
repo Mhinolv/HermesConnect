@@ -390,6 +390,33 @@ class LocationTests(GateTestCase):
         with open(self.path("hermesconnect", "location.json")) as stream:
             return json.load(stream)
 
+    def no_location_gate(self, command, stdin=b""):
+        return self.gate(command, stdin=stdin,
+                         options=["--hermes", self.hermes, "--port", str(self.port), "--no-location"])
+
+    def test_no_location_refuses_the_fix_and_stores_nothing(self):
+        # Issue #92: a team server. The gate refuses with a stable code and writes no file.
+        result = self.no_location_gate("location", stdin=json.dumps(fix()).encode("utf-8"))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"ERROR location-off: this server does not accept location\n")
+        self.assertFalse(os.path.exists(self.path("hermesconnect", "location.json")))
+        self.assertFalse(os.path.exists(self.path("hermesconnect", "location.lock")))
+
+    def test_no_location_keeps_ping_and_the_allow_list(self):
+        # The gate version stays 3: the app reads the error code, so it needs no new version.
+        result = self.no_location_gate("ping")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"PONG 3\n")
+        for request in (None, "bash", "location now"):
+            with self.subTest(request=request):
+                self.assertEqual(self.no_location_gate(request).returncode, 2)
+
+    def test_no_location_takes_no_value(self):
+        result = self.gate("ping", options=["--no-location=yes"])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b"ERROR bad-config", result.stderr)
+
     def test_valid_fix_is_stored_privately(self):
         result = self.send(fix(speed=1.5, course=90))
         self.assertEqual(result.returncode, 0, result.stderr)

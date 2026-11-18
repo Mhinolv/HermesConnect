@@ -38,7 +38,9 @@ struct HermesConnectApp: App {
                                     caches: ServerCaches(inMemory: switchDemo.profile?.id))
             if ServerSwitchDemo.current == .menu { ServerSwitchDemo.openMenu() }
             model = switchDemo
-            location = LocationController.preview(enabled: false)
+            // Issue #92: the Servers screenshots show "Share Location" on for the first server.
+            location = ServersDemo.current == nil ? LocationController.preview(enabled: false)
+                : LocationController.preview(servers: demo.servers, sharing: Set(demo.servers.prefix(1).map(\.id)))
             let off = ChatLaunch.demoScenario == .notificationsOff
             notifications = NotificationController(center: DemoNotificationCenter(status: off ? .denied : .authorized),
                                                    defaults: UserDefaults(suiteName: "demo") ?? .standard)
@@ -54,7 +56,8 @@ struct HermesConnectApp: App {
         let slashCache = SlashSuggestions.liveCache()
         SlashSuggestions.shared = SlashSuggestions.makeLive(link: link, cache: slashCache, profile: { live.profile })
         model = live
-        location = LocationController.live()
+        let location = LocationController.live()
+        self.location = location
         self.link = link
         let sessions = ChatLaunch.makeSessions(link: link, cache: caches.sessions)
         self.sessions = sessions
@@ -64,8 +67,10 @@ struct HermesConnectApp: App {
         self.notifications = notifications
         // Issue #83: a switch resets the lists before the new connect. Issue #84: each server keeps its folder.
         // "Remove Server" deletes its folder, its delivered notifications and its slash catalog.
+        // Issue #92: it also deletes its "Share Location" setting and its pending fix.
         ServerSwitchGlue.attach(model: live, sessions: sessions, jobs: jobs, caches: caches) { removed in
             notifications.removeDelivered(server: removed.id)
+            location.serverRemoved(removed.id)
             slashCache.remove(server: SlashCatalogServerKey.make(removed))
         }
         UNUserNotificationCenter.current().delegate = notifications
@@ -127,6 +132,13 @@ struct HermesConnectApp: App {
                     SettingsView()
                 case .detail:
                     SettingsView(path: first.map { [$0] } ?? [])
+                case .share:
+                    // At AX5 the switch is below the fold of the server detail, so this shows its section alone.
+                    NavigationStack {
+                        Form { if let first { ServerLocationSection(serverID: first) } }
+                            .navigationTitle(model.servers.first?.name ?? "")
+                            .navigationBarTitleDisplayMode(.inline)
+                    }
                 case .remove:
                     SettingsView(path: first.map { [$0] } ?? [], opensRemoveDialog: true)
                 case .newServer:

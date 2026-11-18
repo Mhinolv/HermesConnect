@@ -70,11 +70,19 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
     private struct Rig {
         let controller: LocationController
         let manager: FakeLocationManager
+        /// The uploader of the migrated server (`serverID`).
         let uploader: ScriptedLocationUploader
         let store: InMemoryLocationStateStore
         let defaults: UserDefaults
+        let servers: InMemoryServerListStore
+        /// Issue #92: a second saved server ("Ouro"), with its own uploader. Sharing is off for it.
+        let teamUploader: ScriptedLocationUploader
+        var serverID: UUID { ServerProfile.legacyID }
+        let teamID: UUID
     }
 
+    /// One migrated server and one new team server. `enabled` sets the switch of the builds before issue #92,
+    /// so the migrated server shares, as after an update.
     private func make(_ status: CLAuthorizationStatus = .notDetermined, enabled: Bool = false,
                       failure: LocationUploadError? = nil, defaults: UserDefaults? = nil,
                       store: InMemoryLocationStateStore = InMemoryLocationStateStore(),
@@ -83,9 +91,19 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
         if enabled { suite.set(true, forKey: LocationController.enabledKey) }
         let manager = FakeLocationManager(status)
         let uploader = ScriptedLocationUploader(failure: failure)
-        let sharing = LocationSharing(store: store, uploader: uploader)
-        let controller = LocationController(manager: manager, sharing: sharing, defaults: suite, background: background)
-        return Rig(controller: controller, manager: manager, uploader: uploader, store: store, defaults: suite)
+        let teamUploader = ScriptedLocationUploader()
+        let home = ServerProfile(id: ServerProfile.legacyID, host: "100.64.0.1", hostKey: .sample)
+        let team = ServerProfile(host: "100.64.0.2", displayName: "Ouro", hostKey: .otherSample)
+        let servers = InMemoryServerListStore(ServerList(servers: [home, team], activeID: home.id))
+        let teamStore = InMemoryLocationStateStore()
+        let sharing = LocationFanOut(servers: servers, settings: DefaultsLocationServerSettingsStore(defaults: suite),
+                                     store: { $0 == home.id ? store : teamStore },
+                                     uploader: { $0 == home.id ? uploader : teamUploader })
+        let controller = LocationController(manager: manager, sharing: sharing,
+                                            settings: DefaultsLocationServerSettingsStore(defaults: suite),
+                                            servers: servers, defaults: suite, background: background)
+        return Rig(controller: controller, manager: manager, uploader: uploader, store: store, defaults: suite,
+                   servers: servers, teamUploader: teamUploader, teamID: team.id)
     }
 
     @Test func sharingIsOffByDefaultAndDoesNotMonitor() {
@@ -98,7 +116,7 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
 
     @Test func turnOnAsksWhenInUseThenAlways() {
         let rig = make()
-        rig.controller.setEnabled(true)
+        rig.controller.setSharing(true, server: rig.serverID)
         #expect(rig.controller.isEnabled)
         #expect(rig.manager.whenInUseRequests == 1)
         #expect(rig.manager.alwaysRequests == 0)
@@ -119,8 +137,9 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
 
     @Test func turnOnWithAccessOffShowsTheAlertAndStaysOff() {
         let rig = make(.denied)
-        rig.controller.setEnabled(true)
-        #expect(rig.controller.showsAccessOffAlert)
+        // The server detail shows the alert when `setSharing` gives false.
+        #expect(!rig.controller.setSharing(true, server: rig.serverID))
+        #expect(!rig.controller.isSharing(server: rig.serverID))
         #expect(!rig.controller.isEnabled)
         #expect(rig.manager.whenInUseRequests == 0)
         #expect(!rig.manager.monitorsSignificantChanges)
@@ -188,7 +207,7 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
 
         // The next connect sends the kept fix.
         rig.uploader.duringUpload = nil
-        rig.controller.didConnect()
+        rig.controller.didConnect(server: rig.serverID)
         await rig.controller.waitForUploads()
         #expect(rig.store.load().pending == nil)
         #expect(rig.store.load().lastSent == fix())
@@ -197,7 +216,7 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
 
     @Test func expiryOfAManualSendShowsNotDelivered() async {
         let tasks = FakeBackgroundTasks()
-        let rig = make(.authorizedAlways, background: tasks.tasks)
+        let rig = make(.authorizedAlways, enabled: true, background: tasks.tasks)
         let started = AsyncStream<Void>.makeStream()
         rig.uploader.duringUpload = {
             started.continuation.yield()
@@ -225,7 +244,7 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
         #expect(rig.controller.status.waitingForConnection)
         #expect(LocationController.lastSentText(rig.controller.status, now: t0) == "Waiting for connection")
         rig.uploader.failure = nil
-        rig.controller.didConnect()
+        rig.controller.didConnect(server: rig.serverID)
         await rig.controller.waitForUploads()
         #expect(rig.uploader.payloads.count == 2)
         #expect(!rig.controller.status.waitingForConnection)
@@ -236,11 +255,12 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
         let rig = make(.authorizedAlways, enabled: true, failure: .timedOut)
         rig.controller.received([fix()])
         await rig.controller.waitForUploads()
-        rig.controller.setEnabled(false)
+        rig.controller.setSharing(false, server: rig.serverID)
         await rig.controller.waitForUploads()
         #expect(rig.store.load().pending == nil)
         #expect(!rig.manager.monitorsSignificantChanges)
-        #expect(rig.defaults.bool(forKey: LocationController.enabledKey) == false)
+        #expect(!rig.controller.isSharing(server: rig.serverID))
+        #expect(DefaultsLocationServerSettingsStore(defaults: rig.defaults).load().sharingIDs.isEmpty)
     }
 
     @Test func approximatePrecisionIsSavedAndUsed() async throws {
@@ -255,7 +275,7 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
     }
 
     @Test func sendNowSendsOneFixWithoutTheRateLimit() async {
-        let rig = make(.authorizedWhenInUse)
+        let rig = make(.authorizedWhenInUse, enabled: true)
         rig.controller.sendCurrentLocation()
         #expect(rig.manager.locationRequests == 1)
         #expect(rig.controller.manualSend == .sending)
@@ -266,19 +286,24 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
         rig.controller.received([fix(at: t0.addingTimeInterval(10))])
         await rig.controller.waitForUploads()
         #expect(rig.uploader.payloads.count == 2)
-        // With sharing off, a later fix is not sent.
+        #expect(rig.teamUploader.payloads.isEmpty)
+        // With sharing off, a later fix is not sent, and "Send Location Now" asks Core Location for nothing.
+        rig.controller.setSharing(false, server: rig.serverID)
         rig.controller.received([fix(at: t0.addingTimeInterval(20))])
         await rig.controller.waitForUploads()
         #expect(rig.uploader.payloads.count == 2)
+        rig.controller.sendCurrentLocation()
+        #expect(rig.controller.manualSend != .sending)
+        #expect(rig.manager.locationRequests == 2)
     }
 
     @Test func sendNowFailureShowsNotDelivered() async {
-        let rig = make(.authorizedAlways, failure: .connection(.unreachable))
+        let rig = make(.authorizedAlways, enabled: true, failure: .connection(.unreachable))
         rig.controller.sendCurrentLocation()
         rig.controller.received([fix()])
         await rig.controller.waitForUploads()
         #expect(rig.controller.manualSend == .notDelivered)
-        let other = make(.authorizedAlways)
+        let other = make(.authorizedAlways, enabled: true)
         other.controller.sendCurrentLocation()
         other.controller.locationFailed()
         #expect(other.controller.manualSend == .notDelivered)
@@ -292,41 +317,51 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
     }
 
     @Test func sendNowAsksForAccessFirst() {
-        let rig = make()
+        let rig = make(enabled: true)
         rig.controller.sendCurrentLocation()
         #expect(rig.manager.whenInUseRequests == 1)
         rig.manager.authorizationStatus = .authorizedWhenInUse
         rig.controller.authorizationDidChange()
         #expect(rig.manager.locationRequests == 1)
-        // The owner did not turn on automatic sharing, so the app does not ask for Always.
-        #expect(rig.manager.alwaysRequests == 0)
+    }
+
+    // Issue #92: with no server that shares, "Send Location Now" asks iOS for nothing.
+    @Test func sendNowWithNoSharingServerDoesNothing() {
+        let rig = make()
+        rig.controller.sendCurrentLocation()
+        #expect(rig.manager.whenInUseRequests == 0)
+        #expect(rig.manager.locationRequests == 0)
+        #expect(rig.controller.manualSend == .idle)
     }
 
     @Test func promptShowsOnceAfterTheFirstConnect() {
         let suite = UserDefaults(suiteName: "loc-\(UUID().uuidString)")!
         let rig = make(defaults: suite)
         #expect(!rig.controller.wantsPrompt)
-        rig.controller.didConnect()
+        rig.controller.didConnect(server: rig.serverID)
         #expect(rig.controller.wantsPrompt)
         rig.controller.closePrompt()
         #expect(!rig.controller.wantsPrompt)
         let again = make(defaults: suite)
-        again.controller.didConnect()
+        again.controller.didConnect(server: rig.serverID)
         #expect(!again.controller.wantsPrompt)
     }
 
     @Test func allowOnThePromptTurnsSharingOnAndAsks() {
         let rig = make()
-        rig.controller.didConnect()
+        rig.controller.didConnect(server: rig.serverID)
         rig.controller.allowFromPrompt()
         #expect(!rig.controller.wantsPrompt)
         #expect(rig.controller.isEnabled)
+        // Issue #92: only the connected server.
+        #expect(rig.controller.isSharing(server: rig.serverID))
+        #expect(!rig.controller.isSharing(server: rig.teamID))
         #expect(rig.manager.whenInUseRequests == 1)
     }
 
     @Test func promptDoesNotShowWhenAccessWasAlreadyAnswered() {
         let rig = make(.denied)
-        rig.controller.didConnect()
+        rig.controller.didConnect(server: rig.serverID)
         #expect(!rig.controller.wantsPrompt)
     }
 
@@ -353,7 +388,7 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
         // A coarse background fix went 10 s ago, so the rate limit holds the next nearby fix.
         rig.controller.received([fix(at: .now.addingTimeInterval(-10))])
         await rig.controller.waitForUploads()
-        rig.controller.didConnect()
+        rig.controller.didConnect(server: rig.serverID)
         #expect(rig.manager.locationRequests == 1)
         rig.controller.received([fix(37.3350, at: .now)])
         await rig.controller.waitForUploads()
@@ -385,7 +420,7 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
         let rig = make(.authorizedAlways, enabled: true)
         rig.controller.received([fix(at: .now.addingTimeInterval(-10))])
         await rig.controller.waitForUploads()
-        rig.controller.didConnect()
+        rig.controller.didConnect(server: rig.serverID)
         rig.controller.received([fix(37.3350, at: .now, accuracy: 101)])
         await rig.controller.waitForUploads()
         #expect(rig.uploader.payloads.count == 1)
@@ -397,12 +432,12 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
     @Test func openAndConnectRequestNothingWhenSharingIsOff() {
         let rig = make(.authorizedAlways)
         rig.controller.appDidBecomeActive()
-        rig.controller.didConnect()
+        rig.controller.didConnect(server: rig.serverID)
         #expect(rig.manager.locationRequests == 0)
         #expect(!rig.manager.updatesLocation)
         let denied = make(.denied, enabled: true)
         denied.controller.appDidBecomeActive()
-        denied.controller.didConnect()
+        denied.controller.didConnect(server: rig.serverID)
         #expect(denied.manager.locationRequests == 0)
         #expect(!denied.manager.updatesLocation)
     }
@@ -411,7 +446,7 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
         let old = fix(at: .now.addingTimeInterval(-86 * 60))
         let store = InMemoryLocationStateStore(LocationShareState(pending: old, lastError: "The server is not reachable."))
         let rig = make(.authorizedAlways, enabled: true, store: store)
-        rig.controller.didConnect()
+        rig.controller.didConnect(server: rig.serverID)
         await rig.controller.waitForUploads()
         #expect(rig.uploader.payloads.isEmpty)
         #expect(rig.store.load().pending == nil)
@@ -442,7 +477,7 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
         let rig = make(.authorizedAlways)
         rig.controller.appDidBecomeActive()
         #expect(!rig.manager.updatesLocation)
-        rig.controller.setEnabled(true)
+        rig.controller.setSharing(true, server: rig.serverID)
         #expect(rig.manager.updatesLocation)
         rig.manager.authorizationStatus = .denied
         rig.controller.authorizationDidChange()
@@ -450,7 +485,7 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
         rig.manager.authorizationStatus = .authorizedWhenInUse
         rig.controller.authorizationDidChange()
         #expect(rig.manager.updatesLocation)
-        rig.controller.setEnabled(false)
+        rig.controller.setSharing(false, server: rig.serverID)
         #expect(!rig.manager.updatesLocation)
         #expect(!rig.manager.monitorsSignificantChanges)
     }
@@ -460,6 +495,95 @@ private func fix(_ lat: Double = 37.3349, at time: Date = t0, accuracy: Double =
         #expect(LocationController.Access.whileUsing.title == "While Using")
         #expect(LocationController.Access.off.title == "Off")
         #expect(LocationController.Access.notDetermined.title == "Off")
+    }
+
+    // MARK: Issue #92: a setting for each server
+
+    private func activate(_ rig: Rig, _ id: UUID) throws {
+        var list = try rig.servers.load()
+        list.activate(id: id)
+        try rig.servers.save(list)
+    }
+
+    @Test func aSwitchToAServerWithSharingOffSendsItNoFix() async throws {
+        let rig = make(.authorizedAlways, enabled: true)
+        try activate(rig, rig.teamID)
+        rig.controller.didConnect(server: rig.teamID)
+        rig.controller.received([fix()])
+        rig.controller.sendCurrentLocation()
+        rig.controller.received([fix(at: t0.addingTimeInterval(10))])
+        await rig.controller.waitForUploads()
+        #expect(rig.teamUploader.payloads.isEmpty)
+        #expect(rig.uploader.payloads.count == 2)
+    }
+
+    @Test func theMigratedServerKeepsSharingWithNoNewPrompt() {
+        let suite = UserDefaults(suiteName: "loc-\(UUID().uuidString)")!
+        suite.set(true, forKey: LocationController.promptShownKey)
+        let rig = make(.authorizedAlways, enabled: true, defaults: suite)
+        rig.controller.didConnect(server: rig.serverID)
+        #expect(!rig.controller.wantsPrompt)
+        #expect(rig.controller.isSharing(server: rig.serverID))
+        #expect(!rig.controller.isSharing(server: rig.teamID))
+        #expect(rig.manager.monitorsSignificantChanges)
+        #expect(rig.manager.alwaysRequests == 0)
+    }
+
+    @Test func aNewServerStartsWithSharingOffAndCanTurnItOn() async {
+        let rig = make(.authorizedAlways)
+        #expect(!rig.controller.isSharing(server: rig.teamID))
+        #expect(rig.controller.setSharing(true, server: rig.teamID))
+        #expect(rig.controller.isEnabled)
+        rig.controller.received([fix()])
+        await rig.controller.waitForUploads()
+        #expect(rig.teamUploader.payloads.count == 1)
+        #expect(rig.uploader.payloads.isEmpty)
+        #expect(rig.controller.status(server: rig.teamID).lastSentAt != nil)
+        #expect(rig.controller.status(server: rig.serverID).lastSentAt == nil)
+    }
+
+    @Test func aGateWithNoLocationTurnsSharingOffWithNoLoop() async {
+        let rig = make(.authorizedAlways)
+        rig.teamUploader.failure = .connection(.gateError("location-off"))
+        rig.controller.setSharing(true, server: rig.teamID)
+        rig.controller.received([fix()])
+        await rig.controller.waitForUploads()
+        #expect(!rig.controller.isSharing(server: rig.teamID))
+        #expect(!rig.controller.isEnabled)
+        #expect(!rig.manager.monitorsSignificantChanges)
+        #expect(rig.controller.status(server: rig.teamID).lastError == "This server does not accept location.")
+        rig.controller.appDidBecomeActive()
+        rig.controller.flush()
+        rig.controller.received([fix(at: t0.addingTimeInterval(600))])
+        await rig.controller.waitForUploads()
+        #expect(rig.teamUploader.payloads.count == 1)
+    }
+
+    @Test func removeServerForgetsItsSetting() async throws {
+        let rig = make(.authorizedAlways, enabled: true)
+        var list = try rig.servers.load()
+        list.remove(id: rig.serverID)
+        try rig.servers.save(list)
+        rig.controller.serverRemoved(rig.serverID)
+        await rig.controller.waitForUploads()
+        #expect(!rig.controller.isEnabled)
+        #expect(!rig.manager.monitorsSignificantChanges)
+        rig.controller.received([fix()])
+        await rig.controller.waitForUploads()
+        #expect(rig.uploader.payloads.isEmpty)
+        #expect(rig.teamUploader.payloads.isEmpty)
+    }
+
+    @Test func sharedWithNamesTheServers() {
+        #expect(LocationSettingsSection.sharedWithText([]) == "No Server")
+        #expect(LocationSettingsSection.sharedWithText(["Home"]) == "Home")
+        #expect(LocationSettingsSection.sharedWithText(["Home", "Lab"]) == "Home, Lab")
+        #expect(LocationSettingsSection.sharedWithText(["A", "B", "C"]) == "3 Servers")
+        let off = LocationShareStatus(lastError: "This server does not accept location.")
+        #expect(ServerLocationSection.footer(isOn: false, status: off)
+                == "This server does not get your location.\nLast error: This server does not accept location.")
+        #expect(ServerLocationSection.footer(isOn: true, status: LocationShareStatus())
+                == ServerLocationSection.onFooter)
     }
 
     @Test func lastSentText() {

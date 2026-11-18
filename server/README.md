@@ -65,6 +65,8 @@ The input is one JSON object:
 - `speed` (m/s, 0 or more) and `course` (0 to 360) are optional and can be `null`. Other fields are refused.
 - `arrived_at` (gate 3, issue #51) is optional and can be `null`. It is when the owner arrived at the place of a visit, ISO 8601 with a time zone. The app sends it only to gate 3 or later.
 
+A gate with `--no-location` (issue #92) stores nothing and fails with `ERROR location-off`. The app then turns off "Share Location" for that server and does not try again.
+
 The gate writes `~/.hermes/hermesconnect/location.json` (mode 0600) through an atomic rename. An older fix never replaces a newer fix. The `phone_location` plugin reads this file (see [phone_location plugin](#phone_location-plugin)):
 
 ```json
@@ -89,7 +91,10 @@ Upgrade from gate version 1: run `install.sh` again with the same key line. It r
 
 If two phone keys get the same slot port, `install.sh` stops with an error. Install the second key with `--port N` (1024 to 65535).
 
-Options: `--user NAME`, `--authorized-keys FILE`, `--gate-dest PATH`, `--no-copy-gate`, `--hermes PATH`, `--port N`, `--dry-run`. Run `install.sh --help` for details.
+Options: `--user NAME`, `--authorized-keys FILE`, `--gate-dest PATH`, `--no-copy-gate`, `--hermes PATH`, `--port N`, `--no-location`, `--dry-run`. Run `install.sh --help` for details.
+
+Team server (issue #92): install the key with `--no-location`. The gate then refuses the phone location, so the server never stores it.
+If the Hermes of a server has no `secrets.command`, give `--hermes <path to its Doppler wrapper>`. Ouro used `/home/hermes/.local/bin/hermes-desktop-doppler`.
 
 To remove a phone key: `sudo ./install.sh --remove '<key line>'`.
 
