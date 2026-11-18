@@ -5,6 +5,8 @@ import SwiftUI
 enum RootTab: Hashable {
     case chats
     case jobs
+    /// Issue #101.
+    case voice
 }
 
 /// A screen in the Jobs stack: a job with its runs, or the read-only output of one run.
