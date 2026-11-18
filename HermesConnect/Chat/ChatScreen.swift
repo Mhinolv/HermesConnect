@@ -41,11 +41,10 @@ struct ChatScreen: View {
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    ChatNavigationTitle(title: model.title, link: link, updating: model.isUpdating, onRename: renameAction)
-                }
-            }
+            .modifier(ChatTitleBar { maxWidth in
+                ChatNavigationTitle(title: model.title, link: link, updating: model.isUpdating, onRename: renameAction,
+                                    maxWidth: maxWidth)
+            })
             .modifier(OptionalSessionActionDialogs(state: actions, model: sessions))
             // Issue #98: the Live voice engine with a plain view. The final Voice UI comes from #101.
             .modifier(LiveModeEntry(chat: model, service: link.map { $0 as any LiveModeService } ?? LiveModeDemo.service))
@@ -71,6 +70,8 @@ struct ChatNavigationTitle: View {
     var updating = false
     /// Issue #64: with an action, the title is a menu with "Rename", like a `.toolbarTitleMenu`.
     var onRename: (() -> Void)?
+    /// Issue #107: the widest title that fits between the bar buttons. `nil` sets no limit.
+    var maxWidth: CGFloat?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -86,10 +87,12 @@ struct ChatNavigationTitle: View {
                             .accessibilityHidden(true)
                     }
                     .foregroundStyle(.primary)
+                    .frame(maxWidth: maxWidth)
                 }
                 .accessibilityHint("Shows the chat actions.")
             } else {
                 titleText
+                    .frame(maxWidth: maxWidth)
             }
             ChatTitleStatus(link: link, updating: updating)
         }
@@ -100,6 +103,31 @@ struct ChatNavigationTitle: View {
         Text(title ?? "New Chat")
             .font(.headline)
             .lineLimit(1)
+    }
+}
+
+/// Issue #107: the principal title of the chat with a width limit. In the toolbar, SwiftUI gives the title its full
+/// width and the bar does not limit it, so a long title ran under the back and Live Voice buttons.
+/// The title gets the width of the screen less one bar button side at each end, and centers between the buttons.
+struct ChatTitleBar<Title: View>: ViewModifier {
+    /// The bar margin (16), one glass button (44) and the gap to the title (12), as UIKit lays out the bar.
+    static var buttonSide: CGFloat { 72 }
+
+    @ViewBuilder var title: (CGFloat?) -> Title
+    @State private var width: CGFloat?
+
+    static func maxWidth(barWidth: CGFloat) -> CGFloat {
+        max(0, barWidth - 2 * buttonSide)
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    title(width.map(Self.maxWidth(barWidth:)))
+                }
+            }
     }
 }
 
