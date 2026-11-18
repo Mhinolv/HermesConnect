@@ -217,6 +217,10 @@ public struct PromptSubmitParams: Encodable, Sendable, Equatable {
     /// Edit or regenerate: cut the transcript before this row. Needs `confirmTruncate: true`.
     public var truncateBeforeRowId: Int?
     public var confirmTruncate: Bool?
+    /// Issue #98: `voice-live` for a GPT-Live delegation (`ClientSurface`).
+    public var surface: String?
+    /// Issue #98: the recent spoken exchange. The server gives it to the model only (with `surface: "voice-live"`).
+    public var voiceContext: String?
 
     public init(sessionId: String, text: String, voiceTurn: Bool? = nil, queued: Bool? = nil,
                 displayKind: String? = nil, truncateBeforeRowId: Int? = nil, confirmTruncate: Bool? = nil) {
@@ -232,6 +236,7 @@ public struct PromptSubmitParams: Encodable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case sessionId = "session_id", text, voiceTurn = "voice_turn", queued, displayKind = "display_kind"
         case truncateBeforeRowId = "truncate_before_row_id", confirmTruncate = "confirm_truncate"
+        case surface, voiceContext = "voice_context"
     }
 }
 
