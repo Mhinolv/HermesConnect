@@ -547,7 +547,8 @@ final class VoiceMemoController {
 
 /// Plays one clip at a time: the owner's memos (#9) and the voice replies (#10). A new playback stops
 /// the old one. A tap on the clip that plays pauses it, and the next tap goes on from the same point.
-/// The session is `.playback` with `.spokenAudio`, and it ducks other audio, so it plays over car audio.
+/// The session is `.playback` with `.spokenAudio`. It ducks other audio when other audio plays, so it plays over
+/// car audio. With no other audio, it does not mix, so a car Bluetooth output starts its media stream (issue #130).
 @MainActor
 final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
     /// The loaded clip, playing or paused.
@@ -556,6 +557,9 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
     private var player: AVAudioPlayer?
     private var timer: Timer?
     private var observer: (any NSObjectProtocol)?
+    private var routeObserver: (any NSObjectProtocol)?
+    /// Issue #130: the session settings and the playback diagnostics (`Library/Caches/audio_diag.log`).
+    private let audio: VoicePlaybackAudio
     /// The play state changed. The screen draws the play and pause icons again.
     var onChange: (() -> Void)?
     /// About 10 times per second while a clip plays: the clip, its time and its length.
@@ -564,6 +568,12 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
     var onFailure: ((URL) -> Void)?
 
     var currentTime: TimeInterval { player?.currentTime ?? 0 }
+
+    init(audio: VoicePlaybackAudio = VoicePlaybackAudio(session: SystemVoicePlaybackSession(),
+                                                        diagnostics: .shared)) {
+        self.audio = audio
+        super.init()
+    }
 
     func isPlaying(_ url: URL) -> Bool { isPlaying && playingURL == url }
 
@@ -583,9 +593,7 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
     func play(_ url: URL, from time: TimeInterval = 0) {
         stop()
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-            try session.setActive(true)
+            try audio.play()
         } catch {
             // The session did not start (for example during a call). The file can be good, so the bubble stays.
             onChange?()
@@ -599,6 +607,7 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
         self.player = player
         playingURL = url
         observeInterruptions()
+        observeRoute()
         setPlaying(true)
     }
 
@@ -626,13 +635,16 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
         stopTimer()
         if let observer { NotificationCenter.default.removeObserver(observer) }
         observer = nil
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        routeObserver = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         onChange?()
     }
 
     private func resume() {
         guard let player else { return }
-        try? AVAudioSession.sharedInstance().setActive(true)
+        // Issue #130: a memo or Hands-Free can have set `.playAndRecord` with HFP in the pause.
+        try? audio.resume()
         guard player.play() else { return }
         setPlaying(true)
     }
@@ -675,6 +687,18 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
                 self.player?.pause()
                 self.setPlaying(false)
             }
+        }
+    }
+
+    /// Issue #130: one diagnostic line per route change while a clip is loaded. AVFAudio posts the change on its
+    /// own queue, so the block is nonisolated and touches no main actor state (lesson of #127).
+    private func observeRoute() {
+        guard routeObserver == nil else { return }
+        routeObserver = NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification,
+                                                               object: nil, queue: nil) { [audio] note in
+            let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
+                .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+            audio.routeChanged(reason: reason.map(SystemVoiceAudioSession.name) ?? "unknown")
         }
     }
 

@@ -194,4 +194,39 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         #expect(VoiceSettingsSection.toggleTitle == "Auto-Play Voice Replies")
         #expect(VoiceSettingsSection.footer == "Hermes speaks replies to your voice memos.")
     }
+
+    /// Issue #130: the bubble player sets `.playback` on each play and each resume, with no ducking when
+    /// no other audio plays, and writes one diagnostic line for each. A fake session: no real audio session.
+    @Test func bubblePlayerSetsTheMediaCategoryOnPlayAndResume() throws {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent("tone-130.wav")
+        try DemoChatTransport.toneWAV(seconds: 2).write(to: url)
+        let session = FakeBubbleSession()
+        let file = AudioDiagnosticsFile(url: folder.appendingPathComponent("diag-130.log"))
+        try? FileManager.default.removeItem(at: file.url)
+        let player = VoiceMemoPlayer(audio: VoicePlaybackAudio(session: session, diagnostics: file))
+        player.play(url)
+        #expect(player.isPlaying(url))
+        player.toggle(url)
+        #expect(!player.isPlaying(url))
+        player.toggle(url)
+        #expect(player.isPlaying(url))
+        player.stop()
+        #expect(session.calls == ["playback", "active", "playback", "active"])
+        let lines = file.read()
+        #expect(lines.count == 2)
+        #expect(lines.first?.contains(" playback event=play out=BluetoothA2DPOutput ") == true)
+        #expect(lines.last?.contains(" playback event=resume ") == true)
+    }
+}
+
+/// Issue #130: an audio session that only records its calls.
+private final class FakeBubbleSession: VoicePlaybackSession, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _calls: [String] = []
+    var calls: [String] { lock.withLock { _calls } }
+    var routeState: VoiceAudioRouteState { VoiceAudioRouteState(outputs: ["BluetoothA2DPOutput"]) }
+    var isOtherAudioPlaying: Bool { false }
+    func setPlaybackCategory(duckOthers: Bool) throws { lock.withLock { _calls.append(duckOthers ? "duck" : "playback") } }
+    func setActive(_ active: Bool) throws { lock.withLock { _calls.append(active ? "active" : "inactive") } }
 }
