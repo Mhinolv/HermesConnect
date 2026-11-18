@@ -48,7 +48,7 @@ struct SessionListScreen: View {
             if model.hasLoaded {
                 ForEach(rows) { item in
                     NavigationLink(value: ChatRoute.session(item.id)) {
-                        SessionRow(item: item)
+                        SessionRow(item: item, needsApproval: model.needsApproval(item.id))
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                         Button("Archive", systemImage: "archivebox") { actions.archive(item.id, model) }
@@ -190,6 +190,8 @@ struct ArchivedRow: View {
 /// One row: title and time, then two lines of preview with the source label (issue #7 design notes).
 struct SessionRow: View {
     let item: SessionListItem
+    /// Issue #104: an approval card waits in this chat. The preview line is "Approval needed".
+    var needsApproval = false
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
@@ -208,7 +210,7 @@ struct SessionRow: View {
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(SessionRowText.accessibilityLabel(item))
+        .accessibilityLabel(SessionRowText.accessibilityLabel(item, needsApproval: needsApproval))
     }
 
     /// The time goes under the title at the accessibility sizes, so the title keeps its room.
@@ -230,6 +232,11 @@ struct SessionRow: View {
     }
 
     private var preview: Text {
+        if needsApproval {
+            // Issue #104: the waiting approval comes first. The orange hand matches the card.
+            let icon = Text(Image(systemName: "hand.raised.fill")).foregroundStyle(.orange)
+            return Text("\(icon) \(ChatApprovalCard.listPreview)").fontWeight(.semibold)
+        }
         let text = item.preview ?? ""
         guard let badge = item.sourceBadge else { return Text(text) }
         let label = Text("\(Image(systemName: badge.symbol)) \(badge.text)").fontWeight(.semibold)
@@ -286,13 +293,18 @@ enum SessionRowText {
     }
 
     /// "<title>, <time>, <preview>". "Unread" and the source come in when they apply.
-    static func accessibilityLabel(_ item: SessionListItem, now: Date = Date()) -> String {
+    /// Issue #104: "Approval needed" in place of the preview when an approval card waits.
+    static func accessibilityLabel(_ item: SessionListItem, now: Date = Date(), needsApproval: Bool = false) -> String {
         var parts: [String] = []
         if item.isUnread { parts.append("Unread") }
         parts.append(item.displayTitle)
         if let date = item.startedAt { parts.append(time(date, now: now)) }
         if let badge = item.sourceBadge { parts.append(badge.text) }
-        if let preview = item.preview, !preview.isEmpty { parts.append(preview) }
+        if needsApproval {
+            parts.append(ChatApprovalCard.listPreview)
+        } else if let preview = item.preview, !preview.isEmpty {
+            parts.append(preview)
+        }
         return parts.joined(separator: ", ")
     }
 

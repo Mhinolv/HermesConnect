@@ -100,6 +100,11 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
         case outboxSent = "outbox-sent"
         /// Issue #50: received audio files with transcript lines. `HERMES_DEMO_TRANSCRIPTS` picks the states.
         case audioTranscripts = "audio-transcripts"
+        /// Issue #104: approval cards. `approvals` waits, `approvals-done` shows "Allowed once", "Denied" and
+        /// "This request expired", `approvals-list` shows "Approval needed" in the list.
+        case approvals
+        case approvalsDone = "approvals-done"
+        case approvalsList = "approvals-list"
 
         static var current: Scenario? {
             ProcessInfo.processInfo.environment["HERMES_DEMO"].flatMap(Scenario.init(rawValue:))
@@ -115,17 +120,17 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                  .markdownBlocksTop, .catchUp, .catchUpPill,
                  .notificationSettings, .notificationsOff, .voiceSettings, .voiceSettingsParakeet, .voiceSettingsDownloading,
                  .voiceSettingsReady, .voiceSettingsDamaged, .slashCommands, .listRename, .listDelete, .archived,
-                 .outbox, .outboxSent, .audioTranscripts: nil
+                 .outbox, .outboxSent, .audioTranscripts, .approvals, .approvalsDone, .approvalsList: nil
             }
         }
 
         /// The list scenarios show the session list. The others push the demo chat at launch.
         var showsList: Bool {
-            [.list, .listEmpty, .listLoading, .listRename, .listDelete, .archived].contains(self)
+            [.list, .listEmpty, .listLoading, .listRename, .listDelete, .archived, .approvalsList].contains(self)
         }
 
         /// The list scenarios with the fixture rows.
-        var hasListRows: Bool { [.list, .listRename, .listDelete, .archived].contains(self) }
+        var hasListRows: Bool { [.list, .listRename, .listDelete, .archived, .approvalsList].contains(self) }
 
         /// The text in the search field of the list (`HERMES_DEMO_SEARCH`).
         static var search: String? {
@@ -467,6 +472,7 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
                                         command: ChatCommandCard(command: "/foo", output: "Unknown command: /foo",
                                                                  isError: true)))
         }
+        if scenario == .approvals || scenario == .approvalsDone { messages += Self.approvalMessages(now: now, done: scenario == .approvalsDone) }
         if scenario == .receivedFiles || scenario == .receivedFilesPreview { messages += ReceivedFileDemo.messages(now: now) }
         if scenario == .audioTranscripts { messages += AudioTranscriptDemo.messages(now: now) }
         if scenario.showsTapbacks { messages += Self.tapbackMessages(now: now) }
@@ -516,6 +522,38 @@ final class DemoChatTransport: ChatTransport, SessionsTransport, @unchecked Send
 
     /// Issue #11: the reply that the picker scenario opens the capsule on.
     static let tapbackPickerId = "t6"
+
+    /// Issue #104: a calendar prompt, the start of the reply, and the approval card. `done` adds the answered,
+    /// denied and expired cards.
+    static func approvalMessages(now: Date, done: Bool) -> [ChatMessage] {
+        let late = now.addingTimeInterval(-50)
+        let request = ApprovalRequest(
+            sessionId: "demo", requestId: "a1",
+            command: "gcal events update --calendar primary --event 7f3k2 --start 2026-11-21T15:00 "
+                + "--end 2026-11-21T16:00 --title \"Dentist\" --notify all --reminder 30m --location \"Main St\"",
+            description: "Move \"Dentist\" to Friday 3:00 PM in your primary calendar", toolName: "gcal")
+        var messages = [
+            ChatMessage(id: "p1", role: .user, text: "Move my dentist appointment to Friday at 3", date: late,
+                        delivery: .delivered, userRowId: 501),
+            ChatMessage(id: "p2", role: .assistant, text: "I found the event. I need your approval to change it.",
+                        date: late.addingTimeInterval(6), reply: .complete, promptId: "p1"),
+        ]
+        func card(_ id: String, _ seconds: Double, _ state: ChatApprovalCard.State, _ requestId: String,
+                  description: String? = nil) -> ChatMessage {
+            var item = ChatApprovalCard(request: request, serverRequestId: .string("srq-\(id)"), state: state)
+            item.requestId = requestId
+            if let description { item.description = description }
+            return ChatMessage(id: id, role: .assistant, text: "", date: late.addingTimeInterval(seconds), approval: item)
+        }
+        if done {
+            messages.append(card("ap1", 8, .answered(.once), "a1"))
+            messages.append(card("ap2", 20, .cancelled, "a2", description: "Delete the old event"))
+            messages.append(card("ap3", 30, .expired, "a3", description: "Send the invite to 3 people"))
+        } else {
+            messages.append(card("ap1", 8, .waiting, "a1"))
+        }
+        return messages
+    }
 
     /// Issue #11: thumbs up, heart (thanks), no ack (slash command), thumbs down and eyes, plus owner tapbacks.
     static func tapbackMessages(now: Date) -> [ChatMessage] {
@@ -634,6 +672,18 @@ extension DemoChatTransport: ReceivedFileDownloading {
         if AudioTranscriptDemo.owns(path) { return try AudioTranscriptDemo.download(path: path) }
         return try await ReceivedFileDemo.download(path: path, maxBytes: maxBytes, progress: progress)
     }
+}
+
+/// Issue #104: the approval card buttons work in the demo. Nothing goes to a server.
+extension DemoChatTransport: ServerRequestTransport {
+    func answerApproval(requestId _: JSONRPCID, choice _: ApprovalChoice) async throws {
+        try await Task.sleep(for: .milliseconds(300))
+    }
+
+    func rejectServerRequest(_: JSONRPCID, code _: Int, message _: String) async throws {}
+    func respondApproval(sessionId _: String, choice _: ApprovalChoice, requestId _: String?) async throws -> Int { 1 }
+    func acknowledgeApproval(sessionId _: String, requestId _: String) async throws {}
+    func pendingApprovals(sessionId _: String) async throws -> [ApprovalRequest] { [] }
 }
 
 /// Issue #64: each action succeeds after a short wait. Nothing is saved.
