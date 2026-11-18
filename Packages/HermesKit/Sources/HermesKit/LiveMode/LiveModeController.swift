@@ -11,6 +11,8 @@ public enum LiveModeLinkEvent: Sendable, Equatable {
     /// ICE lost the path. It can come back. "Reconnecting…" shows for 10 s at most.
     case disconnected
     case failed
+    /// The `oai-events` data channel closed, and the app did not close it (issue #109).
+    case channelClosed
 }
 
 /// The WebRTC peer of one live session: a mic track and the `oai-events` data channel. Issue #98.
@@ -219,19 +221,27 @@ public final class LiveModeController {
         }
         log.info("live session starting")
         let service = service
+        let log = log
         let history = hermes?.liveHistory() ?? []
         startTask = Task { [weak self] in
+            var step = LiveModeStep.offer
             do {
                 let offer = try await connection.makeOffer()
                 guard let self, self.epoch == epoch else { connection.close(); return }
+                step = .session
+                log.info("live offer ready, session request sent")
                 let answer = try await service.createVoiceLiveSession(offerSDP: offer, history: history)
                 guard self.epoch == epoch else { connection.close(); return }
+                log.info("live session request: HTTP 200")
+                step = .answer
                 try await connection.applyAnswer(answer.sdp)
                 guard self.epoch == epoch else { connection.close(); return }
-                self.log.info("live session answer applied")
+                log.info("live session answer applied")
             } catch {
+                // The step and a code only. Never the SDP, a token or the server text.
+                log.notice("live start failed at \(step.rawValue): \(Self.errorCode(error))")
                 guard let self, self.epoch == epoch else { return }
-                self.fail(Self.failureText(error))
+                self.fail(Self.failureText(error, step: step))
             }
         }
         if autoTick { startTicker() }
@@ -291,13 +301,45 @@ public final class LiveModeController {
         }
     }
 
-    private static func failureText(_ error: any Error) -> String {
+    /// The error line names the step that failed (issue #109).
+    static func failureText(_ error: any Error, step: LiveModeStep) -> String {
         switch error {
         case VoiceLiveSessionError.unavailable(let detail), VoiceLiveSessionError.vendor(let detail),
              VoiceLiveSessionError.badOffer(let detail):
-            detail.flatMap { $0.isEmpty ? nil : $0 } ?? "The server could not start Live mode."
-        case LiveModeError.microphoneDenied: "Microphone Access Off"
-        default: "Live mode could not connect."
+            return detail.flatMap { $0.isEmpty ? nil : $0 } ?? "The server could not start Live mode."
+        case LiveModeError.microphoneDenied:
+            return "Microphone Access Off"
+        case LiveModeError.step(let failed, _):
+            return stepText(failed)
+        case HermesAPIError.http(let status) where step == .session:
+            return "The server refused Live mode (HTTP \(status))."
+        default:
+            return stepText(step)
+        }
+    }
+
+    private static func stepText(_ step: LiveModeStep) -> String {
+        switch step {
+        case .audioSession: "Could not start the microphone (audio session)."
+        case .offer: "Could not start Live mode (WebRTC offer)."
+        case .session: "Could not reach Hermes (session request)."
+        case .answer: "Could not use the answer from OpenAI (SDP answer)."
+        }
+    }
+
+    /// A code for the log: the HTTP status, else the error domain and code. Never error text.
+    static func errorCode(_ error: any Error) -> String {
+        switch error {
+        case VoiceLiveSessionError.badOffer: return "HTTP 400"
+        case VoiceLiveSessionError.vendor: return "HTTP 502"
+        case VoiceLiveSessionError.unavailable: return "HTTP 503"
+        case HermesAPIError.unauthorized: return "HTTP 401"
+        case HermesAPIError.notFound: return "HTTP 404"
+        case HermesAPIError.http(let status): return "HTTP \(status)"
+        case LiveModeError.step(let step, let code): return "\(step.rawValue) \(code.map(String.init) ?? "none")"
+        default:
+            let error = error as NSError
+            return "\(error.domain) \(error.code)"
         }
     }
 
@@ -318,7 +360,12 @@ public final class LiveModeController {
             phase = .reconnecting
             log.notice("live link lost, waiting")
         case .failed:
-            fail("The connection to Live mode was lost.")
+            // Before the first connect, ICE did not find a path to OpenAI.
+            log.notice("live link failed, \(connectedAt == nil ? "before" : "after") connect")
+            fail(connectedAt == nil ? "Could not reach OpenAI (ICE failed)." : "The connection to Live mode was lost.")
+        case .channelClosed:
+            log.notice("live data channel closed by the remote side")
+            fail("The connection to Live mode was lost (data channel closed).")
         case .speaking(let value):
             speaking = value
             lastActivity = now()
@@ -473,6 +520,7 @@ public final class LiveModeController {
         switch phase {
         case .reconnecting:
             if let since = reconnectSince, time.timeIntervalSince(since) >= Self.reconnectSeconds {
+                log.notice("live link did not come back in \(Int(Self.reconnectSeconds)) s")
                 fail("The connection to Live mode was lost.")
             }
         case .live, .working:
@@ -491,7 +539,10 @@ public final class LiveModeController {
             let warn = quiet >= Self.idleWarningSeconds
             if warn != idleWarning { idleWarning = warn }
         case .connecting:
-            if time.timeIntervalSince(lastActivity) >= Self.connectSeconds { fail("Live mode could not connect.") }
+            if time.timeIntervalSince(lastActivity) >= Self.connectSeconds {
+                log.notice("live connect timed out")
+                fail("Could not reach OpenAI (timed out).")
+            }
         case .idle, .failed:
             break
         }

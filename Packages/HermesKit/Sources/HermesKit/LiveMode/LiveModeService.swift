@@ -18,6 +18,20 @@ extension LiveChatTransport: LiveModeService {}
 public enum LiveModeError: Error, Sendable, Equatable {
     case microphoneDenied
     case connectionFailed
+    /// A WebRTC step on the phone failed (issue #109). `code` is the vendor error code when known.
+    case step(LiveModeStep, code: Int?)
+}
+
+/// The steps of a live start, for the error line and the log (issue #109).
+public enum LiveModeStep: String, Sendable, Equatable {
+    /// `RTCAudioSession` activation for voice chat.
+    case audioSession = "audio session"
+    /// The local WebRTC offer and ICE gathering.
+    case offer
+    /// `POST /api/audio/voice-live/session`.
+    case session
+    /// The SDP answer goes into the peer.
+    case answer
 }
 
 extension VoiceLiveStatus {
