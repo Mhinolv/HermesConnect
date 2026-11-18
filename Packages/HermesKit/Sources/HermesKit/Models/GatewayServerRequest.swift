@@ -107,8 +107,10 @@ public struct ApprovalAnswer: Encodable, Sendable, Equatable {
 public struct GatewayServerRequest: Sendable, Equatable {
     public enum Kind: Sendable, Equatable {
         case approval(ApprovalRequest)
-        /// `clarify`, `sudo` and `secret`: the app answers them with the raw params (#6 and later).
-        case clarify, sudo, secret
+        /// Issue #117: the prompt cards. The params never go to a log.
+        case clarify(ClarifyRequest)
+        case sudo(SudoRequest)
+        case secret(SecretRequest)
     }
 
     /// Methods that this client handles. The client answers other methods with `-32601` at once
@@ -128,11 +130,10 @@ public struct GatewayServerRequest: Sendable, Equatable {
         self.sessionId = params["session_id"]?.stringValue
         switch method {
         case "approval":
-            let data = try JSONEncoder().encode(params)
-            kind = .approval(try JSONDecoder().decode(ApprovalRequest.self, from: data))
-        case "clarify": kind = .clarify
-        case "sudo": kind = .sudo
-        case "secret": kind = .secret
+            kind = .approval(try Self.decode(params))
+        case "clarify": kind = .clarify(try Self.decode(params))
+        case "sudo": kind = .sudo(try Self.decode(params))
+        case "secret": kind = .secret(try Self.decode(params))
         default: throw GatewayError.unsupportedServerRequest(method)
         }
     }
@@ -143,9 +144,151 @@ public struct GatewayServerRequest: Sendable, Equatable {
         try? self.init(id: .string(entry.id), method: entry.method, params: .object(entry.params))
     }
 
+    private static func decode<T: Decodable>(_ params: JSONValue) throws -> T {
+        try JSONDecoder().decode(T.self, from: try JSONEncoder().encode(params))
+    }
+
     /// The approval params, for an `approval` request.
     public var approval: ApprovalRequest? {
         if case .approval(let request) = kind { return request }
         return nil
+    }
+}
+
+// MARK: Prompts (issue #117)
+
+/// `secret` request params (`contracts/server_requests.py`, `SecretRequestParams`): a masked value for a named
+/// env var. The answer is `{"value": "..."}`.
+public struct SecretRequest: Decodable, Sendable, Equatable {
+    public var sessionId: String
+    public var envVar: String
+    public var prompt: String
+
+    private enum CodingKeys: String, CodingKey { case sessionId = "session_id", envVar = "env_var", prompt }
+
+    public init(sessionId: String, envVar: String, prompt: String) {
+        self.sessionId = sessionId
+        self.envVar = envVar
+        self.prompt = prompt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try container.decode(String.self, forKey: .sessionId)
+        envVar = try container.decodeIfPresent(String.self, forKey: .envVar) ?? ""
+        prompt = try container.decodeIfPresent(String.self, forKey: .prompt) ?? ""
+    }
+}
+
+/// `sudo` request params (`SudoRequestParams`): the server redacts `command`. The answer is `{"value": "<password>"}`.
+public struct SudoRequest: Decodable, Sendable, Equatable {
+    public var sessionId: String
+    public var command: String
+
+    private enum CodingKeys: String, CodingKey { case sessionId = "session_id", command }
+
+    public init(sessionId: String, command: String = "") {
+        self.sessionId = sessionId
+        self.command = command
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try container.decode(String.self, forKey: .sessionId)
+        command = try container.decodeIfPresent(String.self, forKey: .command) ?? ""
+    }
+}
+
+/// One question of a `clarify` request (`ClarifyQuestion`). Blank choices are dropped. `multiSelect` holds only
+/// with choices (desktop `store/clarify.ts:normalizeQuestions`).
+public struct ClarifyQuestion: Decodable, Sendable, Equatable {
+    public var qid: String
+    public var question: String
+    public var choices: [String]
+    public var multiSelect: Bool
+
+    private enum CodingKeys: String, CodingKey { case qid, question, choices, multiSelect = "multi_select" }
+
+    public init(qid: String, question: String, choices: [String] = [], multiSelect: Bool = false) {
+        self.qid = qid
+        self.question = question
+        self.choices = choices
+        self.multiSelect = multiSelect && !choices.isEmpty
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let qid = try container.decode(String.self, forKey: .qid)
+        let question = try container.decode(String.self, forKey: .question)
+        let raw = (try? container.decodeIfPresent([String].self, forKey: .choices)) ?? nil
+        let choices = (raw ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let multi = (try? container.decodeIfPresent(Bool.self, forKey: .multiSelect)) ?? nil
+        self.init(qid: qid.trimmingCharacters(in: .whitespacesAndNewlines),
+                  question: question.trimmingCharacters(in: .whitespacesAndNewlines),
+                  choices: choices, multiSelect: multi ?? false)
+    }
+
+    /// The answer string of a pick: the choice itself, or a JSON list for a multi-select question (desktop
+    /// `store/clarify.ts:typedAnswer`).
+    public func answer(for picks: [String]) -> String {
+        guard multiSelect else { return picks.first ?? "" }
+        let data = (try? JSONEncoder().encode(picks)) ?? Data("[]".utf8)
+        return String(decoding: data, as: UTF8.self)
+    }
+}
+
+/// `clarify` request params (`ClarifyRequestParams`). `answers` comes only on a reconnect replay: the answers that
+/// the server locked already (`nil` = skipped).
+public struct ClarifyRequest: Decodable, Sendable, Equatable {
+    public var sessionId: String
+    public var questions: [ClarifyQuestion]
+    public var lockedAnswers: [String: String?]
+
+    private enum CodingKeys: String, CodingKey { case sessionId = "session_id", questions, answers }
+
+    public init(sessionId: String, questions: [ClarifyQuestion], lockedAnswers: [String: String?] = [:]) {
+        self.sessionId = sessionId
+        self.questions = questions
+        self.lockedAnswers = lockedAnswers
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionId = try container.decode(String.self, forKey: .sessionId)
+        let all = try container.decode([ClarifyQuestion].self, forKey: .questions)
+        questions = all.filter { !$0.qid.isEmpty && !$0.question.isEmpty }
+        lockedAnswers = (try? container.decodeIfPresent([String: String?].self, forKey: .answers)) ?? [:]
+    }
+}
+
+/// The answer to a `sudo` or `secret` request (`ValueResult`).
+struct ValueAnswer: Encodable, Sendable {
+    var value: String
+}
+
+/// The answer to a `clarify` request (`ClarifyResult`). No `answers` is cancel-all.
+struct ClarifyAnswer: Encodable, Sendable {
+    var answers: [String: String?]?
+    var outcome: String
+
+    private enum CodingKeys: String, CodingKey { case answers, outcome }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        if let answers {
+            var nested = container.nestedContainer(keyedBy: AnyKey.self, forKey: .answers)
+            for (key, value) in answers.sorted(by: { $0.key < $1.key }) {
+                try nested.encode(value, forKey: AnyKey(key))
+            }
+        }
+        try container.encode(outcome, forKey: .outcome)
+    }
+
+    private struct AnyKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init(_ string: String) { stringValue = string }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue _: Int) { nil }
     }
 }

@@ -41,6 +41,11 @@ public protocol ServerRequestTransport: Sendable {
     func acknowledgeApproval(sessionId: String, requestId: String) async throws
     /// `approval.pending {session_id}`: every unresolved approval of the session.
     func pendingApprovals(sessionId: String) async throws -> [ApprovalRequest]
+    /// Issue #117: answers a `secret` or `sudo` server request on its JSON-RPC id with `{value}`. The value never
+    /// goes to a log.
+    func answerValue(requestId: JSONRPCID, value: String) async throws
+    /// Issue #117: answers a `clarify` server request with `{answers, outcome}`. `nil` answers is cancel-all.
+    func answerClarify(requestId: JSONRPCID, answers: [String: String?]?, outcome: String) async throws
 }
 
 /// What the chat screen needs from the gateway. `GatewayClient` conforms. Tests and the
@@ -165,6 +170,14 @@ extension GatewayClient: ServerRequestTransport {
         let result = try await call("approval.pending", params: SessionIdParams(sessionId: sessionId),
                                     as: ApprovalPendingResult.self)
         return (result.approvals ?? []).compactMap { ApprovalRequest(pending: $0, sessionId: sessionId) }
+    }
+
+    public func answerValue(requestId: JSONRPCID, value: String) async throws {
+        try await respond(to: requestId, result: ValueAnswer(value: value))
+    }
+
+    public func answerClarify(requestId: JSONRPCID, answers: [String: String?]?, outcome: String) async throws {
+        try await respond(to: requestId, result: ClarifyAnswer(answers: answers, outcome: outcome))
     }
 }
 

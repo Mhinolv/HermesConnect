@@ -28,6 +28,18 @@ final class ChatViewController: MessagesViewController {
     private var expandedApprovals: Set<String> = []
     /// Issue #104: the last approval card that played the haptic.
     private var handledApprovalAlertId: String?
+    /// Issue #117: the size of a secret, password or question card.
+    private var promptCalculator: ChatVoiceSizeCalculator?
+    /// Issue #117: what the owner typed on each prompt card that waits, by card id. Send and Cancel remove it.
+    private var promptDrafts: [String: ChatPromptDraft] = [:]
+    /// Issue #117: the last prompt card that played the haptic.
+    private var handledPromptAlertId: String?
+    /// Issue #117 (QA note): the prompt field that has the focus, as card id and draft key. A reload of the thread
+    /// gives the focus back to it.
+    private var focusedPrompt: (id: String, key: String)?
+    /// Issue #117: `true` while `render()` reloads the thread. A reload ends the editing of a prompt field, which
+    /// is not the owner leaving the field.
+    private var reloadingThread = false
     /// Issue #67: the last composer text that the model gave.
     private var handledComposerFillId: String?
     /// Memos whose transcript shows all lines.
@@ -121,6 +133,7 @@ final class ChatViewController: MessagesViewController {
         messagesCollectionView.register(ChatVoiceCell.self)
         messagesCollectionView.register(ChatCommandCell.self)
         messagesCollectionView.register(ChatApprovalCell.self)
+        messagesCollectionView.register(ChatPromptCell.self)
         messagesCollectionView.keyboardDismissMode = .interactive
         scrollsToLastItemOnKeyboardBeginsEditing = true
         maintainPositionOnInputBarHeightChanged = true
@@ -161,6 +174,7 @@ final class ChatViewController: MessagesViewController {
         handledComposerFillId = model.composerFill?.id
         // Issue #104: a card that showed before this screen opened plays no haptic now.
         handledApprovalAlertId = model.approvalAlert?.id
+        handledPromptAlertId = model.promptAlertId
         render()
         observeModel()
     }
@@ -234,6 +248,12 @@ final class ChatViewController: MessagesViewController {
                                                traits: self?.traitCollection ?? .current, maxWidth: maxWidth)
         }
         self.approvalCalculator = approvalCalculator
+        let promptCalculator = ChatVoiceSizeCalculator(layout: layout, copying: layout.attributedTextMessageSizeCalculator)
+        promptCalculator.bubbleSize = { [weak self] message, maxWidth in
+            guard let card = (message as? ChatBubble)?.row.message.prompt else { return .zero }
+            return ChatPromptCardLayout.size(card, traits: self?.traitCollection ?? .current, maxWidth: maxWidth)
+        }
+        self.promptCalculator = promptCalculator
     }
 
     private func configureComposer() {
@@ -820,6 +840,7 @@ final class ChatViewController: MessagesViewController {
             _ = model.composerFill
             _ = model.replyQuote
             _ = model.approvalAlert
+            _ = model.promptAlertId
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
                 self?.applyComposerFill()
@@ -886,6 +907,8 @@ final class ChatViewController: MessagesViewController {
         }
 
         bubbles = next
+        reloadingThread = true
+        defer { reloadingThread = false }
         if old.map(\.messageId) == next.map(\.messageId) {
             let changed = next.indices.filter { old[$0].row != next[$0].row || old[$0].received != next[$0].received }
             if !changed.isEmpty {
@@ -908,6 +931,42 @@ final class ChatViewController: MessagesViewController {
         announceCompletedReply()
         autoPlayVoiceReply()
         playApprovalHaptic()
+        playPromptHaptic()
+        // Issue #117: a card that does not wait any more keeps no draft.
+        promptDrafts = promptDrafts.filter { id, _ in model.messages.contains { $0.id == id && $0.prompt?.isWaiting == true } }
+        if let focused = focusedPrompt, !model.messages.contains(where: { $0.id == focused.id && $0.prompt?.isWaiting == true }) {
+            focusedPrompt = nil
+        }
+    }
+
+    /// Issue #117: a new prompt card plays the `.warning` haptic once. VoiceOver reads the title.
+    private func playPromptHaptic() {
+        guard let id = model.promptAlertId, id != handledPromptAlertId else { return }
+        handledPromptAlertId = id
+        guard view.window != nil, let card = model.messages.first(where: { $0.id == id })?.prompt else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        if UIAccessibility.isVoiceOverRunning {
+            UIAccessibility.post(notification: .announcement, argument: card.title)
+        }
+    }
+
+    /// Issue #117: Send on a prompt card. The draft goes to the model once and the screen drops it.
+    private func sendPrompt(id: String, card: ChatPromptCard, draft: ChatPromptDraft) {
+        promptDrafts[id] = nil
+        if card.isSecure {
+            model.answerPrompt(id: id, value: draft.value)
+        } else {
+            model.answerClarify(id: id, typed: draft.typedAnswers(card))
+        }
+    }
+
+    /// Issue #117: a field of a prompt card took the focus. The card moves above the keyboard.
+    private func scrollToPrompt(id: String) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, let index = bubbles.firstIndex(where: { $0.row.id == id }),
+                  index < messagesCollectionView.numberOfSections else { return }
+            messagesCollectionView.scrollToItem(at: IndexPath(item: 0, section: index), at: .bottom, animated: true)
+        }
     }
 
     /// Issue #104: a new approval card plays the `.warning` haptic once. VoiceOver reads the title.
@@ -1178,8 +1237,8 @@ final class ChatViewController: MessagesViewController {
                               point _: CGPoint) -> UIContextMenuConfiguration? {
         guard let indexPath = indexPaths.first, let part = bubble(at: indexPath)?.part else { return nil }
         let row = part.row
-        // Issue #104: an approval card has its own buttons and no menu.
-        if row.message.approval != nil { return nil }
+        // Issue #104, #117: an approval card and a prompt card have their own buttons and no menu.
+        if row.message.approval != nil || row.message.prompt != nil { return nil }
         return UIContextMenuConfiguration(identifier: indexPath as NSIndexPath, previewProvider: nil) { [weak self] _ in
             var actions: [UIMenuElement] = []
             // Issue #11: the six tapbacks in one row above the other actions.
@@ -1247,7 +1306,7 @@ final class ChatViewController: MessagesViewController {
 
     /// A bubble that still sends or streams takes no tapback.
     static func canReact(_ message: ChatMessage) -> Bool {
-        message.delivery != .sending && message.reply != .streaming && message.approval == nil
+        message.delivery != .sending && message.reply != .streaming && message.approval == nil && message.prompt == nil
     }
 
     private func showBadges(on cell: UICollectionViewCell, row: ChatRow) {
@@ -1563,6 +1622,29 @@ extension ChatViewController: MessagesDataSource {
             } : nil
             return cell
         }
+        if let row = row(for: message), let card = row.message.prompt {
+            let cell = messagesCollectionView.dequeueReusableCell(ChatPromptCell.self, for: indexPath)
+            cell.configure(with: message, at: indexPath, and: messagesCollectionView)
+            let id = row.id
+            cell.configure(card: card, draft: promptDrafts[id] ?? ChatPromptDraft(), traits: traitCollection)
+            guard !readOnly else { return cell }
+            cell.onDraftChange = { [weak self] draft in self?.promptDrafts[id] = draft }
+            cell.onSend = { [weak self] draft in self?.sendPrompt(id: id, card: card, draft: draft) }
+            cell.onCancel = { [weak self] in
+                self?.promptDrafts[id] = nil
+                self?.model.cancelPrompt(id: id)
+            }
+            cell.onFocus = { [weak self] key in
+                self?.focusedPrompt = (id, key)
+                self?.scrollToPrompt(id: id)
+            }
+            cell.onBlur = { [weak self] key in
+                guard let self, !reloadingThread, focusedPrompt?.id == id, focusedPrompt?.key == key else { return }
+                focusedPrompt = nil
+            }
+            if let focused = focusedPrompt, focused.id == id, card.isWaiting { cell.restoreFocus(focused.key) }
+            return cell
+        }
         if let card = row(for: message)?.message.command {
             let cell = messagesCollectionView.dequeueReusableCell(ChatCommandCell.self, for: indexPath)
             cell.configure(with: message, at: indexPath, and: messagesCollectionView)
@@ -1671,6 +1753,7 @@ extension ChatViewController: MessagesLayoutDelegate {
     func customCellSizeCalculator(for message: MessageType, at _: IndexPath,
                                   in _: MessagesCollectionView) -> CellSizeCalculator {
         if row(for: message)?.message.approval != nil, let approvalCalculator { return approvalCalculator }
+        if row(for: message)?.message.prompt != nil, let promptCalculator { return promptCalculator }
         if row(for: message)?.message.command != nil, let commandCalculator { return commandCalculator }
         return voiceCalculator ?? MessageSizeCalculator(layout: flowLayout)
     }

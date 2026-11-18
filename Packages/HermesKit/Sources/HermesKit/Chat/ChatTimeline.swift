@@ -136,6 +136,7 @@ public enum ChatTimeline {
     public static func accessibilityLabel(for row: ChatRow, calendar: Calendar = .current,
                                           locale: Locale = .current) -> String {
         if let card = row.message.approval { return card.accessibilityLabel }
+        if let card = row.message.prompt { return card.accessibilityLabel }
         if let card = row.message.command {
             // Issue #67: "Command output, /usage, <output>". An error card says "Command failed".
             let kind = card.isError ? "Command failed" : "Command output"

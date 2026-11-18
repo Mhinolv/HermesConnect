@@ -46,6 +46,9 @@ public final class ChatViewModel {
     /// Issue #104: an approval came on the open socket (not a replay). The app posts a local notification when
     /// it is in the background.
     @ObservationIgnored public var onApprovalRequest: (@MainActor (ApprovalAlert) -> Void)?
+    /// Issue #117: the id of the last prompt card that showed. Each new card gets a new value. The screen plays
+    /// the `.warning` haptic for it.
+    public private(set) var promptAlertId: String?
 
     @ObservationIgnored private var thread = ChatThread()
     @ObservationIgnored private let transport: any ChatTransport
@@ -344,10 +347,12 @@ public final class ChatViewModel {
             guard let live = session?.liveId, event.sessionId == live else { return }
             switch event.kind {
             case .requestCancel(let payload):
-                // Issue #104: the server withdrew a request. Only an approval card changes.
+                // Issue #104, #117: the server withdrew a request. Only the card of that request changes.
                 // The reason can be free text from the approval tool: it stays out of the log.
                 log.info("server request withdrawn: \(payload.method)")
-                if thread.withdrawApproval(serverRequestId: payload.id, reason: payload.reason) { redrawNow() }
+                let approval = thread.withdrawApproval(serverRequestId: payload.id, reason: payload.reason)
+                let prompt = thread.withdrawPrompt(serverRequestId: payload.id, reason: payload.reason)
+                if approval || prompt { redrawNow() }
                 return
             case .approvalCancelled(let payload):
                 log.info("approvals cancelled: \(payload.requestIds.count)")
@@ -390,26 +395,95 @@ public final class ChatViewModel {
         messages.contains { $0.approval?.isWaiting == true }
     }
 
-    /// An `approval` shows a card. `clarify`, `sudo` and `secret` get an error answer at once (a withdrawal), so
-    /// Hermes does not wait, and the chat shows one card line. `replayed` is a request from a resume snapshot.
+    /// An `approval` shows an approval card. Issue #117: `secret`, `sudo` and `clarify` show a prompt card.
+    /// `replayed` is a request from a resume snapshot.
     private func handle(_ request: GatewayServerRequest, sessionId: String, replayed: Bool) {
-        guard let approval = request.approval else {
-            rejectUnsupported(request)
+        if let approval = request.approval {
+            showApproval(ChatApprovalCard(request: approval, serverRequestId: request.id, sessionId: sessionId),
+                         replayed: replayed)
             return
         }
-        showApproval(ChatApprovalCard(request: approval, serverRequestId: request.id, sessionId: sessionId),
-                     replayed: replayed)
+        guard let card = ChatPromptCard(request: request, sessionId: sessionId) else { return }
+        showPrompt(card, method: request.method)
     }
 
-    private func rejectUnsupported(_ request: GatewayServerRequest) {
-        // The method only: never the params (a sudo command, a secret prompt).
-        log.notice("server request not supported: \(request.method)")
-        if let card = UnsupportedServerRequest.card(for: request.kind) { addCommandCard(card) }
-        guard let requests = transport as? any ServerRequestTransport else { return }
-        let id = request.id
-        Task {
-            try? await requests.rejectServerRequest(id, code: UnsupportedServerRequest.errorCode,
-                                                    message: UnsupportedServerRequest.errorMessage)
+    /// Issue #117: adds the prompt card. A clarify request with no question that the owner can answer ends at once
+    /// with no answers (desktop `server-requests.ts:clarify`).
+    private func showPrompt(_ card: ChatPromptCard, method: String) {
+        if case .clarify = card.kind, card.openQuestions.isEmpty {
+            guard let requests = transport as? any ServerRequestTransport else { return }
+            let id = card.serverRequestId
+            let locked: [String: String?]? = if case .clarify(_, let locked) = card.kind, !locked.isEmpty { locked } else { nil }
+            Task { try? await requests.answerClarify(requestId: id, answers: locked, outcome: "submitted") }
+            return
+        }
+        let id = makeId()
+        guard thread.addPrompt(id: id, card: card, date: now()) else { return }
+        // The method only: never the prompt, the env var name or the command.
+        log.info("prompt shown: card \(id), method \(method)")
+        redrawNow()
+        promptAlertId = id
+    }
+
+    /// Issue #117: Send on a secret or a password card. The value goes on the JSON-RPC id of the request. The card
+    /// keeps no copy of it, and the value never goes to a log. If the answer does not go, the empty field shows
+    /// again with "Not sent. Try again.". Returns the task (tests wait for it).
+    @discardableResult
+    public func answerPrompt(id: String, value: String) -> Task<Void, Never>? {
+        guard let card = thread.message(id: id)?.prompt, card.isWaiting, card.isSecure, !value.isEmpty,
+              let requests = transport as? any ServerRequestTransport else { return nil }
+        let requestId = card.serverRequestId
+        return sendPrompt(id: id) { try await requests.answerValue(requestId: requestId, value: value) }
+    }
+
+    /// Issue #117: Send on a question card. `typed` holds one answer for each open question, by `qid`.
+    @discardableResult
+    public func answerClarify(id: String, typed: [String: String]) -> Task<Void, Never>? {
+        guard let card = thread.message(id: id)?.prompt, card.isWaiting, let answers = card.clarifyAnswers(typed),
+              let requests = transport as? any ServerRequestTransport else { return nil }
+        let requestId = card.serverRequestId
+        return sendPrompt(id: id) {
+            try await requests.answerClarify(requestId: requestId, answers: answers, outcome: "submitted")
+        }
+    }
+
+    /// Issue #117: Cancel on a prompt card. A secret or a password gets an error answer (a withdrawal). A question
+    /// gets a result with no answers (cancel-all, `ClarifyResult`). The card shows "Cancelled".
+    @discardableResult
+    public func cancelPrompt(id: String) -> Task<Void, Never>? {
+        guard let card = thread.message(id: id)?.prompt, card.isWaiting,
+              let requests = transport as? any ServerRequestTransport else { return nil }
+        thread.setPromptState(.cancelled, id: id)
+        redrawNow()
+        log.info("prompt cancelled: card \(id)")
+        let requestId = card.serverRequestId
+        let secure = card.isSecure
+        return Task {
+            if secure {
+                try? await requests.rejectServerRequest(requestId, code: ChatPromptCard.cancelErrorCode,
+                                                        message: ChatPromptCard.cancelErrorMessage)
+            } else {
+                try? await requests.answerClarify(requestId: requestId, answers: nil, outcome: "cancelled")
+            }
+        }
+    }
+
+    private func sendPrompt(id: String, _ send: @escaping @Sendable () async throws -> Void) -> Task<Void, Never> {
+        thread.setPromptState(.sending, id: id)
+        redrawNow()
+        log.info("prompt answered: card \(id)")
+        return Task {
+            let sent: Bool
+            do {
+                try await send()
+                sent = true
+            } catch {
+                sent = false
+            }
+            guard thread.message(id: id)?.prompt?.state == .sending else { return }
+            if !sent { log.notice("prompt answer not sent: card \(id)") }
+            thread.setPromptState(sent ? .sent : .waiting, sendFailed: !sent, id: id)
+            redrawNow()
         }
     }
 
@@ -438,8 +512,9 @@ public final class ChatViewModel {
     /// closed: it shows "This request expired".
     private func applySnapshot(_ ref: ChatSessionRef) {
         var open = Set<String>()
+        var openPrompts = Set<JSONRPCID>()
         for request in ref.openRequests ?? [] {
-            if let approval = request.approval { open.insert(approval.requestId) }
+            if let approval = request.approval { open.insert(approval.requestId) } else { openPrompts.insert(request.id) }
             handle(request, sessionId: ref.liveId, replayed: true)
         }
         if let pending = ref.pendingApproval {
@@ -447,6 +522,8 @@ public final class ChatViewModel {
             showApproval(ChatApprovalCard(request: pending, serverRequestId: nil, sessionId: ref.liveId), replayed: true)
         }
         if ref.openRequests != nil, thread.expireApprovals(notIn: open) { redrawNow() }
+        // Issue #117: a prompt keeps its JSON-RPC id across a reconnect (`server.py:666-680`).
+        if ref.openRequests != nil, thread.expirePrompts(notIn: openPrompts) { redrawNow() }
     }
 
     /// Issue #104: `approval.pending` after an open. It lists every approval that waits, also the ones after the

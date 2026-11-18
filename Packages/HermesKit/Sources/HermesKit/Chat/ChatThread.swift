@@ -158,6 +158,53 @@ public struct ChatThread: Sendable, Equatable {
         return false
     }
 
+    // MARK: Prompts (issue #117)
+
+    /// Shows the card of one prompt at the end of the thread. A request that a card shows already (a replay after
+    /// a reconnect) changes nothing. Returns `true` when a new card shows.
+    @discardableResult
+    public mutating func addPrompt(id: String, card: ChatPromptCard, date: Date) -> Bool {
+        if let index = messages.firstIndex(where: { $0.prompt?.serverRequestId == card.serverRequestId }) {
+            messages[index].prompt?.sessionId = card.sessionId
+            return false
+        }
+        messages.append(ChatMessage(id: id, role: .assistant, text: "", date: date, prompt: card))
+        return true
+    }
+
+    public mutating func setPromptState(_ state: ChatPromptCard.State, sendFailed: Bool = false, id: String) {
+        guard let index = index(of: id), messages[index].prompt != nil else { return }
+        messages[index].prompt?.state = state
+        messages[index].prompt?.sendFailed = sendFailed
+    }
+
+    /// `request.cancel {id, method, reason}` for a prompt. A timeout marks a waiting card "This request expired".
+    /// Other reasons remove it. A card that the owner answered keeps its result.
+    @discardableResult
+    public mutating func withdrawPrompt(serverRequestId: String, reason: String) -> Bool {
+        guard let index = messages.firstIndex(where: { $0.prompt?.serverRequestId == .string(serverRequestId) }),
+              messages[index].prompt?.isWaiting == true else { return false }
+        if reason == "timeout" {
+            messages[index].prompt?.state = .expired
+        } else {
+            messages.remove(at: index)
+        }
+        return true
+    }
+
+    /// After a resume: a waiting card that `open_requests` does not list any more ended while the socket was
+    /// closed.
+    @discardableResult
+    public mutating func expirePrompts(notIn open: Set<JSONRPCID>) -> Bool {
+        var changed = false
+        for index in messages.indices {
+            guard let card = messages[index].prompt, card.isWaiting, !open.contains(card.serverRequestId) else { continue }
+            messages[index].prompt?.state = .expired
+            changed = true
+        }
+        return changed
+    }
+
     public mutating func setUpload(_ upload: ChatAttachment.Upload, attachment: String, message id: String,
                                    refText: String? = nil, sessionId: String? = nil) {
         guard let index = index(of: id),
@@ -209,7 +256,7 @@ public struct ChatThread: Sendable, Equatable {
     public mutating func react(_ tapback: Tapback, id: String) -> Bool {
         guard let index = index(of: id) else { return false }
         let message = messages[index]
-        guard message.delivery != .sending, message.reply != .streaming, message.approval == nil else { return false }
+        guard message.delivery != .sending, message.reply != .streaming, !message.isLocalCard else { return false }
         messages[index].tapback = message.tapback == tapback ? nil : tapback
         return true
     }

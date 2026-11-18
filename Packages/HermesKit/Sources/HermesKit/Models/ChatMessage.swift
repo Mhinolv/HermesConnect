@@ -57,12 +57,16 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
     public var quote: ChatQuote?
     /// Issue #104: a local approval card (`.assistant`, no `reply`). It never goes to the cache.
     public var approval: ChatApprovalCard?
+    /// Issue #117: a local secret, password or question card (`.assistant`, no `reply`). It never goes to the
+    /// cache and never holds the answer.
+    public var prompt: ChatPromptCard?
 
     public init(id: String, role: Role, text: String, date: Date, delivery: Delivery? = nil,
                 reply: Reply? = nil, userRowId: Int? = nil, promptId: String? = nil, voice: VoiceMemo? = nil,
                 attachments: [ChatAttachment] = [], spokenReply: SpokenReply? = nil,
                 agentAck: AgentAck? = nil, tapback: Tapback? = nil, command: ChatCommandCard? = nil,
-                quote: ChatQuote? = nil, approval: ChatApprovalCard? = nil) {
+                quote: ChatQuote? = nil, approval: ChatApprovalCard? = nil,
+                prompt: ChatPromptCard? = nil) {
         self.id = id
         self.role = role
         self.text = text
@@ -79,11 +83,12 @@ public struct ChatMessage: Identifiable, Sendable, Equatable {
         self.command = command
         self.quote = quote
         self.approval = approval
+        self.prompt = prompt
     }
 
-    /// Issue #67, #104: a command card or an approval card. Local cards keep their place by date in a history
-    /// merge and take no tapback or quote.
-    public var isLocalCard: Bool { command != nil || approval != nil }
+    /// Issue #67, #104, #117: a command card, an approval card or a prompt card. Local cards keep their place by
+    /// date in a history merge and take no tapback or quote.
+    public var isLocalCard: Bool { command != nil || approval != nil || prompt != nil }
 
     public var isFailed: Bool {
         if delivery == .failed { return true }

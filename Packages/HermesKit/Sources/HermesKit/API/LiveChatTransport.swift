@@ -299,6 +299,15 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
         try await readyClient().pendingApprovals(sessionId: sessionId)
     }
 
+    /// Issue #117: the value goes on the current socket and is not kept. It never goes to a log.
+    public func answerValue(requestId: JSONRPCID, value: String) async throws {
+        try await readyClient().answerValue(requestId: requestId, value: value)
+    }
+
+    public func answerClarify(requestId: JSONRPCID, answers: [String: String?]?, outcome: String) async throws {
+        try await readyClient().answerClarify(requestId: requestId, answers: answers, outcome: outcome)
+    }
+
     // MARK: SessionsTransport
 
     public func fetchSessions() async throws -> [SessionListItem] {

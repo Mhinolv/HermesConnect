@@ -72,6 +72,32 @@ final class FakeApprovalTransport: ChatTransport, ServerRequestTransport, @unche
     }
 
     func pendingApprovals(sessionId _: String) async throws -> [ApprovalRequest] { lock.withLock { pending } }
+
+    struct ValueSent: Equatable {
+        var id: JSONRPCID
+        var value: String
+    }
+
+    struct ClarifySent: Equatable {
+        var id: JSONRPCID
+        var answers: [String: String?]?
+        var outcome: String
+    }
+
+    private var _values: [ValueSent] = []
+    private var _clarifies: [ClarifySent] = []
+    var failValue = false
+    var values: [ValueSent] { lock.withLock { _values } }
+    var clarifies: [ClarifySent] { lock.withLock { _clarifies } }
+
+    func answerValue(requestId: JSONRPCID, value: String) async throws {
+        lock.withLock { _values.append(ValueSent(id: requestId, value: value)) }
+        if lock.withLock({ failValue }) { throw Failure() }
+    }
+
+    func answerClarify(requestId: JSONRPCID, answers: [String: String?]?, outcome: String) async throws {
+        lock.withLock { _clarifies.append(ClarifySent(id: requestId, answers: answers, outcome: outcome)) }
+    }
 }
 
 @MainActor
@@ -198,7 +224,7 @@ final class FakeApprovalTransport: ChatTransport, ServerRequestTransport, @unche
             "choices": .array([.string("once"), .string("deny")]),
         ]))
         let clarify = try GatewayServerRequest(id: .string("srq-10"), method: "clarify",
-                                               params: .object(["session_id": .string("s2")]))
+                                               params: .object(["session_id": .string("s2"), "questions": .array([])]))
         transport.resumeRef = ChatSessionRef(liveId: "s2", storedId: "st1", openRequests: [open, clarify],
                                              pendingApproval: ApprovalRequest(sessionId: "s2", requestId: "a1",
                                                                               command: Self.command))
@@ -213,7 +239,10 @@ final class FakeApprovalTransport: ChatTransport, ServerRequestTransport, @unche
         #expect(cards.first?.serverRequestId == .string("srq-9"))
         #expect(cards.last?.serverRequestId == nil)
         #expect(alerts == 0, "a replay posts no notification")
-        #expect(transport.rejects.map(\.0) == [.string("srq-10")])
+        // Issue #117: a clarify with no question that the owner can answer ends at once with no answers.
+        try await waitUntil { !transport.clarifies.isEmpty }
+        #expect(transport.clarifies == [.init(id: .string("srq-10"), answers: nil, outcome: "submitted")])
+        #expect(transport.rejects.isEmpty)
 
         let second = try #require(vm.messages.first { $0.approval?.requestId == "a2" }?.id)
         await vm.answerApproval(id: second, choice: .once)?.value
@@ -268,23 +297,6 @@ final class FakeApprovalTransport: ChatTransport, ServerRequestTransport, @unche
         let cards = vm.messages.compactMap(\.approval)
         #expect(cards.map(\.state) == [.waiting, .cancelled])
         #expect(cards.last?.resultText == "Denied")
-    }
-
-    @Test(arguments: ["clarify", "sudo", "secret"])
-    func otherRequestsGetAnErrorAtOnceAndOneLine(method: String) async throws {
-        let transport = FakeApprovalTransport()
-        let vm = model(transport)
-        let request = try GatewayServerRequest(id: .string("srq-3"), method: method, params: .object([
-            "session_id": .string("s1"), "command": .string(Self.command), "prompt": .string("Token?"),
-        ]))
-        vm.receive(.serverRequest(request))
-        try await waitUntil { !transport.rejects.isEmpty }
-        #expect(transport.rejects.map(\.0) == [.string("srq-3")])
-        #expect(transport.rejects.first?.1 == -32601)
-        #expect(vm.messages.count == 1)
-        #expect(vm.messages.first?.command != nil)
-        #expect(vm.messages.first?.approval == nil)
-        #expect(!vm.messages.contains { $0.text.contains(Self.command) })
     }
 
     @Test func cardStaysOutOfTheCacheAndKeepsItsPlaceInAHistoryMerge() throws {
