@@ -136,6 +136,47 @@ import UIKit
     }
 }
 
+/// Issue #95: the text of select mode and its partial-failure alert.
+@MainActor
+@Suite struct ChatSelectTests {
+    @Test func theTitleAndTheArchiveLabelCountTheSelection() {
+        #expect(ChatSelectText.title(0) == "Select Chats")
+        #expect(ChatSelectText.title(3) == "3 Selected")
+        #expect(ChatSelectText.archiveLabel(1) == "Archive 1 chat")
+        #expect(ChatSelectText.archiveLabel(3) == "Archive 3 chats")
+        #expect(ChatSelectText.announcement(3) == "3 chats archived")
+        #expect(ChatSelectText.announcement(1) == "1 chat archived")
+        #expect(ChatSelectText.selectAll == "Select All")
+        #expect(ChatSelectText.deselectAll == "Deselect All")
+    }
+
+    @Test func theFailureAlertFollowsTheDesignNotes() {
+        let some = BatchArchiveFailure(archived: 3, failed: 2)
+        #expect(some.title == "Couldn't Archive 2 Chats")
+        #expect(some.message == "3 chats were archived. The other 2 are back in the list.")
+        let one = BatchArchiveFailure(archived: 1, failed: 1)
+        #expect(one.title == "Couldn't Archive Chat")
+        #expect(one.message == "1 chat was archived. The other chat is back in the list.")
+        let none = BatchArchiveFailure(archived: 0, failed: 4)
+        #expect(none.title == "Couldn't Archive 4 Chats")
+        #expect(none.message == "No chats were archived. Try again later.")
+    }
+
+    @Test func theMenuStartsSelectModeOnlyWithChatRows() {
+        let rows = [SessionListItem(id: "k1", title: "Trip", source: "ios")]
+        for cached in [rows, []] {
+            let model = SessionListModel(transport: OfflineChatTransport(), chatTransport: OfflineChatTransport(),
+                                         cache: InMemorySessionCacheStore(sessions: cached))
+            let host = UIHostingController(rootView: NavigationStack {
+                SessionListScreen(model: model)
+            }.environment(AppModel.preview(setUp: true)))
+            host.view.frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+            host.view.layoutIfNeeded()
+            #expect(host.view.bounds.width == 402)
+        }
+    }
+}
+
 /// Issue #64: the texts and states of rename, archive and delete.
 @MainActor
 @Suite struct SessionActionsUITests {
