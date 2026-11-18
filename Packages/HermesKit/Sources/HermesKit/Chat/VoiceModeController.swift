@@ -342,6 +342,13 @@ public final class VoiceModeController {
         }
     }
 
+    /// Issue #101, Magic Tap: the clip ends now and goes to Hermes, with no wait for the silence.
+    /// A clip with no speech gets no transcript, so listening starts again.
+    public func sendClip() {
+        guard state == .listening, let current = clip, !current.monitor else { return }
+        endClip()
+    }
+
     // MARK: Clock
 
     private func startTicker() {
