@@ -95,8 +95,8 @@ enum BackgroundRefresh {
         let server = model.profile.map { NotificationServer($0, serverCount: model.servers.count) }
         let result = await sessions.catchUp(showsPreview: notifications.showsPreview, notifier: notifications.poster,
                                             server: server, setsBadge: false)
-        // Issue #83: the app icon badge counts the unread sessions of all servers.
-        if result != nil { notifications.setBadge(model.badgeCount(activeUnread: sessions.unreadCount)) }
+        // Issue #83, #122: the app icon badge counts the unread chats of all servers.
+        if result != nil { notifications.setBadge(model.badgeCount(sessions)) }
         return result != nil
     }
 
@@ -121,7 +121,7 @@ enum BackgroundRefresh {
             // The server menu and the app icon badge count the new replies of that server.
             model.recordServerState(ServerStateBook.Entry(cachedRows: cache.loadSessions(),
                                                           outbox: cache.outboxSessionIds()), for: id)
-            notifications.setBadge(model.badgeCount(activeUnread: sessions.unreadCount))
+            notifications.setBadge(model.badgeCount(sessions))
             return true
         }
     }

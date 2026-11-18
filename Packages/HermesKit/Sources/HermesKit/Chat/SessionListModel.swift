@@ -137,7 +137,7 @@ public final class SessionListModel {
         if openChatModel === chat { openChatModel = nil }
     }
 
-    /// Issue #15: the number of sessions with the blue dot. The app badge shows it.
+    /// Issue #15: the number of sessions with the blue dot, cron runs too. Issue #122: the app badge uses `chatsUnreadCount`.
     public var unreadCount: Int { sessions.filter(\.isUnread).count }
 
     // MARK: Cron runs (issue #73)
@@ -148,7 +148,7 @@ public final class SessionListModel {
     /// The badge of the Chats tab.
     public var chatsUnreadCount: Int { chatRows.filter(\.isUnread).count }
 
-    /// The cron runs with the blue dot. The Jobs tab shows them on the job rows, and its badge counts them.
+    /// The cron runs that the owner did not open. Issue #122: no badge or dot shows them, and no badge counts them.
     public var unreadCronRuns: [SessionListItem] { sessions.filter { $0.isCronRun && $0.isUnread } }
 
     /// Issue #15: the owner opened the session. Its blue dot goes away.
