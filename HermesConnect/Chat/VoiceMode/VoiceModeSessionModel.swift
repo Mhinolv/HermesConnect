@@ -1,6 +1,7 @@
 import AVFoundation
 import HermesKit
 import Observation
+import Synchronization
 import UIKit
 
 /// Issue #96: the app side of the voice mode engine. It has no views, so the #101 Voice tab can use it as is.
@@ -17,7 +18,8 @@ final class VoiceModeSessionModel {
     /// Issue #101: `tuning` turns off speech barge-in while VoiceOver runs.
     convenience init(speech: any VoiceStreamTransport, microphone: AVVoiceModeMicrophone = AVVoiceModeMicrophone(),
                      tuning: VoiceModeTuning = VoiceModeTuning()) {
-        let player = microphone.player
+        // Issue #127: each reply checks the output route before it plays.
+        let player = microphone.replyPlayer
         self.init(controller: VoiceModeController(
             microphone: microphone, player: player,
             makeSpeech: { try await speech.makeStreamedSpeech(player: $0) },
@@ -56,16 +58,44 @@ final class VoiceModeSessionModel {
     }
 }
 
-/// The microphone of voice mode: `AVAudioRecorder` with the memo settings of #9 (`AVVoiceRecorder.settings`).
-/// The audio session stays active for the whole loop: `.playAndRecord` with `.voiceChat`, so the echo of
-/// the reply is lower for barge-in. Bluetooth and the speaker work. Other audio ducks.
+/// The microphone of voice mode. The audio session stays active for the whole loop (`.playAndRecord`, `.voiceChat`).
+/// Bluetooth and the speaker work. Other audio ducks.
+///
+/// Issue #127: one `AVAudioEngine` holds the microphone and the reply. Its input runs voice processing
+/// (`setVoiceProcessingEnabled`), so the reply is the processed output: voice processing takes it out of the
+/// microphone signal (barge-in) and does not duck it as other audio. Before, `AVAudioRecorder` ran the voice
+/// processing and the reply played on a second engine, so the reply was ducked and sounded like the earpiece.
+/// The clip is the processed input, with the memo settings of #9 (`AVVoiceRecorder.settings`).
+/// `VoiceAudioRoute` keeps a receiver-only route on the speaker and writes the route diagnostics.
+/// `HERMES_AUDIO_VP=0` turns voice processing off, for device checks only.
 @MainActor
 final class AVVoiceModeMicrophone: VoiceModeMicrophone {
-    /// The reply player. It stops with the session.
-    let player = AVAudioEnginePCMPlayer()
-    private var recorder: AVAudioRecorder?
+    let engine = AVAudioEngine()
+    /// The reply player, on `engine`. It stops with the session.
+    let player: AVAudioEnginePCMPlayer
+    let route: VoiceAudioRoute
+    /// `player` with the route check before each reply.
+    private(set) lazy var replyPlayer: any StreamedSpeechPlaying = VoiceRoutePlayer(base: player) { [route] in
+        route.beforeReply()
+    }
+    /// The engine of the microphone: the engine of the reply too.
+    var captureEngine: AVAudioEngine? { engine }
+
+    private let input = VoiceEngineInput()
+    private let processing = VoiceProcessingBox()
+    private let usesVoiceProcessing: Bool
+    private var observers: [NSObjectProtocol] = []
+    private var active = false
 
     struct StartFailed: Error {}
+
+    init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+        player = AVAudioEnginePCMPlayer(engine: engine)
+        usesVoiceProcessing = environment["HERMES_AUDIO_VP"] != "0"
+        let processing = processing
+        route = VoiceAudioRoute(session: SystemVoiceAudioSession(), processing: { processing.value.withLock { $0 } },
+                                environment: environment)
+    }
 
     var access: VoiceModeMicrophoneAccess {
         switch AVAudioApplication.shared.recordPermission {
@@ -80,45 +110,251 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
     }
 
     func activate() throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .voiceChat,
-                                options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
-        try session.setActive(true)
+        try route.activate()
+        try startEngine()
+        active = true
+        guard observers.isEmpty else { return }
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil,
+                                            queue: .main) { [route] note in
+            let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
+                .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+            route.routeChanged(reason: reason.map(SystemVoiceAudioSession.name) ?? "unknown")
+        })
+        // A route change stops the engine. The loop goes on: the tap gets the new input format.
+        observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine,
+                                            queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.active else { return }
+                try? self.startEngine()
+            }
+        })
     }
 
     func deactivate() {
+        active = false
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
         discardClip()
+        engine.inputNode.removeTap(onBus: 0)
         player.shutdown()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
-    func startClip(url: URL) throws {
-        recorder?.stop()
-        let recorder = try AVAudioRecorder(url: url, settings: AVVoiceRecorder.settings)
-        recorder.isMeteringEnabled = true
-        guard recorder.record() else {
-            recorder.deleteRecording()
-            throw StartFailed()
+    /// Voice processing can change only while the engine stops (Apple header of `setVoiceProcessingEnabled`).
+    private func startEngine() throws {
+        let inputNode = engine.inputNode
+        if !engine.isRunning, usesVoiceProcessing, !inputNode.isVoiceProcessingEnabled {
+            do {
+                try inputNode.setVoiceProcessingEnabled(true)
+            } catch {
+                HermesLog(category: "audio").notice("voice processing failed: \((error as NSError).code)")
+            }
         }
-        self.recorder = recorder
+        var status = VoiceProcessingStatus.off
+        if inputNode.isVoiceProcessingEnabled {
+            // Our reply is the voice stream. Other audio (music, on-device speech) ducks as little as it can.
+            inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+            status = VoiceProcessingStatus(enabled: true, ducking: "min")
+        }
+        processing.value.withLock { $0 = status }
+        _ = engine.mainMixerNode
+        inputNode.removeTap(onBus: 0)
+        Self.installInputTap(on: inputNode, input: input)
+        if !engine.isRunning {
+            engine.prepare()
+            try engine.start()
+        }
+        route.engineStarted()
+    }
+
+    /// Puts the tap on `node` (the engine input). AVFAudio calls the block on its own audio queue.
+    /// Issue #127 round 3: the block must not have main actor isolation. A block made in this `@MainActor`
+    /// class gets it, and the Swift runtime check traps on the audio queue. So the function is `nonisolated`,
+    /// the block is `@Sendable`, and it touches only `VoiceEngineInput` (lock-protected).
+    nonisolated static func installInputTap(on node: AVAudioNode, input: VoiceEngineInput) {
+        node.installTap(onBus: 0, bufferSize: 1_024, format: node.outputFormat(forBus: 0),
+                        block: inputTap(for: input))
+    }
+
+    nonisolated private static func inputTap(for input: VoiceEngineInput) -> AVAudioNodeTapBlock {
+        { @Sendable buffer, _ in input.receive(buffer) }
+    }
+
+    func startClip(url: URL) throws {
+        guard engine.isRunning else { throw StartFailed() }
+        try input.start(url: url, settings: AVVoiceRecorder.settings)
     }
 
     func stopClip() -> TimeInterval {
-        let duration = recorder?.currentTime ?? 0
-        recorder?.stop()
-        recorder = nil
-        return duration
+        input.stop()
     }
 
     func discardClip() {
-        recorder?.stop()
-        recorder?.deleteRecording()
-        recorder = nil
+        input.discard()
     }
 
     func level() -> Float {
-        guard let recorder, recorder.isRecording else { return VoiceWaveform.floorDecibels }
-        recorder.updateMeters()
-        return recorder.averagePower(forChannel: 0)
+        input.level() ?? VoiceWaveform.floorDecibels
+    }
+}
+
+/// The voice processing status for the diagnostics. The route reads it from any thread.
+final class VoiceProcessingBox: Sendable {
+    let value = Mutex(VoiceProcessingStatus.off)
+}
+
+/// Issue #127: the clip of the engine input. The audio thread calls `receive`. The main actor calls the rest.
+/// The samples go to the clip file and the meter. They never go to a log.
+final class VoiceEngineInput: @unchecked Sendable {
+    private let lock = NSLock()
+    private let meter = VoiceInputMeter()
+    private var file: AVAudioFile?
+    private var url: URL?
+    private var converter: AVAudioConverter?
+    private var frames: AVAudioFramePosition = 0
+
+    /// Opens a new clip in `url` (AAC, `AVVoiceRecorder.settings`).
+    func start(url: URL, settings: [String: Any]) throws {
+        let file = try AVAudioFile(forWriting: url, settings: settings,
+                                   commonFormat: .pcmFormatFloat32, interleaved: false)
+        let old = lock.withLock { () -> (AVAudioFile?, URL?) in
+            defer {
+                self.file = file
+                self.url = url
+                converter = nil
+                frames = 0
+            }
+            return (self.file, self.url)
+        }
+        old.0?.close()
+        meter.reset()
+    }
+
+    /// Closes the clip. Returns its length in seconds.
+    func stop() -> TimeInterval {
+        let (file, frames) = lock.withLock { () -> (AVAudioFile?, AVAudioFramePosition) in
+            defer {
+                self.file = nil
+                url = nil
+            }
+            return (self.file, self.frames)
+        }
+        guard let file else { return 0 }
+        file.close()
+        return Double(frames) / file.processingFormat.sampleRate
+    }
+
+    /// Closes the clip and deletes its file.
+    func discard() {
+        let (file, url) = lock.withLock { () -> (AVAudioFile?, URL?) in
+            defer {
+                self.file = nil
+                self.url = nil
+            }
+            return (self.file, self.url)
+        }
+        file?.close()
+        if let url { try? FileManager.default.removeItem(at: url) }
+    }
+
+    /// The level of the open clip in dBFS. `nil` with no clip.
+    func level() -> Float? {
+        guard lock.withLock({ file != nil }) else { return nil }
+        return meter.level()
+    }
+
+    /// One buffer of the input. Channel 0 is the processed voice.
+    func receive(_ buffer: AVAudioPCMBuffer) {
+        lock.withLock {
+            guard let file, let channel = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
+            meter.record(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+            guard let converted = convert(buffer, to: file.processingFormat) else { return }
+            do {
+                try file.write(from: converted)
+                frames += AVAudioFramePosition(converted.frameLength)
+            } catch {
+                HermesLog(category: "audio").notice("voice clip write failed: \((error as NSError).code)")
+            }
+        }
+    }
+
+    /// Mono at the clip rate. Call it with the lock held.
+    private func convert(_ buffer: AVAudioPCMBuffer, to format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        if buffer.format == format { return buffer }
+        if converter?.inputFormat != buffer.format {
+            converter = AVAudioConverter(from: buffer.format, to: format)
+            if buffer.format.channelCount > 1 { converter?.channelMap = [0] }
+        }
+        guard let converter else { return nil }
+        let ratio = format.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount((Double(buffer.frameLength) * ratio).rounded(.up)) + 32
+        guard let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else { return nil }
+        var fed = false
+        var error: NSError?
+        let status = converter.convert(to: output, error: &error) { _, inputStatus in
+            if fed {
+                inputStatus.pointee = .noDataNow
+                return nil
+            }
+            fed = true
+            inputStatus.pointee = .haveData
+            return buffer
+        }
+        guard status != .error, output.frameLength > 0 else { return nil }
+        return output
+    }
+}
+
+/// Issue #127: `AVAudioSession.sharedInstance()` for `VoiceAudioRoute`. It keeps no state.
+final class SystemVoiceAudioSession: VoiceAudioSession {
+    var routeState: VoiceAudioRouteState {
+        let session = AVAudioSession.sharedInstance()
+        return VoiceAudioRouteState(outputs: session.currentRoute.outputs.map(\.portType.rawValue),
+                                    category: session.category.rawValue, mode: session.mode.rawValue,
+                                    options: Self.names(session.categoryOptions), volume: session.outputVolume)
+    }
+
+    func setVoiceCategory(mode: VoiceAudioMode) throws {
+        let sessionMode: AVAudioSession.Mode = switch mode {
+        case .voiceChat: .voiceChat
+        case .videoChat: .videoChat
+        case .default: .default
+        }
+        try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: sessionMode,
+                                                        options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
+    }
+
+    func setActive(_ active: Bool) throws {
+        try AVAudioSession.sharedInstance().setActive(active)
+    }
+
+    func overrideOutputToSpeaker() throws {
+        try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
+    }
+
+    static func names(_ options: AVAudioSession.CategoryOptions) -> [String] {
+        let known: [(AVAudioSession.CategoryOptions, String)] = [
+            (.mixWithOthers, "mixWithOthers"), (.duckOthers, "duckOthers"),
+            (.allowBluetoothHFP, "allowBluetoothHFP"), (.defaultToSpeaker, "defaultToSpeaker"),
+            (.interruptSpokenAudioAndMixWithOthers, "interruptSpokenAudio"),
+            (.allowBluetoothA2DP, "allowBluetoothA2DP"), (.allowAirPlay, "allowAirPlay"),
+        ]
+        return known.filter { options.contains($0.0) }.map(\.1)
+    }
+
+    static func name(_ reason: AVAudioSession.RouteChangeReason) -> String {
+        switch reason {
+        case .newDeviceAvailable: "newDeviceAvailable"
+        case .oldDeviceUnavailable: "oldDeviceUnavailable"
+        case .categoryChange: "categoryChange"
+        case .override: "override"
+        case .wakeFromSleep: "wakeFromSleep"
+        case .noSuitableRouteForCategory: "noSuitableRouteForCategory"
+        case .routeConfigurationChange: "routeConfigurationChange"
+        case .unknown: "unknown"
+        @unknown default: "other\(reason.rawValue)"
+        }
     }
 }
