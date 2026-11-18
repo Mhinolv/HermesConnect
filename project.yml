@@ -19,6 +19,10 @@ packages:
   FluidAudio:
     url: https://github.com/FluidInference/FluidAudio
     exactVersion: 0.18.3
+  # Issue #98: GPT-Live over WebRTC. BSD-3-Clause, no telemetry. Binary xcframework of Google WebRTC M156.
+  WebRTC:
+    url: https://github.com/stasel/WebRTC
+    exactVersion: 156.0.0
 targets:
   HermesConnect:
     type: application
@@ -28,13 +32,14 @@ targets:
       - package: HermesKit
       - package: MessageKit
       - package: FluidAudio
+      - package: WebRTC
     info:
       path: HermesConnect/Resources/Info.plist
       properties:
         CFBundleDisplayName: Hermes
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
-        NSMicrophoneUsageDescription: Hermes records voice memos that you send to your agent.
+        NSMicrophoneUsageDescription: Hermes records voice memos that you send to your agent, and uses the microphone in Live voice mode.
         NSPhotoLibraryUsageDescription: Hermes attaches photos that you choose to your messages.
         NSCameraUsageDescription: Hermes uses the camera to take photos that you send to your agent.
         NSSpeechRecognitionUsageDescription: Hermes transcribes your voice memos and audio files on this iPhone.

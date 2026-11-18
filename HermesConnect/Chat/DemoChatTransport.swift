@@ -692,8 +692,12 @@ extension DemoChatTransport: SessionActionsTransport {
         try await Task.sleep(for: .milliseconds(300))
     }
 
-    func setSessionArchived(storedId _: String, archived _: Bool) async throws {
+    func setSessionArchived(storedId: String, archived _: Bool) async throws {
         try await Task.sleep(for: .milliseconds(300))
+        // Issue #95: the partial-failure screenshot.
+        if ChatSelectDemo.current == .failure, ChatSelectDemo.failingIds.contains(storedId) {
+            throw GatewayError.rpc(code: 5007, message: "database is locked")
+        }
     }
 
     func closeSession(liveId _: String) async throws {}

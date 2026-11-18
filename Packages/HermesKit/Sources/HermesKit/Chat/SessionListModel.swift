@@ -405,6 +405,62 @@ public final class SessionListModel {
         }
     }
 
+    /// Issue #95: archives many chats in one action (select mode). Every row leaves the list at once.
+    /// - The calls go one at a time. A failure does not stop the others (owner decision).
+    /// - A failed row comes back in its place. A row that archives counts like #64 (Archived count and list).
+    /// - A server switch stops the run: the rows of the old server do not come back into the new list.
+    /// Ids with no row in the list are skipped.
+    public func archive(_ ids: [String]) async -> BatchArchiveResult {
+        var seen: Set<String> = []
+        let wanted = ids.filter { seen.insert($0).inserted }
+        let wantedIds = Set(wanted)
+        let places = Dictionary(sessions.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
+        let removed = sessions.enumerated().filter { wantedIds.contains($0.element.id) }
+        let order = removed.map(\.element.id)
+        guard !order.isEmpty else { return BatchArchiveResult() }
+        guard let actions else { return BatchArchiveResult(failed: order) }
+        let current = generation
+        let removing = Set(order)
+        sessions.removeAll { removing.contains($0.id) }
+        cache.saveSessions(sessions)
+        pendingRemovals.formUnion(removing)
+        defer { if current == generation { pendingRemovals.subtract(removing) } }
+        var result = BatchArchiveResult()
+        for id in order {
+            guard current == generation else {
+                result.interrupted = true
+                return result
+            }
+            do {
+                try await actions.setSessionArchived(storedId: id, archived: true)
+                result.archived.append(id)
+            } catch {
+                result.failed.append(id)
+            }
+        }
+        guard current == generation else {
+            result.interrupted = true
+            return result
+        }
+        // The failed rows come back in their places: after the nearest row that was above them.
+        let failed = Set(result.failed)
+        for entry in removed where failed.contains(entry.element.id) && !sessions.contains(where: { $0.id == entry.element.id }) {
+            let above = sessions.lastIndex { places[$0.id].map { $0 < entry.offset } ?? false }
+            sessions.insert(entry.element, at: above.map { $0 + 1 } ?? 0)
+        }
+        if !failed.isEmpty { cache.saveSessions(sessions) }
+        let archived = Set(result.archived)
+        // QA #76: launch and Ask Hermes open the active id. An archived chat must not open there.
+        if let active = cache.loadActiveSessionId(), archived.contains(active) { cache.saveActiveSessionId(nil) }
+        archivedCount += archived.count
+        if hasLoadedArchived {
+            let shown = Set(archivedSessions.map(\.id))
+            let rows = removed.map(\.element).filter { archived.contains($0.id) && !shown.contains($0.id) }
+            archivedSessions.insert(contentsOf: rows, at: 0)
+        }
+        return result
+    }
+
     /// Unarchives a session from the Archived list. A failure puts the row back and throws.
     /// On success the main list loads again, so the row shows in its place.
     public func unarchive(_ id: String) async throws {
@@ -562,6 +618,53 @@ public final class SessionListModel {
         chat.startEvents()
         chats[key] = chat
         return chat
+    }
+}
+
+/// Issue #95: the answer of a batch archive.
+public struct BatchArchiveResult: Sendable, Equatable {
+    /// The archived ids, in list order.
+    public var archived: [String]
+    /// The ids that the server did not archive. Their rows are back in the list.
+    public var failed: [String]
+    /// A server switch stopped the run. The app shows no alert.
+    public var interrupted: Bool
+
+    public init(archived: [String] = [], failed: [String] = [], interrupted: Bool = false) {
+        self.archived = archived
+        self.failed = failed
+        self.interrupted = interrupted
+    }
+}
+
+/// Issue #95: the selection of the Chats select mode. `List(selection:)` binds `ids`.
+public struct ChatSelection: Sendable, Equatable {
+    public var ids: Set<String>
+
+    public init(ids: Set<String> = []) {
+        self.ids = ids
+    }
+
+    /// The selected rows that show, in list order. The title count and "Archive" use them.
+    public func selected(in rows: [SessionListItem]) -> [String] {
+        rows.map(\.id).filter(ids.contains)
+    }
+
+    /// Every row that shows is selected. Then the leading button is "Deselect All".
+    public func allSelected(_ rows: [SessionListItem]) -> Bool {
+        !rows.isEmpty && rows.allSatisfy { ids.contains($0.id) }
+    }
+
+    /// "Select All" selects the rows that show (the search matches). "Deselect All" clears them.
+    public mutating func toggleAll(_ rows: [SessionListItem]) {
+        let shown = Set(rows.map(\.id))
+        if allSelected(rows) { ids.subtract(shown) } else { ids.formUnion(shown) }
+    }
+
+    /// A chat that leaves the list leaves the selection. A new row is not selected.
+    public mutating func keep(only rows: [SessionListItem]) {
+        let kept = ids.intersection(rows.map(\.id))
+        if kept != ids { ids = kept }
     }
 }
 
