@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 @testable import HermesKit
 
@@ -451,6 +452,91 @@ private final class FakeHermes: LiveModeHermes {
         h.clock.advance(30)
         h.controller.tick()
         #expect(h.controller.phase == .failed)
+    }
+
+    // MARK: Issue #109: a new start after each end
+
+    @Test func threeStartAndEndCyclesInARowAllConnect() async throws {
+        var made: [FakeConnection] = []
+        let service = FakeLiveService()
+        let controller = LiveModeController(service: service, hermes: FakeHermes(),
+                                            makeConnection: { let next = FakeConnection(); made.append(next); return next },
+                                            autoTick: false, closeDelay: .zero)
+        for cycle in 1...3 {
+            controller.start()
+            let connection = try #require(made.last)
+            try await settle { !connection.answers.isEmpty }
+            connection.emit(.connected)
+            #expect(controller.phase == .live, "cycle \(cycle)")
+            controller.end(.hangUp)
+            #expect(controller.phase == .idle)
+            #expect(connection.closed)
+            #expect(connection.sentTypes.last == "session.close")
+        }
+        #expect(made.count == 3)
+        #expect(service.offers.count == 3)
+        // A late event from an old peer does not touch the new session.
+        controller.start()
+        made[0].emit(.failed)
+        #expect(controller.phase == .connecting)
+    }
+
+    @Test func tryAgainAfterAnICEFailureConnects() async throws {
+        var made: [FakeConnection] = []
+        let controller = LiveModeController(service: FakeLiveService(), hermes: FakeHermes(),
+                                            makeConnection: { let next = FakeConnection(); made.append(next); return next },
+                                            autoTick: false, closeDelay: .zero)
+        controller.start()
+        try await settle { made.last?.answers.isEmpty == false }
+        made[0].emit(.failed)
+        #expect(controller.phase == .failed)
+        #expect(controller.failure == "Could not reach OpenAI (ICE failed).")
+        #expect(made[0].closed)
+        controller.start()
+        try await settle { made.count == 2 && made[1].answers.isEmpty == false }
+        made[1].emit(.connected)
+        #expect(controller.phase == .live)
+    }
+
+    @Test func errorLineNamesTheFailedStep() async throws {
+        let h = harness()
+        h.connection.offerError = LiveModeError.step(.audioSession, code: 561_017_449)
+        h.controller.start()
+        try await settle { h.controller.phase == .failed }
+        #expect(h.controller.failure == "Could not start the microphone (audio session).")
+        #expect(h.service.offers.isEmpty)
+
+        let lost = try await live()
+        lost.connection.emit(.channelClosed)
+        #expect(lost.controller.failure == "The connection to Live mode was lost (data channel closed).")
+
+        let timeout = harness()
+        timeout.controller.start()
+        try await settle { !timeout.connection.answers.isEmpty }
+        timeout.clock.advance(30)
+        timeout.controller.tick()
+        #expect(timeout.controller.failure == "Could not reach OpenAI (timed out).")
+
+        #expect(LiveModeController.failureText(HermesAPIError.http(status: 500), step: .session)
+                == "The server refused Live mode (HTTP 500).")
+        #expect(LiveModeController.failureText(GatewayError.notConnected, step: .session)
+                == "Could not reach Hermes (session request).")
+        #expect(LiveModeController.failureText(LiveModeError.step(.answer, code: -1), step: .answer)
+                == "Could not use the answer from OpenAI (SDP answer).")
+    }
+
+    @Test func logShowsTheFailedStepAndCodeButNoSDPOrToken() async throws {
+        let entries = Mutex<[HermesLog.Entry]>([])
+        let id = HermesLog.addObserver { entry in entries.withLock { $0.append(entry) } }
+        defer { HermesLog.removeObserver(id) }
+        let h = harness()
+        h.service.error = HermesAPIError.http(status: 500)
+        h.controller.start()
+        try await settle { h.controller.phase == .failed }
+        #expect(h.controller.failure == "The server refused Live mode (HTTP 500).")
+        let lines = entries.withLock { $0 }.filter { $0.category == "live-mode" }.map(\.message)
+        #expect(lines.contains("live start failed at session: HTTP 500"))
+        #expect(!lines.contains { $0.contains("v=0") || $0.contains("answer-sdp") || $0.lowercased().contains("token") })
     }
 
     @Test func serverCloseEndsTheSession() async throws {
