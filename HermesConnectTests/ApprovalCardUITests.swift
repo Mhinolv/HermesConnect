@@ -119,4 +119,49 @@ import UserNotifications
         #expect(denyFrame.maxY <= card.maxY + 0.5, "the Deny button is inside the card")
         #expect(card.maxY <= visibleBottom + 1, "card \(card), visible bottom \(visibleBottom)")
     }
+
+    /// Issue #111: a real hit test at the center of each button, and of the cut command, finds that view.
+    /// The #104 tests called the actions directly, so they did not see that touches never got to the buttons.
+    @Test func hitTestOnTheCardFindsEachButtonAndTheCommand() throws {
+        let start = Date(timeIntervalSince1970: 1_763_290_000)
+        let messages = [
+            ChatMessage(id: "u1", role: .user, text: "Move my dentist visit", date: start, delivery: .delivered),
+            ChatMessage(id: "ap1", role: .assistant, text: "", date: start.addingTimeInterval(5),
+                        approval: ChatApprovalCard(request: request, serverRequestId: .string("srq-1"))),
+        ]
+        let model = ChatViewModel(transport: OfflineChatTransport(), messages: messages)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ApprovalCardUITests")
+        let controller = ChatViewController(model: model, recorder: FakeVoiceRecorder(), voiceFolder: folder)
+        controller.autoPlayEnabled = { false }
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        let collection = controller.messagesCollectionView
+        controller.view.layoutIfNeeded()
+        collection.layoutIfNeeded()
+        let last = collection.numberOfSections - 1
+        let cell = try #require(collection.cellForItem(at: IndexPath(item: 0, section: last)) as? ChatApprovalCell)
+        cell.layoutIfNeeded()
+        #expect(cell.buttons.count == 4)
+        var chosen: [ApprovalChoice] = []
+        cell.onChoice = { chosen.append($0) }
+        for button in cell.buttons {
+            let center = button.convert(CGPoint(x: button.bounds.midX, y: button.bounds.midY), to: window)
+            let hit = window.hitTest(center, with: nil)
+            let found = hit.map { $0 === button || $0.isDescendant(of: button) } ?? false
+            #expect(found, "hit test at \(center) found \(String(describing: hit)), not \(button.accessibilityLabel ?? "")")
+            // A tap on a button: UIKit gives the touch to the button, so the thread tap does not start.
+            for tap in collection.gestureRecognizers ?? [] {
+                guard let tap = tap as? UITapGestureRecognizer, tap.isEnabled, tap.numberOfTapsRequired == 1,
+                      tap.numberOfTouchesRequired == 1, tap.cancelsTouchesInView else { continue }
+                #expect(!button.gestureRecognizerShouldBegin(tap), "a thread tap takes the touch")
+            }
+            (hit as? UIControl ?? button).sendActions(for: .primaryActionTriggered)
+        }
+        #expect(chosen == [.once, .session, .always, .deny])
+        let command = cell.commandLabel
+        let center = command.convert(CGPoint(x: command.bounds.midX, y: command.bounds.midY), to: window)
+        #expect(window.hitTest(center, with: nil) === command, "the cut command takes the tap")
+    }
 }
