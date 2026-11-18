@@ -27,6 +27,9 @@ final class VoiceTabModel {
     /// Issue #102: the owner refused the microphone. The tab shows "Microphone Access Off".
     var liveMicrophoneDenied = false
     @ObservationIgnored private var seenLiveEnd = 0
+    /// Issue #121: the Hermes prompts of the session chat, shown and spoken on the tab. `nil` while no session runs.
+    private(set) var prompts: VoicePromptCoordinator?
+    @ObservationIgnored private let makePromptVoice: @MainActor () -> any VoicePromptVoice
 
     @ObservationIgnored let sessions: SessionListModel
     @ObservationIgnored private let makeSession: @MainActor () -> VoiceModeSessionModel?
@@ -40,12 +43,15 @@ final class VoiceTabModel {
     ///   - makeSession: a new voice session for the active server. `nil` when there is no link (DEBUG demo).
     ///   - liveService: the `voice-live` calls (#97). `nil`: Live is not available.
     ///   - makeLive: a new live session in a chat. Tests give a fake connection. No test opens a real session.
+    ///   - makePromptVoice: issue #121, on-device speech and STT for prompt lines. Tests give a fake.
     init(sessions: SessionListModel, store: VoiceTargetStore = VoiceTargetStore(),
          modeStore: VoiceTabModeStore = VoiceTabModeStore(), liveService: (any LiveModeService)? = nil,
          makeSession: @escaping @MainActor () -> VoiceModeSessionModel? = { nil },
          makeLive: @escaping @MainActor (ChatViewModel, any LiveModeService) -> LiveModeSessionModel = {
              LiveModeSessionModel(hermes: $0, service: $1)
-         }) {
+         },
+         makePromptVoice: @escaping @MainActor () -> any VoicePromptVoice = { OnDevicePromptVoice() }) {
+        self.makePromptVoice = makePromptVoice
         self.sessions = sessions
         self.store = store
         self.modeStore = modeStore
@@ -84,11 +90,21 @@ final class VoiceTabModel {
     var clipEndCount: Int { controller?.clipEndCount ?? 0 }
 
     /// Issue #120: the line under the ring shows the tool that runs now in the session chat.
-    var display: VoiceTabDisplay { display(tool: sessionChat?.runningTool) }
+    var display: VoiceTabDisplay { withPrompt(loopDisplay(tool: sessionChat?.runningTool)) }
     /// Issue #120: the mini bar does not show the tool.
-    var miniBarDisplay: VoiceTabDisplay { display(tool: nil) }
+    var miniBarDisplay: VoiceTabDisplay { withPrompt(loopDisplay(tool: nil)) }
 
-    private func display(tool: String?) -> VoiceTabDisplay {
+    /// Issue #121: a card waits. The title says so, the ring follows the prompt step, and Mute is off.
+    private func withPrompt(_ display: VoiceTabDisplay) -> VoiceTabDisplay {
+        guard let prompts, prompts.item != nil else { return display }
+        return .prompt(prompts.phase, over: display)
+    }
+
+    /// Issue #121: the card that waits on the tab, and its step.
+    var promptItem: VoicePromptItem? { prompts?.item }
+    var promptPhase: VoicePromptPhase { prompts?.phase ?? .waiting }
+
+    private func loopDisplay(tool: String?) -> VoiceTabDisplay {
         if let live = liveController, let display = VoiceTabDisplay.live(
             phase: live.phase, muted: live.muted, speaking: live.speaking, idleWarning: live.idleWarning,
             stillWorking: live.stillWorking, failure: live.failure, tool: tool) {
@@ -187,6 +203,7 @@ final class VoiceTabModel {
         liveToast = nil
         seenLiveEnd = live.controller.lastEnd?.serial ?? 0
         await live.start()
+        if live.controller.isActive { startPrompts(chat, hold: live.controller) }
         // The gate refreshed the status. A server that turned Live off shows it in the picker.
         if let status = live.status { liveAvailability = .init(status: status) }
         if live.isOlderServer { liveAvailability = .olderServer }
@@ -198,6 +215,7 @@ final class VoiceTabModel {
     /// Ends the live session at once. The toast shows "Live Mode Ended, m:ss".
     func endLive(_ reason: LiveModeEndReason = .hangUp) {
         guard let live else { return }
+        stopPrompts()
         live.end(reason)
         noteLiveEnd()
         if !live.controller.isActive { self.live = nil }
@@ -214,6 +232,7 @@ final class VoiceTabModel {
 
     /// The view calls it when the live session is no longer active: the model drops it.
     func liveDidStop() {
+        stopPrompts()
         noteLiveEnd()
         if let live, !live.controller.isActive { self.live = nil }
     }
@@ -233,6 +252,47 @@ final class VoiceTabModel {
         clipEndsAtBargeIn = nil
         seenBargeIns = 0
         await session.start(in: chat)
+        if session.controller.state.isActive { startPrompts(chat, hold: session.controller) }
+    }
+
+    // MARK: Prompts (issue #121)
+
+    private func startPrompts(_ chat: ChatViewModel, hold: any VoicePromptHolding) {
+        let prompts = self.prompts ?? VoicePromptCoordinator(voice: makePromptVoice())
+        prompts.onStop = { [weak self] in self?.end() }
+        self.prompts = prompts
+        prompts.start(chat: chat, hold: hold)
+    }
+
+    /// The session ended: the card hides from the tab. The chat keeps it.
+    func stopPrompts() {
+        prompts?.stop()
+    }
+
+    /// A tap on a choice of the approval card on the tab.
+    func answerPrompt(_ choice: ApprovalChoice) {
+        guard let id = promptItem?.id else { return }
+        sessionChat?.answerApproval(id: id, choice: choice)
+        prompts?.refresh()
+    }
+
+    /// Send on a secret or a password card. The value goes from the field to the chat, and nowhere else.
+    func sendPrompt(value: String) {
+        guard let id = promptItem?.id else { return }
+        sessionChat?.answerPrompt(id: id, value: value)
+        prompts?.refresh()
+    }
+
+    func sendPrompt(typed: [String: String]) {
+        guard let id = promptItem?.id else { return }
+        sessionChat?.answerClarify(id: id, typed: typed)
+        prompts?.refresh()
+    }
+
+    func cancelPrompt() {
+        guard let id = promptItem?.id else { return }
+        sessionChat?.cancelPrompt(id: id)
+        prompts?.refresh()
     }
 
     private func targetChat() -> ChatViewModel {
@@ -250,6 +310,7 @@ final class VoiceTabModel {
 
     /// End: the microphone closes and the audio session is released. In Live, the live session ends.
     func end() {
+        stopPrompts()
         if live != nil {
             endLive(.hangUp)
             return
@@ -276,6 +337,8 @@ final class VoiceTabModel {
     }
 
     func ringTap() async {
+        // Issue #121: the card takes the answer. A tap on the ring does nothing while it shows.
+        if promptItem != nil { return }
         if let liveController, isLiveRunning {
             if VoiceTabDisplay.liveRingTap(liveController.phase) == .resume { await tryAgainLive() }
             return
@@ -285,6 +348,7 @@ final class VoiceTabModel {
 
     /// Live: Magic Tap mutes. Idle in Live mode: it starts a session.
     func magicTap() async {
+        if promptItem != nil { return }
         if isLiveRunning {
             toggleMute()
             return
