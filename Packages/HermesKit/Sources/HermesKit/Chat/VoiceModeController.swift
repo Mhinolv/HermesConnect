@@ -1,0 +1,684 @@
+import Foundation
+import Observation
+
+// Issue #96: voice mode, the hands-free loop of desktop `chained` mode:
+// listen → transcript → `prompt.submit` voice turn → streamed reply → `speak-stream`, then listen again.
+// The app always runs this flow, whatever `voice.voice_chat_mode` the server has (orchestrator decision).
+// No UI here. The #101 Voice tab shows the state.
+
+public enum VoiceModePauseReason: Sendable, Equatable {
+    case call, background, lock
+}
+
+public enum VoiceModeEndReason: Sendable, Equatable {
+    /// The owner tapped End.
+    case end
+    /// The owner said the single word "stop". It is not sent.
+    case stopWord
+    /// 30 s with no speech.
+    case silence
+}
+
+public enum VoiceModeFailure: Error, Sendable, Equatable {
+    /// No microphone permission, or the microphone did not start.
+    case microphoneOff
+    /// No link to the server. A clip that did not get a transcript waits in the outbox.
+    case offline
+    /// The transcription or the Hermes turn failed.
+    case turnFailed
+    /// `speak-stream` and the `POST /api/audio/speak` fallback failed. The reply is in the thread.
+    case speakFailed
+}
+
+/// The engine states for #101 (design notes table).
+public enum VoiceModeState: Sendable, Equatable {
+    case idle
+    /// The microphone records. `level` is the mic level.
+    case listening
+    case transcribing
+    /// The Hermes turn runs. `thinkingSeconds` counts up.
+    case thinking
+    /// The reply plays. `level` is the output level.
+    case speaking
+    /// Barge-in stops the reply. Listening follows at once.
+    case interrupted
+    case muted
+    /// The microphone is closed and the reply is silent. `resume()` listens again.
+    case paused(VoiceModePauseReason)
+    case ended(VoiceModeEndReason)
+    /// The microphone is closed. `resume()` tries again. `end()` exits.
+    case error(VoiceModeFailure)
+
+    /// `true` from `start` until `end`.
+    public var isActive: Bool {
+        switch self {
+        case .idle, .ended: false
+        default: true
+        }
+    }
+}
+
+/// How the chat took one voice turn.
+public enum VoiceModeTurnResult: Sendable, Equatable {
+    /// `prompt.submit` took the turn. `promptId` is the id of the memo bubble.
+    case delivered(promptId: String)
+    /// Offline: the memo waits in the outbox.
+    case queued
+    /// The server refused the turn. The memo shows "Not Delivered".
+    case failed
+}
+
+/// The target chat of voice mode: the active chat, a new chat, or a chat that the owner picks.
+/// `ChatViewModel` conforms. Each turn is a normal #9 memo bubble and a #10 reply in it.
+@MainActor
+public protocol VoiceModeChat: AnyObject {
+    /// The #44 memo engines: on-device first, `POST /api/audio/transcribe` as the fallback.
+    func transcribeVoiceClip(at url: URL) async throws -> String
+    /// Adds the memo bubble with its transcript and sends it as a voice turn.
+    func sendVoiceModeTurn(_ memo: VoiceMemo, transcript: String) async -> VoiceModeTurnResult
+    func replyProgress(promptId: String) -> LiveReplyProgress
+    /// The audio that played. The reply bubble shows it as its #10 voice reply.
+    func attachVoiceModeAudio(_ audio: SpokenAudio, promptId: String)
+    /// A clip with no transcript: the normal memo path keeps it (outbox when offline, "Try Again" on a failure).
+    @discardableResult func sendVoiceMemo(_ memo: VoiceMemo) -> Task<Void, Never>
+}
+
+/// The limits of the loop. Tests make the times short.
+public struct VoiceModeTuning: Sendable, Equatable {
+    /// A level at or above this is speech.
+    public var speechDecibels: Float = -40
+    /// Speech must last this long before a clip counts as speech. A click does not.
+    public var speechOnsetSeconds: TimeInterval = 0.15
+    /// About 3 s of silence after speech ends a clip (server `silence_duration`).
+    public var clipSilenceSeconds: TimeInterval = 3
+    /// 30 s with no speech ends voice mode (orchestrator decision).
+    public var idleEndSeconds: TimeInterval = 30
+    /// The server `max_recording_seconds`.
+    public var maxClipSeconds: TimeInterval = 120
+    /// The microphone stays open while the reply plays, so the owner can talk over it.
+    public var autoBargeIn = true
+    /// Barge-in needs a louder level than a clip, so the reply echo does not stop the reply.
+    public var bargeInDecibels: Float = -25
+    public var bargeInSeconds: TimeInterval = 0.3
+    /// 30 ticks a second: the levels for #101.
+    public var tickInterval: Duration = .milliseconds(33)
+
+    public init() {}
+}
+
+public enum VoiceModeText {
+    /// The single word "stop", with any case and punctuation.
+    public static func isStopWord(_ transcript: String) -> Bool {
+        transcript.lowercased().filter { $0.isLetter || $0.isNumber || $0.isWhitespace }
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "stop"
+    }
+}
+
+/// The voice mode engine (issue #96). One hands-free session at a time, for one target chat.
+///
+/// - Listen: the clip ends after about 3 s of silence that follows speech. 30 s with no speech ends the loop.
+/// - The clip goes to the #44 engines (server whisper as the fallback). "stop" ends the loop and is not sent.
+/// - The transcript goes as a voice turn in the target chat. The reply streams into `speak-stream` (#97).
+/// - Barge-in sends `{"stop":true}` and listens again. A call, background or Lock pauses the loop and closes the mic.
+/// - The log gets ids, counts and states. Never the clip, the transcript, the reply or the audio.
+@MainActor @Observable
+public final class VoiceModeController {
+    public private(set) var state: VoiceModeState = .idle
+    public private(set) var muted = false
+    /// From 0 to 1: the mic level while listening, the output level while speaking, else 0.
+    public private(set) var level: Float = 0
+    /// Seconds since the turn went to Hermes. #101 shows "Still working…" after 10 s.
+    public private(set) var thinkingSeconds = 0
+    /// One more each time a clip ends on silence. #101 plays the soft tone.
+    public private(set) var clipEndCount = 0
+    /// One more on each barge-in.
+    public private(set) var bargeInCount = 0
+
+    public typealias SpeechFactory = @MainActor (any StreamedSpeechPlaying) async throws -> any VoiceModeSpeaking
+
+    @ObservationIgnored private let microphone: any VoiceModeMicrophone
+    @ObservationIgnored private let player: any StreamedSpeechPlaying
+    @ObservationIgnored private let makeSpeech: SpeechFactory
+    @ObservationIgnored private let makeClipURL: @MainActor () -> URL
+    @ObservationIgnored private let removeFile: @MainActor (URL) -> Void
+    @ObservationIgnored private let clock: @Sendable () -> TimeInterval
+    @ObservationIgnored private let autoTick: Bool
+    @ObservationIgnored public let tuning: VoiceModeTuning
+    @ObservationIgnored private weak var chat: (any VoiceModeChat)?
+
+    /// One more on each start and end. A task of an older session changes nothing.
+    @ObservationIgnored private var epoch = 0
+    @ObservationIgnored private var starting = false
+    @ObservationIgnored private var sessionActive = false
+    @ObservationIgnored private var clip: Clip?
+    @ObservationIgnored private var turn: Turn?
+    @ObservationIgnored private var turnSerial = 0
+    @ObservationIgnored private var idleSince: TimeInterval = 0
+    @ObservationIgnored private var tickTask: Task<Void, Never>?
+    @ObservationIgnored private let log = HermesLog(category: "voice-mode")
+
+    private struct Clip {
+        var url: URL
+        var startedAt: TimeInterval
+        /// `true` for the clip that records while the reply plays (barge-in).
+        var monitor: Bool
+        var levels: [Float] = []
+        var voiceSince: TimeInterval?
+        var heardSpeech = false
+        var lastVoiceAt: TimeInterval = 0
+    }
+
+    private enum SpeechCommand: Sendable {
+        case append(String)
+        case finish
+    }
+
+    private struct Turn {
+        var id: Int
+        var startedAt: TimeInterval
+        var promptId: String?
+        var tap: VoiceModeSpeechTap
+        var speech: (any VoiceModeSpeaking)?
+        var makingSpeech = false
+        /// Characters of the reply that went to the speaker.
+        var sentCount = 0
+        var finished = false
+        var commands: AsyncStream<SpeechCommand>.Continuation?
+    }
+
+    /// - Parameters:
+    ///   - makeSpeech: a speaker for one reply. The app passes `VoiceStreamTransport.makeStreamedSpeech`.
+    ///   - clock: seconds on a monotonic clock.
+    ///   - autoTick: `false` in tests. The test calls `tick()`.
+    public init(microphone: any VoiceModeMicrophone, player: any StreamedSpeechPlaying,
+                makeSpeech: @escaping SpeechFactory,
+                makeClipURL: @escaping @MainActor () -> URL,
+                removeFile: @escaping @MainActor (URL) -> Void = { try? FileManager.default.removeItem(at: $0) },
+                tuning: VoiceModeTuning = VoiceModeTuning(),
+                clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+                autoTick: Bool = true) {
+        self.microphone = microphone
+        self.player = player
+        self.makeSpeech = makeSpeech
+        self.makeClipURL = makeClipURL
+        self.removeFile = removeFile
+        self.tuning = tuning
+        self.clock = clock
+        self.autoTick = autoTick
+    }
+
+    // MARK: Start and end
+
+    /// Starts a hands-free session in `chat`. It asks for the microphone first when iOS has not asked yet.
+    public func start(chat: any VoiceModeChat) async {
+        guard !state.isActive, !starting else { return }
+        starting = true
+        defer { starting = false }
+        epoch += 1
+        let epoch = epoch
+        self.chat = chat
+        muted = false
+        level = 0
+        thinkingSeconds = 0
+        clip = nil
+        turn = nil
+        switch microphone.access {
+        case .granted:
+            break
+        case .denied:
+            return setFailure(.microphoneOff)
+        case .undetermined:
+            let allowed = await microphone.requestAccess()
+            guard self.epoch == epoch else { return }
+            guard allowed else { return setFailure(.microphoneOff) }
+        }
+        guard activateSession() else { return setFailure(.microphoneOff) }
+        log.info("voice mode started")
+        idleSince = clock()
+        listen()
+        if autoTick { startTicker() }
+    }
+
+    /// The End button. The microphone closes and the audio session is released.
+    public func end() {
+        end(.end)
+    }
+
+    private func end(_ reason: VoiceModeEndReason) {
+        guard state.isActive else { return }
+        epoch += 1
+        silenceTurn()
+        closeMicrophone()
+        tickTask?.cancel()
+        tickTask = nil
+        deactivateSession()
+        level = 0
+        state = .ended(reason)
+        log.info("voice mode ended: \(String(describing: reason))")
+    }
+
+    /// A call, background or Lock. The microphone closes and the reply stops. A turn in flight still goes to
+    /// the chat, so its reply shows in the thread. A new reason replaces the old one (background, then Lock).
+    public func pause(_ reason: VoiceModePauseReason) {
+        guard state.isActive else { return }
+        if case .paused = state {
+            state = .paused(reason)
+            return
+        }
+        silenceTurn()
+        closeMicrophone()
+        deactivateSession()
+        level = 0
+        state = .paused(reason)
+        log.info("voice mode paused: \(String(describing: reason))")
+    }
+
+    /// Listens again after a pause or an error.
+    public func resume() {
+        switch state {
+        case .paused, .error: break
+        default: return
+        }
+        if microphone.access != .granted { return setFailure(.microphoneOff) }
+        guard activateSession() else { return setFailure(.microphoneOff) }
+        idleSince = clock()
+        listen()
+        if autoTick, tickTask == nil { startTicker() }
+    }
+
+    public func toggleMute() {
+        switch state {
+        case .idle, .ended, .paused, .error: return
+        default: break
+        }
+        muted.toggle()
+        log.info("voice mode muted: \(muted)")
+        if muted {
+            switch state {
+            case .listening:
+                closeMicrophone()
+                level = 0
+                state = .muted
+            case .speaking:
+                closeMicrophone()
+            default:
+                break
+            }
+        } else {
+            switch state {
+            case .muted:
+                idleSince = clock()
+                listen()
+            case .speaking:
+                startMonitor()
+            default:
+                break
+            }
+        }
+    }
+
+    /// Barge-in: the reply stops (`{"stop":true}`) and the next listen turn opens. A tap on the ring calls it,
+    /// and so does speech over the reply.
+    public func bargeIn() {
+        guard state == .speaking, let current = turn else { return }
+        bargeInCount += 1
+        turn = nil
+        current.commands?.finish()
+        // The clip of the barge-in monitor stays open: it holds the start of the owner's words.
+        clip?.monitor = false
+        state = .interrupted
+        level = 0
+        log.info("voice mode barge-in")
+        let epoch = epoch
+        Task { [weak self] in
+            await current.speech?.stop()
+            guard let self, self.epoch == epoch, self.state == .interrupted else { return }
+            self.idleSince = self.clock()
+            if self.clip != nil, !self.muted {
+                self.state = .listening
+            } else {
+                self.listen()
+            }
+        }
+    }
+
+    // MARK: Clock
+
+    private func startTicker() {
+        tickTask?.cancel()
+        let interval = tuning.tickInterval
+        tickTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                guard let self, !Task.isCancelled else { return }
+                self.tick()
+            }
+        }
+    }
+
+    /// Runs 30 times a second: the levels, the silence rules, the reply stream and barge-in.
+    public func tick() {
+        let time = clock()
+        switch state {
+        case .listening:
+            listenTick(time)
+        case .thinking:
+            // A small margin keeps whole seconds whole on a clock that adds 1/30 s steps.
+            let seconds = max(0, Int(time - (turn?.startedAt ?? time) + 0.001))
+            if seconds != thinkingSeconds { thinkingSeconds = seconds }
+            pumpReply()
+        case .speaking:
+            pumpReply()
+            guard state == .speaking, let turn else { return }
+            setLevel(turn.tap.level(at: time))
+            monitorTick(time)
+        default:
+            break
+        }
+    }
+
+    private func setLevel(_ value: Float) {
+        if value != level { level = value }
+    }
+
+    // MARK: Listen
+
+    private func listen() {
+        guard !muted else {
+            closeMicrophone()
+            level = 0
+            state = .muted
+            return
+        }
+        let url = makeClipURL()
+        do {
+            try microphone.startClip(url: url)
+        } catch {
+            return setFailure(.microphoneOff)
+        }
+        clip = Clip(url: url, startedAt: clock(), monitor: false)
+        state = .listening
+    }
+
+    private func listenTick(_ time: TimeInterval) {
+        guard var current = clip else { return }
+        let decibels = microphone.level()
+        let value = VoiceWaveform.level(decibels: decibels)
+        setLevel(value)
+        current.levels.append(value)
+        if decibels >= tuning.speechDecibels {
+            let since = current.voiceSince ?? time
+            current.voiceSince = since
+            if time - since >= tuning.speechOnsetSeconds { current.heardSpeech = true }
+            current.lastVoiceAt = time
+        } else {
+            current.voiceSince = nil
+        }
+        clip = current
+        if current.heardSpeech {
+            if time - current.lastVoiceAt >= tuning.clipSilenceSeconds || time - current.startedAt >= tuning.maxClipSeconds {
+                endClip()
+            }
+        } else if time - idleSince >= tuning.idleEndSeconds {
+            end(.silence)
+        }
+    }
+
+    /// About 3 s of silence after speech: the clip goes to the transcript step.
+    private func endClip() {
+        guard let current = clip, let chat else { return }
+        clip = nil
+        let duration = microphone.stopClip()
+        clipEndCount += 1
+        level = 0
+        state = .transcribing
+        let memo = VoiceMemo(fileURL: current.url, duration: duration, waveform: VoiceWaveform.bars(from: current.levels))
+        log.info("voice mode clip ended: \(Int(duration)) s")
+        let epoch = epoch
+        Task { [weak self] in await self?.runTurn(memo, chat: chat, epoch: epoch) }
+    }
+
+    private func runTurn(_ memo: VoiceMemo, chat: any VoiceModeChat, epoch: Int) async {
+        let transcript: String
+        do {
+            transcript = try await chat.transcribeVoiceClip(at: memo.fileURL)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            guard self.epoch == epoch else { return removeFile(memo.fileURL) }
+            // The owner never loses a recording: the normal memo path keeps the clip.
+            chat.sendVoiceMemo(memo)
+            log.notice("voice mode transcript failed")
+            if state == .transcribing { setFailure(Outbox.isOffline(error, submitted: false) ? .offline : .turnFailed) }
+            return
+        }
+        guard self.epoch == epoch else { return removeFile(memo.fileURL) }
+        if VoiceModeText.isStopWord(transcript) {
+            removeFile(memo.fileURL)
+            return end(.stopWord)
+        }
+        if transcript.isEmpty {
+            removeFile(memo.fileURL)
+            log.info("voice mode clip had no speech")
+            if state == .transcribing { listen() }
+            return
+        }
+        idleSince = clock()
+        var tracked: Int?
+        if state == .transcribing {
+            turnSerial += 1
+            tracked = turnSerial
+            turn = Turn(id: turnSerial, startedAt: clock(), tap: VoiceModeSpeechTap(player: player, clock: clock))
+            thinkingSeconds = 0
+            state = .thinking
+        }
+        var sent = memo
+        sent.transcript = .done(transcript)
+        let result = await chat.sendVoiceModeTurn(sent, transcript: transcript)
+        guard self.epoch == epoch, let tracked, turn?.id == tracked, state == .thinking else { return }
+        switch result {
+        case .delivered(let promptId):
+            turn?.promptId = promptId
+            log.info("voice mode turn delivered: message \(promptId)")
+            pumpReply()
+        case .queued:
+            turn = nil
+            setFailure(.offline)
+        case .failed:
+            turn = nil
+            setFailure(.turnFailed)
+        }
+    }
+
+    // MARK: Reply
+
+    /// Sends the new reply text to the speaker. The speaker opens with the first text.
+    private func pumpReply() {
+        guard var current = turn, let promptId = current.promptId, let chat else { return }
+        let text: String
+        let done: Bool
+        switch chat.replyProgress(promptId: promptId) {
+        case .waiting:
+            return
+        case .streaming(let streamed):
+            text = streamed
+            done = false
+        case .done(let complete):
+            text = complete
+            done = true
+        case .failed:
+            silenceTurn()
+            return setFailure(.turnFailed)
+        }
+        guard current.speech != nil else {
+            if done, current.sentCount == 0, VoiceReplyText.spokenText(text).isEmpty {
+                // Nothing to speak: listen again.
+                turn = nil
+                return afterReply()
+            }
+            guard !current.makingSpeech, !text.isEmpty else { return }
+            current.makingSpeech = true
+            turn = current
+            openSpeech(for: current)
+            return
+        }
+        let count = text.count
+        if count > current.sentCount {
+            current.commands?.yield(.append(String(text.dropFirst(current.sentCount))))
+            current.sentCount = count
+        }
+        if done, !current.finished {
+            current.finished = true
+            current.commands?.yield(.finish)
+            current.commands?.finish()
+        }
+        turn = current
+    }
+
+    private func openSpeech(for current: Turn) {
+        let epoch = epoch
+        let id = current.id
+        let tap = current.tap
+        let makeSpeech = self.makeSpeech
+        Task { [weak self] in
+            let speech: any VoiceModeSpeaking
+            do {
+                speech = try await makeSpeech(tap)
+            } catch {
+                guard let self, self.epoch == epoch, self.turn?.id == id else { return }
+                self.turn = nil
+                return self.setFailure(SpeechStreamError.from(error) == .offline ? .offline : .speakFailed)
+            }
+            guard let self, self.epoch == epoch, self.turn?.id == id else {
+                await speech.stop()
+                return
+            }
+            // One writer keeps the deltas in order.
+            let (commands, continuation) = AsyncStream.makeStream(of: SpeechCommand.self)
+            self.turn?.speech = speech
+            self.turn?.commands = continuation
+            Task {
+                await speech.start()
+                for await command in commands {
+                    switch command {
+                    case .append(let delta): await speech.append(delta)
+                    case .finish: await speech.finish()
+                    }
+                }
+            }
+            Task { [weak self] in
+                for await speechState in speech.states {
+                    self?.speechChanged(speechState, turn: id, epoch: epoch)
+                }
+            }
+            self.pumpReply()
+        }
+    }
+
+    private func speechChanged(_ speechState: StreamedSpeechState, turn id: Int, epoch: Int) {
+        guard self.epoch == epoch, turn?.id == id else { return }
+        switch speechState {
+        case .speaking:
+            guard state == .thinking else { return }
+            state = .speaking
+            startMonitor()
+        case .ended:
+            finishTurn()
+        case .failed(let reason):
+            turn = nil
+            log.notice("voice mode speech failed")
+            setFailure(reason == .offline ? .offline : .speakFailed)
+        case .preparing, .stopped:
+            break
+        }
+    }
+
+    /// The reply played to its end. The bubble gets the audio. Then the next listen turn opens.
+    private func finishTurn() {
+        guard let current = turn else { return }
+        turn = nil
+        if let promptId = current.promptId, let audio = current.tap.recordedAudio() {
+            chat?.attachVoiceModeAudio(audio, promptId: promptId)
+        }
+        afterReply()
+    }
+
+    private func afterReply() {
+        closeMicrophone()
+        idleSince = clock()
+        level = 0
+        listen()
+    }
+
+    // MARK: Barge-in monitor
+
+    /// While the reply plays, the microphone records, so speech over the reply stops it.
+    private func startMonitor() {
+        guard tuning.autoBargeIn, !muted, clip == nil else { return }
+        let url = makeClipURL()
+        guard (try? microphone.startClip(url: url)) != nil else { return }
+        clip = Clip(url: url, startedAt: clock(), monitor: true)
+    }
+
+    private func monitorTick(_ time: TimeInterval) {
+        guard var current = clip, current.monitor else { return }
+        let decibels = microphone.level()
+        current.levels.append(VoiceWaveform.level(decibels: decibels))
+        if decibels >= tuning.bargeInDecibels {
+            let since = current.voiceSince ?? time
+            current.voiceSince = since
+            if time - since >= tuning.bargeInSeconds {
+                // The owner talks: the kept clip already holds the start of the words.
+                current.heardSpeech = true
+                current.lastVoiceAt = time
+                clip = current
+                return bargeIn()
+            }
+        } else {
+            current.voiceSince = nil
+        }
+        clip = current
+    }
+
+    // MARK: Helpers
+
+    /// Stops the reply of the current turn at once. The Hermes turn goes on in the chat.
+    private func silenceTurn() {
+        guard let current = turn else { return }
+        turn = nil
+        current.commands?.finish()
+        if let speech = current.speech {
+            Task { await speech.stop() }
+        }
+    }
+
+    private func closeMicrophone() {
+        guard clip != nil else { return }
+        clip = nil
+        microphone.discardClip()
+    }
+
+    private func setFailure(_ failure: VoiceModeFailure) {
+        silenceTurn()
+        closeMicrophone()
+        level = 0
+        state = .error(failure)
+        log.notice("voice mode error: \(String(describing: failure))")
+    }
+
+    private func activateSession() -> Bool {
+        guard !sessionActive else { return true }
+        do {
+            try microphone.activate()
+        } catch {
+            return false
+        }
+        sessionActive = true
+        return true
+    }
+
+    private func deactivateSession() {
+        guard sessionActive else { return }
+        sessionActive = false
+        microphone.deactivate()
+    }
+}

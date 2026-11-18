@@ -76,6 +76,8 @@ public final class ChatViewModel {
     @ObservationIgnored private var commandPrompts: [String: String] = [:]
     /// Issue #98: the `voice_context` of each GPT-Live delegation, by message id. These go out with surface `voice-live`.
     @ObservationIgnored private var livePrompts: [String: String] = [:]
+    /// Issue #96: the memos of voice mode. Their replies get the audio that played, not a `POST /api/audio/speak`.
+    @ObservationIgnored private var voiceModePrompts: Set<String> = []
     /// Issue #39: the run that sends the queued messages in order. One run at a time.
     @ObservationIgnored private var outboxTask: Task<Void, Never>?
     /// Issue #12: the downloads of the `MEDIA:` files of this chat.
@@ -391,6 +393,71 @@ public final class ChatViewModel {
         // The owner never loses a recording: the memo is in the cache before the upload starts.
         saveTranscript()
         return Task { await deliverVoice(id: id) }
+    }
+
+    /// Issue #96: the transcript of one voice mode clip, with the #44 engines: on-device first, then
+    /// `POST /api/audio/transcribe`. No bubble shows yet, so a "stop" clip never shows. Throws on a failure.
+    public func transcribeVoiceClip(at url: URL) async throws -> String {
+        let transport = self.transport
+        let loadAudio = self.loadAudio
+        let transcription = self.transcription
+        // The clip and the transcript never go to a log.
+        return try await Task.detached {
+            try await transcription.transcribe(fileURL: url) {
+                try await transport.transcribe(audio: try loadAudio(url), mimeType: VoiceMemoLimits.mimeType)
+            }
+        }.value
+    }
+
+    /// Issue #96: one voice mode turn. The memo bubble shows with its transcript, then goes as a voice turn.
+    /// The voice mode engine speaks the reply with `speak-stream`, so the #10 speak call does not run for it.
+    /// Offline, the memo waits in the outbox, and the #10 rules apply when it goes later.
+    public func sendVoiceModeTurn(_ memo: VoiceMemo, transcript: String) async -> VoiceModeTurnResult {
+        let id = makeId()
+        thread.addOutgoingVoice(id: id, memo: memo, date: now())
+        thread.setTranscript(.done(transcript), id: id)
+        replyQuote = nil
+        voiceModePrompts.insert(id)
+        if let queued = queueBehindOutbox(id) {
+            await queued.value
+        } else {
+            redrawNow()
+            saveTranscript()
+            await deliver(id: id, retryBeforeRowId: nil)
+        }
+        switch thread.message(id: id)?.delivery {
+        case .delivered?:
+            return .delivered(promptId: id)
+        case .queued?:
+            voiceModePrompts.remove(id)
+            return .queued
+        default:
+            voiceModePrompts.remove(id)
+            return .failed
+        }
+    }
+
+    /// Issue #96: the audio that voice mode played becomes the voice reply of the bubble (#10). It does not auto-play.
+    /// Returns the save task (tests wait for it).
+    @discardableResult
+    public func saveVoiceModeAudio(_ audio: SpokenAudio, promptId: String) -> Task<Void, Never>? {
+        guard let reply = thread.messages.last(where: { $0.promptId == promptId && $0.role == .assistant }),
+              reply.spokenReply == nil else { return nil }
+        let id = reply.id
+        let saveSpeech = self.saveSpeech
+        return Task {
+            // The audio never goes to a log.
+            let result: SpokenReply
+            do {
+                result = .ready(try await Task.detached { try saveSpeech(audio) }.value)
+            } catch {
+                return
+            }
+            guard thread.message(id: id)?.spokenReply == nil else { return }
+            thread.setSpokenReply(result, id: id)
+            redrawNow()
+            saveTranscript()
+        }
     }
 
     /// Issue #98: a GPT-Live delegation. The request shows as an owner text bubble and goes out at once as
@@ -895,7 +962,8 @@ public final class ChatViewModel {
     /// A complete reply to a delivered voice memo, with text to speak. A text turn never calls speak.
     private func isVoiceTurnReply(_ id: String) -> Bool {
         guard let reply = thread.message(id: id), reply.reply == .complete, reply.spokenReply == nil,
-              let promptId = reply.promptId, thread.message(id: promptId)?.voice != nil else { return false }
+              let promptId = reply.promptId, thread.message(id: promptId)?.voice != nil,
+              !voiceModePrompts.contains(promptId) else { return false }
         return !VoiceReplyText.spokenText(reply.text).isEmpty
     }
 
