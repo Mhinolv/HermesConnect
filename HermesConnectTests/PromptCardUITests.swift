@@ -198,6 +198,12 @@ final class FakePromptTransport: ChatTransport, ServerRequestTransport, @uncheck
         Issue.record("timed out")
     }
 
+    /// The screen redraws in a later `Task` (`observeModel`), so a new card state reaches the cell after the model.
+    private func waitForResult(_ screen: Screen, _ text: String, card index: Int = 0) async throws -> ChatPromptCell {
+        try await waitUntil { (try? cell(screen, index))?.resultLabel.attributedText?.string == text }
+        return try cell(screen, index)
+    }
+
     @Test func secretCardShowsThePromptTheEnvVarAndAMaskedField() throws {
         let screen = try show([.secret])
         defer { screen.window.isHidden = true }
@@ -236,13 +242,12 @@ final class FakePromptTransport: ChatTransport, ServerRequestTransport, @uncheck
         try tap(send, in: screen.window)
         #expect(field.text?.isEmpty ?? true, "the field is empty after Send")
         #expect(!field.isFirstResponder)
-        try await waitUntil { screen.model.messages.last?.prompt?.state == .sent }
+        let after = try await waitForResult(screen, "Sent")
+        #expect(screen.model.messages.last?.prompt?.state == .sent)
         #expect(screen.transport.values.map(\.0) == [.string("srq-1")])
         #expect(screen.transport.values.map(\.1) == [Self.value])
-        let after = try self.cell(screen)
         #expect(after.fields.isEmpty)
         #expect(after.sendButton == nil)
-        #expect(after.resultLabel.attributedText?.string == "Sent")
         #expect(!String(describing: screen.model.messages).contains(Self.value))
         #expect(!after.messageContainerView.allText.contains(Self.value))
     }
@@ -256,7 +261,7 @@ final class FakePromptTransport: ChatTransport, ServerRequestTransport, @uncheck
         try await waitUntil { !screen.transport.rejects.isEmpty }
         #expect(screen.transport.rejects.map(\.0) == [.string("srq-1")])
         #expect(screen.transport.values.isEmpty)
-        #expect(try self.cell(screen).resultLabel.attributedText?.string == "Cancelled")
+        #expect(try await waitForResult(screen, "Cancelled").fields.isEmpty)
     }
 
     @Test func sudoSendsWithTheReturnKey() async throws {
@@ -319,6 +324,39 @@ final class FakePromptTransport: ChatTransport, ServerRequestTransport, @uncheck
         let after = try cell(screen)
         #expect(after.fields.first?.text == "abc")
         #expect(after.sendButton?.isEnabled == true)
+    }
+
+    /// QA #117 note: a new card while the owner types reloads the thread (`reloadData`). The field keeps the text
+    /// and the focus, so the keyboard stays up.
+    @Test func focusAndTextStayWhenANewCardArrivesWhileTyping() async throws {
+        let screen = try show([.secret])
+        defer { screen.window.isHidden = true }
+        let field = try #require(try cell(screen).fields.first)
+        try type("abc", into: field, in: screen.window)
+        #expect(field.isFirstResponder)
+        screen.model.receive(.serverRequest(try serverRequest(.sudo, id: "srq-2")))
+        try await waitUntil { (try? cell(screen, 1)) != nil }
+        settle(screen.controller)
+        let first = try cell(screen, 0)
+        let typed = try #require(first.fields.first)
+        #expect(typed.text == "abc")
+        #expect(typed.isFirstResponder, "the field of the first card keeps the focus")
+        #expect(try cell(screen, 1).fields.first?.isFirstResponder == false)
+    }
+
+    /// The owner closed the keyboard. A new card does not open it again, and the text stays.
+    @Test func aFieldTheOwnerLeftDoesNotTakeTheFocusBack() async throws {
+        let screen = try show([.secret])
+        defer { screen.window.isHidden = true }
+        let field = try #require(try cell(screen).fields.first)
+        try type("abc", into: field, in: screen.window)
+        #expect(field.resignFirstResponder())
+        screen.model.receive(.serverRequest(try serverRequest(.sudo, id: "srq-2")))
+        try await waitUntil { (try? cell(screen, 1)) != nil }
+        settle(screen.controller)
+        let typed = try #require(try cell(screen, 0).fields.first)
+        #expect(typed.text == "abc")
+        #expect(!typed.isFirstResponder)
     }
 
     @Test func cardGrowsWithTheLargestTextSize() throws {

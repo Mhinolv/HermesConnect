@@ -269,8 +269,14 @@ final class ChatPromptCell: MessageContentCell, UITextFieldDelegate {
     /// Send with the draft. The cell empties its fields first.
     var onSend: ((ChatPromptDraft) -> Void)?
     var onCancel: (() -> Void)?
-    /// A field took the focus. The screen scrolls the card into view.
-    var onFocus: (() -> Void)?
+    /// A field took the focus, with its draft key. The screen scrolls the card into view and keeps the key, so a
+    /// reload of the thread can give the focus back.
+    var onFocus: ((String) -> Void)?
+    /// A field lost the focus: the owner tapped elsewhere, Send or Cancel. A reload does not call it: the cell drops
+    /// its callbacks before it removes its fields.
+    var onBlur: ((String) -> Void)?
+    /// The field that takes the focus once the cell is in the window again (after a reload).
+    private var pendingFocusKey: String?
 
     override func setupSubviews() {
         super.setupSubviews()
@@ -471,8 +477,25 @@ final class ChatPromptCell: MessageContentCell, UITextFieldDelegate {
         onDraftChange?(draft)
     }
 
-    func textFieldDidBeginEditing(_: UITextField) {
-        onFocus?()
+    private func key(of textField: UITextField) -> String? {
+        fields.firstIndex(where: { $0 === textField }).map { fieldKeys[$0] }
+    }
+
+    func textFieldDidBeginEditing(_ textField: UITextField) {
+        guard let key = key(of: textField) else { return }
+        onFocus?(key)
+    }
+
+    func textFieldDidEndEditing(_ textField: UITextField) {
+        guard let key = key(of: textField) else { return }
+        onBlur?(key)
+    }
+
+    /// Issue #117 (QA note): a reload of the thread builds new fields. The field of `key` takes the focus back as
+    /// soon as the cell is in the window, so the keyboard stays up while the owner types.
+    func restoreFocus(_ key: String) {
+        pendingFocusKey = key
+        setNeedsLayout()
     }
 
     func textFieldShouldReturn(_ textField: UITextField) -> Bool {
@@ -512,6 +535,8 @@ final class ChatPromptCell: MessageContentCell, UITextFieldDelegate {
         onSend = nil
         onCancel = nil
         onFocus = nil
+        onBlur = nil
+        pendingFocusKey = nil
         removeControls()
         draft = ChatPromptDraft()
         card = nil
@@ -543,5 +568,9 @@ final class ChatPromptCell: MessageContentCell, UITextFieldDelegate {
         cancelButton?.frame = frames.cancel ?? .zero
         sendButton?.frame = frames.send ?? .zero
         resultLabel.frame = frames.result ?? .zero
+        if let key = pendingFocusKey, window != nil, let index = fieldKeys.firstIndex(of: key) {
+            pendingFocusKey = nil
+            fields[index].becomeFirstResponder()
+        }
     }
 }

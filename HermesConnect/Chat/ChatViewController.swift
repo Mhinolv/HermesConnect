@@ -34,6 +34,12 @@ final class ChatViewController: MessagesViewController {
     private var promptDrafts: [String: ChatPromptDraft] = [:]
     /// Issue #117: the last prompt card that played the haptic.
     private var handledPromptAlertId: String?
+    /// Issue #117 (QA note): the prompt field that has the focus, as card id and draft key. A reload of the thread
+    /// gives the focus back to it.
+    private var focusedPrompt: (id: String, key: String)?
+    /// Issue #117: `true` while `render()` reloads the thread. A reload ends the editing of a prompt field, which
+    /// is not the owner leaving the field.
+    private var reloadingThread = false
     /// Issue #67: the last composer text that the model gave.
     private var handledComposerFillId: String?
     /// Memos whose transcript shows all lines.
@@ -901,6 +907,8 @@ final class ChatViewController: MessagesViewController {
         }
 
         bubbles = next
+        reloadingThread = true
+        defer { reloadingThread = false }
         if old.map(\.messageId) == next.map(\.messageId) {
             let changed = next.indices.filter { old[$0].row != next[$0].row || old[$0].received != next[$0].received }
             if !changed.isEmpty {
@@ -926,6 +934,9 @@ final class ChatViewController: MessagesViewController {
         playPromptHaptic()
         // Issue #117: a card that does not wait any more keeps no draft.
         promptDrafts = promptDrafts.filter { id, _ in model.messages.contains { $0.id == id && $0.prompt?.isWaiting == true } }
+        if let focused = focusedPrompt, !model.messages.contains(where: { $0.id == focused.id && $0.prompt?.isWaiting == true }) {
+            focusedPrompt = nil
+        }
     }
 
     /// Issue #117: a new prompt card plays the `.warning` haptic once. VoiceOver reads the title.
@@ -1623,7 +1634,15 @@ extension ChatViewController: MessagesDataSource {
                 self?.promptDrafts[id] = nil
                 self?.model.cancelPrompt(id: id)
             }
-            cell.onFocus = { [weak self] in self?.scrollToPrompt(id: id) }
+            cell.onFocus = { [weak self] key in
+                self?.focusedPrompt = (id, key)
+                self?.scrollToPrompt(id: id)
+            }
+            cell.onBlur = { [weak self] key in
+                guard let self, !reloadingThread, focusedPrompt?.id == id, focusedPrompt?.key == key else { return }
+                focusedPrompt = nil
+            }
+            if let focused = focusedPrompt, focused.id == id, card.isWaiting { cell.restoreFocus(focused.key) }
             return cell
         }
         if let card = row(for: message)?.message.command {
