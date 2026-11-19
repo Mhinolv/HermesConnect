@@ -430,6 +430,56 @@ public struct ChatThread: Sendable, Equatable {
         return change
     }
 
+    // MARK: Reattach (issue #145)
+
+    /// `true` while a turn runs whose prompt the server took. After a drop the app reattaches to it. A prompt that
+    /// still sends gets "Not Delivered" from its own send.
+    public var canReattach: Bool {
+        guard turn != .idle else { return false }
+        if turn == .waiting, let promptId, message(id: promptId)?.delivery == .sending { return false }
+        return true
+    }
+
+    /// The turn ended while the socket was closed, and `history` has its reply. The turn ends with no failure.
+    /// The partial bubble goes when the history row does not take its id. Returns `false` when `history` has no
+    /// reply to the prompt of the turn.
+    @discardableResult
+    public mutating func finishFromHistory(_ history: [ChatMessage]) -> Bool {
+        guard turn != .idle, let promptId, let prompt = message(id: promptId) else { return false }
+        let reply = history.last { $0.role == .assistant && $0.promptId == promptId }
+            ?? Self.lastReply(in: history, to: prompt.text)
+        guard let reply else { return false }
+        if let replyId, replyId != reply.id { remove(id: replyId) }
+        ackTurnEnd(reply.reply ?? .complete)
+        endTurn()
+        return true
+    }
+
+    /// The reply of the last turn of `history` when the last prompt has this text. For a prompt with no row id.
+    private static func lastReply(in history: [ChatMessage], to text: String) -> ChatMessage? {
+        guard let last = history.last, last.role == .assistant,
+              let prompt = history.last(where: { $0.role == .user }), prompt.text == text else { return nil }
+        return last
+    }
+
+    /// No running turn, no replay and no reply in the history: the prompt shows "Not Delivered" with "Try Again".
+    /// The partial bubble goes. The prompt keeps its row id, so "Try Again" sends it one time.
+    @discardableResult
+    public mutating func reattachFailed() -> ChatThreadChange {
+        guard turn != .idle else { return .none }
+        if let replyId { remove(id: replyId) }
+        if let promptId, let index = index(of: promptId), messages[index].role == .user {
+            messages[index].delivery = .failed
+            messages[index].agentAck = nil
+            ackPromptIds.removeAll { $0 == promptId }
+        }
+        // Issue #11: as `connectionLost`, catch-up sets the final ack of the queued prompts.
+        for id in ackPromptIds { setAck(.failed, on: id) }
+        ackPromptIds = []
+        endTurn()
+        return .structure
+    }
+
     private mutating func applyDelta(_ delta: MessageDeltaPayload, now: Date, makeId: () -> String) -> ChatThreadChange {
         guard let chunk = delta.text else {
             // A segment boundary: later text goes into a new paragraph.

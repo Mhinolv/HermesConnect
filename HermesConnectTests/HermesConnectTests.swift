@@ -512,6 +512,12 @@ private struct FailingKeyStore: DeviceKeyStore {
         #expect(ChatLaunch.subtitle(link: .failed, connection: .connected(gateVersion: "1")) == .chatFailed)
         #expect(ChatLaunch.subtitle(link: .ready, connection: .connected(gateVersion: "1")) == .connection)
         #expect(ChatLaunch.subtitle(link: nil, connection: .idle) == .connection)
+        // Issue #145: a drop during a turn shows "Reconnecting…" until the chat reattaches. Offline still wins.
+        #expect(ChatLaunch.subtitle(link: .notConnected, connection: .connected(gateVersion: "1"),
+                                    reattaching: true) == .reconnecting)
+        #expect(ChatLaunch.subtitle(link: .ready, connection: .connected(gateVersion: "1"), updating: true,
+                                    reattaching: true) == .reconnecting)
+        #expect(ChatLaunch.subtitle(link: .notConnected, connection: .offline(nil), reattaching: true) == .connection)
     }
 
     @Test func staleTokenAsksAppForANewSession() async throws {

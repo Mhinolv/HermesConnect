@@ -53,6 +53,9 @@ public final class ChatViewModel {
     /// Issue #117: the id of the last prompt card that showed. Each new card gets a new value. The screen plays
     /// the `.warning` haptic for it.
     public private(set) var promptAlertId: String?
+    /// Issue #145: the socket dropped during a turn that the server took. The turn stays, and the chat reattaches
+    /// to it on the next connect. Chat and Hands-Free show "Reconnecting…".
+    public private(set) var isReattaching = false
 
     @ObservationIgnored private var thread = ChatThread()
     @ObservationIgnored private let transport: any ChatTransport
@@ -97,6 +100,31 @@ public final class ChatViewModel {
     @ObservationIgnored public let receivedFiles: ReceivedFileLoader
     /// Metadata only: ids, counts and states. Never the text of a message (issue #18).
     @ObservationIgnored private let log = HermesLog(category: "chat")
+    /// Issue #145: the last `seq` of the live session (docs/hermes-protocol.md 4.1). The replay starts after it.
+    @ObservationIgnored private var watermark: SeqWatermark?
+    /// Issue #145: the `replay_epoch` of the last `gateway.ready`. A new epoch is a new server process.
+    @ObservationIgnored private var replayEpoch: String?
+    /// Issue #145: the live events that come while the replay runs. They apply after the replay, in order.
+    @ObservationIgnored private var replayBuffer: [GatewayEvent]?
+
+    private struct SeqWatermark {
+        var liveId: String
+        var seq: Int
+    }
+
+    /// Issue #145: what the reattach found.
+    private enum ReattachOutcome {
+        /// No reattach ran.
+        case none
+        /// The turn ended in the replay.
+        case ended
+        /// The turn still runs on the server. Its events come on the new socket.
+        case running
+        /// The server says that no turn runs, and the replay did not end the turn. The history decides.
+        case lost
+        /// No replay, and the snapshot does not say `running` (an older server). The history can end the turn.
+        case unknown
+    }
 
     /// `messages` is history that the screen shows at once (DEBUG demo). With no `messages`, a model with
     /// a `storedSessionId` and a `cache` shows the cached transcript.
@@ -206,19 +234,32 @@ public final class ChatViewModel {
             isLoadingHistory = false
             isUpdating = false
         }
+        // Issue #145: a turn that the server took reattaches. Live events wait until the replay applies.
+        let reattach = thread.canReattach
+        if reattach, replayBuffer == nil { replayBuffer = [] }
+        defer { flushReplayBuffer() }
         do {
             // Always resume: the server reaps an idle live session 20 s after its socket drops.
             let live = try await resumedSession()
+            let outcome: ReattachOutcome = reattach ? await replay(live) : .none
+            flushReplayBuffer()
             let transcript = try await transport.history(sessionId: live.liveId)
             needsOpen = false
             // A session with a transcript has a server row, so the next launch can resume it.
             if !transcript.isEmpty { saveActiveSessionId() }
+            let history = ChatHistory.messages(from: transcript, reusing: thread.messages, fallbackDate: now())
+            // Issue #145: the turn ended while the socket was closed. The history has its reply, or the prompt
+            // shows "Not Delivered".
+            let checksHistory = outcome == .lost || outcome == .unknown
+            let finished = checksHistory && thread.turn != .idle && thread.finishFromHistory(history)
             // A running turn owns the end of the thread. Its `message.complete` brings the text.
-            guard thread.turn == .idle else {
+            guard thread.turn == .idle || outcome == .lost else {
+                setReattaching(false)
                 await loadPendingApprovals(live)
                 return
             }
-            let history = ChatHistory.messages(from: transcript, reusing: thread.messages, fallbackDate: now())
+            if finished { log.info("reattach: the history has the reply") }
+            let noReply = thread.turn != .idle
             let shown = Set(thread.messages.map(\.id))
             if thread.replaceHistory(history) {
                 // All new rows reach the screen in one update (issue #15).
@@ -226,6 +267,11 @@ public final class ChatViewModel {
                 if !shown.isEmpty, !added.isEmpty { newMessageIds = added }
                 redrawNow()
             }
+            if noReply {
+                log.notice("reattach found no reply: prompt not delivered")
+                changed(thread.reattachFailed())
+            }
+            setReattaching(false)
             saveTranscript()
             // Issue #39: the link is up. The outbox sends after the history, so the order stays.
             sendQueued()
@@ -233,8 +279,10 @@ public final class ChatViewModel {
         } catch where Self.isSessionNotFound(error) && !thread.messages.isEmpty {
             // QA #38 defect 1: the server lost a row that has messages on the screen. Keep them and
             // start a new session in its place. The chat stays open.
+            endLostTurn()
             await replaceLostSession()
         } catch where Self.isSessionNotFound(error) {
+            endLostTurn()
             // A dead id (for example a New Chat that never got a prompt): never resume it again.
             needsOpen = false
             if let storedSessionId, cache?.loadActiveSessionId() == storedSessionId {
@@ -244,6 +292,63 @@ public final class ChatViewModel {
         } catch {
             needsOpen = true
         }
+    }
+
+    // MARK: Reattach (issue #145)
+
+    /// `session.events.since` from the last `seq` (docs/hermes-protocol.md 4.2). The replayed events go through
+    /// the same path as live events, and the `seq` check drops the ones that the thread has.
+    private func replay(_ live: ChatSessionRef) async -> ReattachOutcome {
+        if let mark = watermark, mark.liveId == live.liveId {
+            do {
+                let result = try await transport.eventsSince(sessionId: live.liveId, lastSeen: mark.seq)
+                guard session?.liveId == live.liveId else { return .lost }
+                log.info("replay: \(result.events.count) events, truncated \(result.truncated)")
+                for event in result.events where event.sessionId == nil || event.sessionId == live.liveId {
+                    var event = event
+                    event.sessionId = live.liveId
+                    apply(event, live: live.liveId)
+                }
+                // The replayed text reaches the screen in one update.
+                if !result.events.isEmpty { redrawNow() }
+                for request in result.openRequests.compactMap(GatewayServerRequest.init(open:)) {
+                    handle(request, sessionId: live.liveId, replayed: true)
+                }
+                if thread.turn == .idle { return .ended }
+                // A turn that ended is in the ring. With no gap, the turn still runs.
+                if !result.truncated { return .running }
+            } catch {
+                log.notice("replay failed")
+            }
+        }
+        if thread.turn == .idle { return .ended }
+        switch live.running {
+        case true?: return .running
+        case false?: return .lost
+        case nil: return .unknown
+        }
+    }
+
+    /// The live events that came during the replay. The `seq` check drops the ones that the replay applied.
+    private func flushReplayBuffer() {
+        guard let buffered = replayBuffer else { return }
+        replayBuffer = nil
+        for event in buffered {
+            guard let live = session?.liveId, event.sessionId == live else { continue }
+            apply(event, live: live)
+        }
+    }
+
+    /// The server lost the session of the turn. The reply fails, as before #145.
+    private func endLostTurn() {
+        guard thread.turn != .idle else { return setReattaching(false) }
+        let makeId = self.makeId
+        changed(thread.connectionLost(now: now(), makeId: makeId))
+        setReattaching(false)
+    }
+
+    private func setReattaching(_ value: Bool) {
+        if isReattaching != value { isReattaching = value }
     }
 
     /// `session.create` in place of a stored session that the server lost (4007). The thread, the cache and
@@ -349,32 +454,29 @@ public final class ChatViewModel {
                 return
             }
             guard let live = session?.liveId, event.sessionId == live else { return }
-            switch event.kind {
-            case .requestCancel(let payload):
-                // Issue #104, #117: the server withdrew a request. Only the card of that request changes.
-                // The reason can be free text from the approval tool: it stays out of the log.
-                log.info("server request withdrawn: \(payload.method)")
-                let approval = thread.withdrawApproval(serverRequestId: payload.id, reason: payload.reason)
-                let prompt = thread.withdrawPrompt(serverRequestId: payload.id, reason: payload.reason)
-                if approval || prompt { redrawNow() }
+            // Issue #145: the replay runs. This event applies after it.
+            if replayBuffer != nil {
+                replayBuffer?.append(event)
                 return
-            case .approvalCancelled(let payload):
-                log.info("approvals cancelled: \(payload.requestIds.count)")
-                if thread.cancelApprovals(requestIds: payload.requestIds) { redrawNow() }
-                return
-            default:
-                break
             }
-            if case .messageComplete = event.kind { log.info("reply complete: session \(live)") }
-            let makeId = self.makeId
-            changed(thread.apply(event.kind, now: now(), makeId: makeId))
+            apply(event, live: live)
         case .state(.disconnected):
             // The live id can die with the socket. The next send resumes the stored id.
             sessionIsStale = session != nil
             if session != nil { needsOpen = true }
-            let makeId = self.makeId
-            changed(thread.connectionLost(now: now(), makeId: makeId))
-        case .state(.connected):
+            if thread.canReattach, session != nil, storedSessionId != nil {
+                // Issue #145: a drop is not a failure. The turn runs on, and the next connect reattaches to it.
+                log.notice("socket dropped during a turn: reattach on connect")
+                setReattaching(true)
+                redrawNow()
+            } else {
+                let makeId = self.makeId
+                changed(thread.connectionLost(now: now(), makeId: makeId))
+            }
+        case .state(.connected(let ready)):
+            // Issue #145: a new server process numbers its events again.
+            if let replayEpoch, replayEpoch != ready.replayEpoch { watermark = nil }
+            replayEpoch = ready.replayEpoch
             // Back after a drop or an offline open: resume and catch up with the history.
             // Issue #15: a session that was open before also catches up. A reconnect after a suspend
             // can replace the client with no `.disconnected` event.
@@ -390,6 +492,34 @@ public final class ChatViewModel {
         case .state:
             break
         }
+    }
+
+    /// One event of the live session. Issue #145: an event with a `seq` that the thread has already is dropped.
+    private func apply(_ event: GatewayEvent, live: String) {
+        if let seq = event.seq {
+            if let mark = watermark, mark.liveId == live, seq <= mark.seq { return }
+            watermark = SeqWatermark(liveId: live, seq: seq)
+        }
+        switch event.kind {
+        case .requestCancel(let payload):
+            // Issue #104, #117: the server withdrew a request. Only the card of that request changes.
+            // The reason can be free text from the approval tool: it stays out of the log.
+            log.info("server request withdrawn: \(payload.method)")
+            let approval = thread.withdrawApproval(serverRequestId: payload.id, reason: payload.reason)
+            let prompt = thread.withdrawPrompt(serverRequestId: payload.id, reason: payload.reason)
+            if approval || prompt { redrawNow() }
+            return
+        case .approvalCancelled(let payload):
+            log.info("approvals cancelled: \(payload.requestIds.count)")
+            if thread.cancelApprovals(requestIds: payload.requestIds) { redrawNow() }
+            return
+        default:
+            break
+        }
+        if case .messageComplete = event.kind { log.info("reply complete: session \(live)") }
+        let makeId = self.makeId
+        changed(thread.apply(event.kind, now: now(), makeId: makeId))
+        if thread.turn == .idle { setReattaching(false) }
     }
 
     // MARK: Server requests (issue #104)
@@ -732,7 +862,10 @@ public final class ChatViewModel {
             return Task { await deliverVoice(id: id) }
         }
         redrawNow()
-        return Task { await deliver(id: id, retryBeforeRowId: nil) }
+        // Issue #145: a prompt that the server has (a reattach with no reply) keeps its row id. The send cuts the
+        // transcript before that row, so the server has the prompt one time.
+        let rowId = message.userRowId
+        return Task { await deliver(id: id, retryBeforeRowId: rowId) }
     }
 
     /// Issue #17: "Reply" (swipe or menu). The next text send quotes this message. `false` if it cannot be quoted.

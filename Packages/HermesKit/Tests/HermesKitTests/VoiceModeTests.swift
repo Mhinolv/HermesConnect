@@ -609,15 +609,27 @@ private final class FakeVoiceModeTransport: ChatTransport, @unchecked Sendable {
     private var _voiceSubmits: [String] = []
     private var _spoken = 0
 
+    private var _replay: SessionEventsSinceResult?
+
     var voiceSubmits: [String] { lock.withLock { _voiceSubmits } }
     var spoken: Int { lock.withLock { _spoken } }
+    /// Issue #145: the answer of `session.events.since`. `nil` throws.
+    var replay: SessionEventsSinceResult? {
+        get { lock.withLock { _replay } }
+        set { lock.withLock { _replay = newValue } }
+    }
 
     func startSession(source _: String, idempotencyKey _: String) async throws -> ChatSessionRef {
         ChatSessionRef(liveId: "s1", storedId: "st1")
     }
 
     func resumeSession(storedId: String, source _: String) async throws -> ChatSessionRef {
-        ChatSessionRef(liveId: "s1", storedId: storedId)
+        ChatSessionRef(liveId: "s1", storedId: storedId, running: true)
+    }
+
+    func eventsSince(sessionId _: String, lastSeen _: Int) async throws -> SessionEventsSinceResult {
+        guard let replay else { throw ChatReplayError.unsupported }
+        return replay
     }
 
     func submitPrompt(sessionId _: String, text _: String, retryBeforeRowId _: Int?) async throws -> Int? { 11 }
@@ -635,7 +647,14 @@ private final class FakeVoiceModeTransport: ChatTransport, @unchecked Sendable {
     }
 
     func stopReply(sessionId _: String) async throws -> Bool { true }
-    func history(sessionId _: String) async throws -> [TranscriptMessage] { [] }
+    private var _transcript: [TranscriptMessage] = []
+    /// Issue #145: the `session.history` answer.
+    var transcript: [TranscriptMessage] {
+        get { lock.withLock { _transcript } }
+        set { lock.withLock { _transcript = newValue } }
+    }
+
+    func history(sessionId _: String) async throws -> [TranscriptMessage] { transcript }
 }
 
 private func sentTextFrames(_ socket: FakeGatewaySocket) async throws -> [JSONValue] {
@@ -744,6 +763,50 @@ private func chatEvent(_ json: String) throws -> GatewayClientEvent {
         #expect(rig.saved.audio.withLock { $0.first?.mimeType } == "audio/wav")
         #expect(rig.transport.spoken == 0)
         #expect(rig.vm.autoPlayReplyId == nil)
+    }
+
+    /// Issue #145: the socket drops while Hermes works. Hands-Free keeps "Thinking…", then speaks the resumed reply.
+    /// The replay sends `seq` 2 again: the speaker gets each part of the text one time.
+    @Test func handsFreeSpeaksTheResumedReplyOneTime() async throws {
+        let rig = try Setup()
+        await rig.engine.start(chat: rig.vm)
+        rig.run(1, decibels: -20)
+        rig.run(3.1, decibels: -60)
+        try await until { rig.engine.state == .thinking && rig.vm.messages.first?.delivery == .delivered }
+        rig.vm.receive(try chatEvent(#"{"type":"message.start","session_id":"s1","seq":1,"payload":{"turn_id":"t1"}}"#))
+        rig.vm.receive(try chatEvent(#"{"type":"message.delta","session_id":"s1","seq":2,"payload":{"text":"It is ","offset":0}}"#))
+        try await until {
+            rig.engine.tick()
+            return !rig.socket.sent.isEmpty
+        }
+
+        rig.vm.receive(.state(.disconnected(.heartbeatTimeout)))
+        rig.engine.tick()
+        #expect(rig.vm.isReattaching)
+        #expect(rig.engine.state == .thinking)
+        let display = VoiceTabDisplay.make(state: rig.engine.state, muted: false, thinkingSeconds: 0,
+                                           reconnecting: rig.vm.isReattaching)
+        #expect(display.title == "Thinking…")
+        #expect(display.subtitle == "Reconnecting…")
+
+        let decode = { (json: String) in try JSONDecoder().decode(GatewayEvent.self, from: Data(json.utf8)) }
+        let events = [
+            try decode(#"{"type":"message.delta","session_id":"s1","seq":2,"payload":{"text":"It is ","offset":0}}"#),
+            try decode(#"{"type":"message.delta","session_id":"s1","seq":3,"payload":{"text":"noon.","offset":6}}"#),
+            try decode(#"{"type":"message.complete","session_id":"s1","seq":4,"payload":{"text":"It is noon.","status":"complete"}}"#),
+        ]
+        rig.transport.replay = SessionEventsSinceResult(events: events, latestSeq: 4, truncated: false, count: 3,
+                                                        epoch: "e1", openRequests: [])
+        rig.transport.transcript = [TranscriptMessage(role: "user", text: "What time is it", rowId: 12),
+                                    TranscriptMessage(role: "assistant", text: "It is noon.", rowId: 13)]
+        await rig.vm.open()
+        #expect(!rig.vm.isReattaching)
+        rig.engine.tick()
+        let frames = try await sentFrames(rig.socket, count: 3)
+        #expect(frames.compactMap { $0["text"]?.stringValue } == ["It is ", "noon."])
+        #expect(frames[2]["done"]?.boolValue == true)
+        #expect(rig.engine.state == .thinking)
+        #expect(rig.transport.voiceSubmits == ["What time is it"])
     }
 
     @Test func bargeInSendsStopOnSpeakStream() async throws {

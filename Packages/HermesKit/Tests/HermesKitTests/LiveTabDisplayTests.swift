@@ -52,6 +52,18 @@ import Testing
         #expect(!failed.muteEnabled)
     }
 
+    /// Issue #145: the chat socket dropped while Hermes works on a Live request. The #102 line shows.
+    @Test func workingWhileTheChatReattachesSaysReconnecting() throws {
+        let display = try #require(VoiceTabDisplay.live(phase: .working, muted: false, speaking: false,
+                                                        idleWarning: false, stillWorking: true, reconnecting: true))
+        #expect(display.title == "Reconnecting…")
+        #expect(display.subtitle == nil)
+        #expect(display.isLive)
+        let live = try #require(VoiceTabDisplay.live(phase: .live, muted: false, speaking: false, idleWarning: false,
+                                                     stillWorking: false, reconnecting: true))
+        #expect(live.title == "Live")
+    }
+
     @Test func ringTapAndAnnouncementsInLive() {
         #expect(VoiceTabDisplay.liveRingTap(.live) == .none)
         #expect(VoiceTabDisplay.liveRingTap(.working) == .none)

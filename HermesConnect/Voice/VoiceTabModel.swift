@@ -117,13 +117,14 @@ final class VoiceTabModel {
     private func loopDisplay(tool: ChatToolActivity?) -> VoiceTabDisplay {
         if let live = liveController, let display = VoiceTabDisplay.live(
             phase: live.phase, muted: live.muted, speaking: live.speaking, idleWarning: live.idleWarning,
-            stillWorking: live.stillWorking, failure: live.failure, tool: tool) {
+            stillWorking: live.stillWorking, failure: live.failure, tool: tool,
+            reconnecting: sessionChat?.isReattaching ?? false) {
             return display
         }
         let afterBargeIn = clipEndsAtBargeIn != nil && clipEndsAtBargeIn == controller?.clipEndCount
         return VoiceTabDisplay.make(state: state, muted: controller?.muted ?? false,
                                     thinkingSeconds: controller?.thinkingSeconds ?? 0, afterBargeIn: afterBargeIn,
-                                    tool: tool)
+                                    tool: tool, reconnecting: sessionChat?.isReattaching ?? false)
     }
 
     // MARK: Target chat

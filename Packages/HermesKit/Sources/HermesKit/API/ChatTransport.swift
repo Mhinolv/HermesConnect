@@ -9,13 +9,17 @@ public struct ChatSessionRef: Sendable, Equatable {
     public var openRequests: [GatewayServerRequest]?
     /// Issue #104: the snapshot `pending_approval`. It has no JSON-RPC id: answer it with `approval.respond`.
     public var pendingApproval: ApprovalRequest?
+    /// Issue #145: the snapshot says that a turn still runs (`running`, or a streaming `inflight` turn).
+    /// `nil` when the server did not say.
+    public var running: Bool?
 
     public init(liveId: String, storedId: String? = nil, openRequests: [GatewayServerRequest]? = nil,
-                pendingApproval: ApprovalRequest? = nil) {
+                pendingApproval: ApprovalRequest? = nil, running: Bool? = nil) {
         self.liveId = liveId
         self.storedId = storedId
         self.openRequests = openRequests
         self.pendingApproval = pendingApproval
+        self.running = running
     }
 
     /// Issue #104: the open requests and the pending approval of a `session.resume` snapshot.
@@ -24,7 +28,8 @@ public struct ChatSessionRef: Sendable, Equatable {
         self.init(liveId: snapshot.sessionId, storedId: snapshot.storedSessionId ?? storedId, openRequests: open,
                   pendingApproval: snapshot.pendingApproval.flatMap {
                       ApprovalRequest(pending: .object($0), sessionId: snapshot.sessionId)
-                  })
+                  },
+                  running: snapshot.running ?? snapshot.inflight?.streaming)
     }
 }
 
@@ -70,6 +75,13 @@ public protocol ChatTransport: Sendable {
     func transcribe(audio: Data, mimeType: String) async throws -> String
     /// `POST /api/audio/speak` (docs/hermes-protocol.md 3.9, issue #10). Never `voice.tts`: that uses the server speaker.
     func speak(text: String) async throws -> SpokenAudio
+    /// Issue #145: `session.events.since` with the live id: the events after `lastSeen` (docs/hermes-protocol.md 4.1).
+    func eventsSince(sessionId: String, lastSeen: Int) async throws -> SessionEventsSinceResult
+}
+
+/// Issue #145: a transport with no event replay. The chat then uses the snapshot and the history.
+public enum ChatReplayError: Error, Sendable, Equatable {
+    case unsupported
 }
 
 /// Transports with no voice support (offline transport, older fakes) fail voice memos.
@@ -85,6 +97,10 @@ extension ChatTransport {
 
     public func speak(text _: String) async throws -> SpokenAudio {
         throw VoiceMemoError.unsupported
+    }
+
+    public func eventsSince(sessionId _: String, lastSeen _: Int) async throws -> SessionEventsSinceResult {
+        throw ChatReplayError.unsupported
     }
 }
 

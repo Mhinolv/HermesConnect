@@ -230,6 +230,11 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
         try await readyClient().history(sessionId: sessionId)
     }
 
+    /// Issue #145: the replay after a reconnect, on the current socket.
+    public func eventsSince(sessionId: String, lastSeen: Int) async throws -> SessionEventsSinceResult {
+        try await readyClient().eventsSince(sessionId: sessionId, lastSeen: lastSeen)
+    }
+
     /// Issue #12: `GET /api/fs/download` on the forwarded port, as `transcribe`. No new network path.
     public func downloadReceivedFile(path: String, storedSessionId: String?, maxBytes: Int?,
                                      progress: @escaping @Sendable (Double) -> Void) async throws -> URL {

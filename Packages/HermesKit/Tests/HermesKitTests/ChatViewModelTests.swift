@@ -276,13 +276,16 @@ private final class Counter: @unchecked Sendable {
         #expect(vm.isReplyActive)
     }
 
-    @Test func disconnectFailsTheActiveReply() async throws {
+    /// Issue #145: a drop during a turn that the server took is not a failure. The next connect reattaches.
+    @Test func disconnectKeepsTheActiveReplyForTheReattach() async throws {
         let transport = FakeChatTransport()
         let vm = model(transport)
         await vm.send("hello")?.value
         vm.receive(.state(.disconnected(.heartbeatTimeout)))
-        #expect(vm.messages.last?.reply == .failed(message: nil))
-        #expect(!vm.isReplyActive)
+        #expect(vm.messages.map(\.role) == [.user])
+        #expect(vm.messages.first?.delivery == .delivered)
+        #expect(vm.isReplyActive)
+        #expect(vm.isReattaching)
     }
 
     @Test func sendAfterADropResumesTheStoredSession() async throws {
