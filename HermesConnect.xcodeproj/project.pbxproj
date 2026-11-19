@@ -108,12 +108,14 @@
 		E230335998617506596F1F26 /* HermesConnectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80A034BAA06291CE4BB4106 /* HermesConnectTests.swift */; };
 		E376DFB2D8B799DD9B7BE470 /* ParakeetTranscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4059DBFD119A7D4C760969ED /* ParakeetTranscriber.swift */; };
 		E6670B3D907F4D7C4AA74920 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = 3224E0C5350265EDD7B81732 /* FluidAudio */; };
+		E7B5B85C26CC9ED252FE70DF /* VoiceClipRemoteCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F94711A1AD965A33144F6AB /* VoiceClipRemoteCommands.swift */; };
 		E7B6175B6B2381C210196FBC /* VoiceTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AB15C0E17A48B16DC8AAFDC /* VoiceTab.swift */; };
 		E8E8A3EA74CF347BCC711165 /* LiveModeTeardownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B469A699145C4EF6725641D4 /* LiveModeTeardownTests.swift */; };
 		E9D15E363AFAD9A350373C77 /* ApprovalCardUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F839FAFD59558C75CCAF8FB6 /* ApprovalCardUITests.swift */; };
 		EE3F240517CFFF3FB759B206 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 15E651CD191C6DEE94DCE4FC /* WebRTC */; };
 		F010C218BEBD3A70B66B8BA3 /* AudioTranscriptDemo.swift in Sources */ = {isa = PBXBuildFile; fileRef = C27CD0A709E4C6CF291E5052 /* AudioTranscriptDemo.swift */; };
 		F3361E416896D9B2A169029A /* VoiceMemoUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A8691638CC5B4480E12DCC9 /* VoiceMemoUITests.swift */; };
+		F4A2C55691A05D41C3AE157A /* VoiceClipNowPlayingUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29B53267796869220D9CDABC /* VoiceClipNowPlayingUITests.swift */; };
 		F8C370EE75BF35431FC05547 /* HostKeyViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02FBF4D3E812F7C4916B38A0 /* HostKeyViews.swift */; };
 /* End PBXBuildFile section */
 
@@ -147,9 +149,11 @@
 		27E6BC84392DF022945BB39D /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
 		28AAFFF621A3F2DB87F77E8C /* HandsFreeBackgroundUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandsFreeBackgroundUITests.swift; sourceTree = "<group>"; };
 		28B1C90A221FE6DC8C6F7FBB /* JobsTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobsTabTests.swift; sourceTree = "<group>"; };
+		29B53267796869220D9CDABC /* VoiceClipNowPlayingUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceClipNowPlayingUITests.swift; sourceTree = "<group>"; };
 		2A8691638CC5B4480E12DCC9 /* VoiceMemoUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceMemoUITests.swift; sourceTree = "<group>"; };
 		2BC326D22AF4E97DD0AC6CCE /* OnDevicePromptVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnDevicePromptVoice.swift; sourceTree = "<group>"; };
 		2D3CB166FF51053854FFDA4B /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		2F94711A1AD965A33144F6AB /* VoiceClipRemoteCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceClipRemoteCommands.swift; sourceTree = "<group>"; };
 		316F8F3A50A722E2F964B3C4 /* ChatApprovalCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatApprovalCell.swift; sourceTree = "<group>"; };
 		374BF43FD2955A3BD85FD6CE /* ChatLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatLayoutTests.swift; sourceTree = "<group>"; };
 		37EF80F3762ADA518CD0BE72 /* VoiceRecordingBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecordingBar.swift; sourceTree = "<group>"; };
@@ -393,6 +397,7 @@
 				02B9B8909DFDB725CB523CF7 /* TapbackUITests.swift */,
 				BC59FF150D9F7696AE0C9066 /* ToolRowUITests.swift */,
 				FA15C0B079AED4234D9DCCD4 /* TranscriptionAppTests.swift */,
+				29B53267796869220D9CDABC /* VoiceClipNowPlayingUITests.swift */,
 				1599042964CF76F3B5375851 /* VoiceEngineMicrophoneTests.swift */,
 				08D42E1C9B125E72F906974C /* VoiceLiveTabUITests.swift */,
 				2A8691638CC5B4480E12DCC9 /* VoiceMemoUITests.swift */,
@@ -501,6 +506,7 @@
 				F298C712011FEAA64AF716E8 /* SessionActionsUI.swift */,
 				F0EA96A6753C403E6A93EDFD /* SessionListScreen.swift */,
 				EF95280C48F95F742B500A77 /* SlashSuggestionPanel.swift */,
+				2F94711A1AD965A33144F6AB /* VoiceClipRemoteCommands.swift */,
 				27E6BC84392DF022945BB39D /* VoiceRecorder.swift */,
 				37EF80F3762ADA518CD0BE72 /* VoiceRecordingBar.swift */,
 				1D586D46E916A28F7DC3E2A5 /* Attachments */,
@@ -695,6 +701,7 @@
 				7379DDC42390F7CF0AA74F38 /* SpeechPermission.swift in Sources */,
 				A71C36521DFAAEC6C670A5A8 /* TranscriptionSettingsDemo.swift in Sources */,
 				A23FE639D6C1099ED823E759 /* TranscriptionSettingsSection.swift in Sources */,
+				E7B5B85C26CC9ED252FE70DF /* VoiceClipRemoteCommands.swift in Sources */,
 				5927F1DE97FECDF33486EC65 /* VoiceModeSessionModel.swift in Sources */,
 				D9AE5A4500B7565932DEEB48 /* VoicePromptCard.swift in Sources */,
 				6788BF844A32EC9EE100DE6A /* VoiceRecorder.swift in Sources */,
@@ -738,6 +745,7 @@
 				82E8F7FA7611089BA44CFB3A /* TapbackUITests.swift in Sources */,
 				54E911938881408696E0BCCB /* ToolRowUITests.swift in Sources */,
 				C6B734F18E6557D790DA9F3D /* TranscriptionAppTests.swift in Sources */,
+				F4A2C55691A05D41C3AE157A /* VoiceClipNowPlayingUITests.swift in Sources */,
 				5E5D46F7CDF3AD47AEFE5894 /* VoiceEngineMicrophoneTests.swift in Sources */,
 				7B326D014EAF8D547F4FDCD2 /* VoiceLiveTabUITests.swift in Sources */,
 				F3361E416896D9B2A169029A /* VoiceMemoUITests.swift in Sources */,
