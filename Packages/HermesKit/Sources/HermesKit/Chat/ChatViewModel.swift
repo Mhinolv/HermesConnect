@@ -695,14 +695,20 @@ public final class ChatViewModel {
         return id
     }
 
-    /// Issue #98: the reply to a delegation bubble, for the live voice.
+    /// Issue #98: the reply to a delegation bubble, for the live voice. Issue #96: the hands-free reply too.
+    /// Issue #134: the text is every assistant message of the prompt in order, interim messages first, so it only
+    /// grows while the turn runs. The last message gives the state.
     public func liveReplyProgress(promptId: String) -> LiveReplyProgress {
         guard let prompt = thread.message(id: promptId) else { return .failed }
-        if let reply = thread.messages.last(where: { $0.promptId == promptId && $0.role == .assistant }) {
+        let replies = thread.messages.filter { $0.promptId == promptId && $0.role == .assistant }
+        if let reply = replies.last {
+            // An older failed reply of a retried prompt is not part of the answer.
+            let text = replies.filter { $0.id == reply.id || !$0.isFailed }
+                .map { thread.voiceText(id: $0.id) }.filter { !$0.isEmpty }.joined(separator: "\n\n")
             switch reply.reply {
-            case .complete, .interrupted: return .done(reply.text)
+            case .complete, .interrupted: return .done(text)
             case .failed: return .failed
-            case .streaming, nil: return .streaming(reply.text)
+            case .streaming, nil: return .streaming(text)
             }
         }
         switch prompt.delivery {

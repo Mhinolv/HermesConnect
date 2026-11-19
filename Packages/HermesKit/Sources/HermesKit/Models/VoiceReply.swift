@@ -79,6 +79,28 @@ public enum VoiceReplyText {
         return lines.filter { !$0.isEmpty }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Issue #134: the part of `reply` that did not go to the speaker yet. `sent` is all text that went before.
+    /// - `reply` grows from `sent`: the new tail.
+    /// - `reply` was cut and rewritten (a final text that drops the streamed interim text): the tail after the longest
+    ///   end of `sent` that starts `reply`. An overlap counts at 8 characters or more, or when it is all of `reply`.
+    /// - No overlap: all of `reply`, because it is a new message. A paragraph break keeps it apart from `sent`.
+    /// Text is never dropped. A rewritten reply can repeat a few words.
+    public static func unsent(in reply: String, after sent: String) -> String {
+        if reply.hasPrefix(sent) { return String(reply.dropFirst(sent.count)) }
+        let sentCharacters = Array(sent)
+        let replyCharacters = Array(reply)
+        var overlap = min(sentCharacters.count, replyCharacters.count)
+        while overlap > 0 {
+            if overlap >= 8 || overlap == replyCharacters.count,
+               sentCharacters[(sentCharacters.count - overlap)...].elementsEqual(replyCharacters[..<overlap]) {
+                return String(replyCharacters[overlap...])
+            }
+            overlap -= 1
+        }
+        guard let last = sent.last, !last.isWhitespace, !reply.isEmpty else { return reply }
+        return "\n\n" + reply
+    }
+
     /// `---`, `***` or `___` (spaces allowed): a thematic break.
     private static func isRule(_ line: String) -> Bool {
         let marks = line.filter { $0 != " " }

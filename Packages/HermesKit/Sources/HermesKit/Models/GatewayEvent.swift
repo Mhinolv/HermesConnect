@@ -65,6 +65,34 @@ public struct MessageDeltaPayload: Decodable, Sendable, Equatable {
     }
 }
 
+/// Issue #134: `message.interim` (`contracts/events.py:185-195`). Commentary beside tool calls, sealed as its own
+/// segment. With `alreadyStreamed == false`, no `message.delta` carried the text.
+public struct MessageInterimPayload: Decodable, Sendable, Equatable {
+    public var text: String
+    public var alreadyStreamed: Bool
+    public var turnId: String?
+    public var segment: Int?
+
+    public init(text: String, alreadyStreamed: Bool, turnId: String? = nil, segment: Int? = nil) {
+        self.text = text
+        self.alreadyStreamed = alreadyStreamed
+        self.turnId = turnId
+        self.segment = segment
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        text = (try? container.decodeIfPresent(String.self, forKey: .text)) ?? ""
+        alreadyStreamed = (try? container.decodeIfPresent(Bool.self, forKey: .alreadyStreamed)) ?? false
+        turnId = try? container.decodeIfPresent(String.self, forKey: .turnId)
+        segment = try? container.decodeIfPresent(Int.self, forKey: .segment)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case text, alreadyStreamed = "already_streamed", turnId = "turn_id", segment
+    }
+}
+
 /// `reasoning.delta` (`contracts/events.py:154-162`, `:179`).
 public struct ReasoningDeltaPayload: Decodable, Sendable, Equatable {
     public var text: String
@@ -216,6 +244,7 @@ public struct GatewayEvent: Decodable, Sendable, Equatable {
         case gatewayReady(GatewayReady)
         case messageStart(MessageStartPayload)
         case messageDelta(MessageDeltaPayload)
+        case messageInterim(MessageInterimPayload)
         case reasoningDelta(ReasoningDeltaPayload)
         case toolStart(ToolStartPayload)
         case toolComplete(ToolCompletePayload)
@@ -262,6 +291,7 @@ public struct GatewayEvent: Decodable, Sendable, Equatable {
         case "message.start": payload(MessageStartPayload.self).map(Kind.messageStart)
             ?? .messageStart(MessageStartPayload())
         case "message.delta": payload(MessageDeltaPayload.self).map(Kind.messageDelta)
+        case "message.interim": payload(MessageInterimPayload.self).map(Kind.messageInterim)
         case "reasoning.delta": payload(ReasoningDeltaPayload.self).map(Kind.reasoningDelta)
         case "tool.start": payload(ToolStartPayload.self).map(Kind.toolStart)
         case "tool.complete": payload(ToolCompletePayload.self).map(Kind.toolComplete)

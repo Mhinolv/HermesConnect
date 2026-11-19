@@ -46,6 +46,9 @@ public struct ChatThread: Sendable, Equatable {
     /// UTF-16 units applied per segment, to drop chunks that come twice (`offset`).
     private var applied: [Int: Int] = [:]
     private var segment = 0
+    /// Issue #134: the spoken text of a reply when it differs from the bubble text. `message.complete` carries only
+    /// the final message, so the interim messages of the turn stay here for voice mode and Live mode.
+    private var voiceTexts: [String: String] = [:]
     /// Issue #120: the tool calls of the current turn, in call order. They go on the reply at `message.complete`.
     private var turnTools: [ChatToolCall] = []
     /// Issue #120: the `tool_id`s that started and did not complete, oldest first.
@@ -57,6 +60,12 @@ public struct ChatThread: Sendable, Equatable {
 
     public func message(id: String) -> ChatMessage? {
         messages.first { $0.id == id }
+    }
+
+    /// Issue #134: the text that voice mode speaks for reply `id`: every message of the turn in order (interim
+    /// messages, then the final message). It only grows while the turn streams. Empty for an unknown id.
+    public func voiceText(id: String) -> String {
+        voiceTexts[id] ?? message(id: id)?.text ?? ""
     }
 
     // MARK: Outgoing
@@ -285,6 +294,7 @@ public struct ChatThread: Sendable, Equatable {
 
     public mutating func remove(id: String) {
         messages.removeAll { $0.id == id }
+        voiceTexts[id] = nil
         if replyId == id { replyId = nil }
     }
 
@@ -346,6 +356,8 @@ public struct ChatThread: Sendable, Equatable {
             return .structure
         case .messageDelta(let delta):
             return applyDelta(delta, now: now, makeId: makeId)
+        case .messageInterim(let interim):
+            return applyInterim(interim, now: now, makeId: makeId)
         case .toolStart(let tool):
             guard turn != .idle else { return .none }
             statusLine = ChatToolText.runningLine(tool.name)
@@ -441,6 +453,24 @@ public struct ChatThread: Sendable, Equatable {
         }
         guard !piece.isEmpty else { return .none }
         segments[index, default: ""] += piece
+        return showStreamed(now: now, makeId: makeId)
+    }
+
+    /// Issue #134: `message.interim` seals the segment, so later text starts a new paragraph (and a new segment for
+    /// a server that sends no `segment`). A seal of text that no delta carried adds that text.
+    private mutating func applyInterim(_ interim: MessageInterimPayload, now: Date,
+                                       makeId: () -> String) -> ChatThreadChange {
+        guard turn != .idle else { return .none }
+        let index = interim.segment ?? segment
+        segment = max(segment, index + 1)
+        guard !interim.alreadyStreamed, !interim.text.isEmpty, segments[index, default: ""].isEmpty else { return .none }
+        segments[index] = interim.text
+        applied[index] = interim.text.utf16.count
+        return showStreamed(now: now, makeId: makeId)
+    }
+
+    /// The streamed text goes into the reply bubble. The first text adds the bubble.
+    private mutating func showStreamed(now: Date, makeId: () -> String) -> ChatThreadChange {
         let text = streamedText
         if let replyId, let row = self.index(of: replyId) {
             messages[row].text = text
@@ -458,6 +488,10 @@ public struct ChatThread: Sendable, Equatable {
     private mutating func applyComplete(_ complete: MessageCompletePayload, now: Date,
                                         makeId: () -> String) -> ChatThreadChange {
         let finalText = complete.text.flatMap { $0.isEmpty ? nil : $0 } ?? streamedText
+        // Issue #134: the sealed segments come before the final text, unless the final text has them already.
+        let sealed = segments.keys.sorted().filter { $0 < segment }.compactMap { segments[$0] }
+            .filter { !$0.isEmpty }.joined(separator: "\n\n")
+        let voiceText = sealed.isEmpty || finalText.hasPrefix(sealed) ? finalText : sealed + "\n\n" + finalText
         let reply: ChatMessage.Reply = switch complete.status {
         case .error: .failed(message: complete.error)
         case .interrupted: .interrupted
@@ -480,6 +514,7 @@ public struct ChatThread: Sendable, Equatable {
             endTurn()
             return .structure
         }
+        if voiceText != finalText { voiceTexts[id] = voiceText }
         ackTurnEnd(reply)
         endTurn()
         return .completed(id: id)

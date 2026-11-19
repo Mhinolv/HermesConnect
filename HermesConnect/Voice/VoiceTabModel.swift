@@ -351,6 +351,11 @@ final class VoiceTabModel {
             if VoiceTabDisplay.liveRingTap(liveController.phase) == .resume { await tryAgainLive() }
             return
         }
+        // Issue #134: a tap stops the quick ack. The ring stays in the working state and the turn goes on.
+        if let controller, controller.isAcking {
+            controller.bargeIn()
+            return
+        }
         await perform(VoiceTabDisplay.ringTap(state))
     }
 
