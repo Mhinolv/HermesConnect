@@ -404,8 +404,8 @@ final class SystemVoicePlaybackSession: VoicePlaybackSession {
 
     var isOtherAudioPlaying: Bool { AVAudioSession.sharedInstance().isOtherAudioPlaying }
 
-    func setPlaybackCategory(duckOthers: Bool) throws {
-        try AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio,
+    func setPlaybackCategory(duckOthers: Bool, mode: VoicePlaybackMode) throws {
+        try AVAudioSession.sharedInstance().setCategory(.playback, mode: mode == .spokenAudio ? .spokenAudio : .default,
                                                         options: duckOthers ? [.duckOthers] : [])
     }
 

@@ -213,9 +213,13 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         #expect(player.isPlaying(url))
         player.stop()
         #expect(session.calls == ["playback", "active", "playback", "active"])
-        let lines = file.read()
+        let all = file.read()
+        let lines = all.filter { $0.contains(" playback ") }
         #expect(lines.count == 2)
         #expect(lines.first?.contains(" playback event=play out=BluetoothA2DPOutput ") == true)
+        // Round 2: the Now Playing state goes to the same file.
+        #expect(all.contains { $0.contains(" nowplaying event=show title=Hermes ") })
+        #expect(all.last?.hasSuffix(" nowplaying event=clear") == true)
         #expect(lines.last?.contains(" playback event=resume ") == true)
     }
 }
@@ -227,6 +231,6 @@ private final class FakeBubbleSession: VoicePlaybackSession, @unchecked Sendable
     var calls: [String] { lock.withLock { _calls } }
     var routeState: VoiceAudioRouteState { VoiceAudioRouteState(outputs: ["BluetoothA2DPOutput"]) }
     var isOtherAudioPlaying: Bool { false }
-    func setPlaybackCategory(duckOthers: Bool) throws { lock.withLock { _calls.append(duckOthers ? "duck" : "playback") } }
+    func setPlaybackCategory(duckOthers: Bool, mode _: VoicePlaybackMode) throws { lock.withLock { _calls.append(duckOthers ? "duck" : "playback") } }
     func setActive(_ active: Bool) throws { lock.withLock { _calls.append(active ? "active" : "inactive") } }
 }

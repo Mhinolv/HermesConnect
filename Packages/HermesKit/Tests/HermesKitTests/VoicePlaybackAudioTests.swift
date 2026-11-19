@@ -13,6 +13,7 @@ private final class FakePlaybackSession: VoicePlaybackSession, @unchecked Sendab
         var category = "AVAudioSessionCategoryPlayAndRecord"
         var options = ["defaultToSpeaker", "allowBluetoothHFP"]
         var calls: [String] = []
+        var mode: VoicePlaybackMode?
     }
 
     let state: Mutex<State>
@@ -23,6 +24,7 @@ private final class FakePlaybackSession: VoicePlaybackSession, @unchecked Sendab
 
     var calls: [String] { state.withLock { $0.calls } }
     var options: [String] { state.withLock { $0.options } }
+    var mode: VoicePlaybackMode? { state.withLock { $0.mode } }
 
     var routeState: VoiceAudioRouteState {
         state.withLock {
@@ -33,8 +35,9 @@ private final class FakePlaybackSession: VoicePlaybackSession, @unchecked Sendab
 
     var isOtherAudioPlaying: Bool { state.withLock { $0.otherAudio } }
 
-    func setPlaybackCategory(duckOthers: Bool) throws {
+    func setPlaybackCategory(duckOthers: Bool, mode: VoicePlaybackMode) throws {
         state.withLock {
+            $0.mode = mode
             $0.category = "AVAudioSessionCategoryPlayback"
             $0.options = duckOthers ? ["duckOthers"] : []
             // `.playback` cannot use the HFP call channel: the route moves to the media output.
@@ -60,6 +63,15 @@ private func tempFile() -> URL {
     }
 
     /// #10: with music on, the clip ducks it and plays over it.
+    /// Round 2: `.default` mode, and `.spokenAudio` only for a drive A/B.
+    @Test func theModeReachesTheSessionOnPlayAndResume() throws {
+        let session = FakePlaybackSession(outputs: ["BluetoothA2DPOutput"])
+        try VoicePlaybackAudio(session: session, mode: .default).play()
+        #expect(session.mode == .default)
+        try VoicePlaybackAudio(session: session, mode: .spokenAudio).resume()
+        #expect(session.mode == .spokenAudio)
+    }
+
     @Test func withOtherAudioTheClipDucksIt() throws {
         let session = FakePlaybackSession(outputs: ["BluetoothA2DPOutput"], otherAudio: true)
         try VoicePlaybackAudio(session: session).play()

@@ -549,6 +549,8 @@ final class VoiceMemoController {
 /// the old one. A tap on the clip that plays pauses it, and the next tap goes on from the same point.
 /// The session is `.playback` with `.spokenAudio`. It ducks other audio when other audio plays, so it plays over
 /// car audio. With no other audio, it does not mix, so a car Bluetooth output starts its media stream (issue #130).
+/// Issue #130 round 2: the mode is `.default`, and the loaded clip is the Now Playing item with play and pause
+/// controls. A car stereo starts its Bluetooth audio for the Now Playing app.
 @MainActor
 final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
     /// The loaded clip, playing or paused.
@@ -560,6 +562,10 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
     private var routeObserver: (any NSObjectProtocol)?
     /// Issue #130: the session settings and the playback diagnostics (`Library/Caches/audio_diag.log`).
     private let audio: VoicePlaybackAudio
+    /// Issue #130 round 2: the Now Playing entry and the remote commands of the loaded clip.
+    private let nowPlaying: VoiceClipNowPlaying
+    /// The chat name for the Now Playing entry.
+    var chatTitle: () -> String? = { nil }
     /// The play state changed. The screen draws the play and pause icons again.
     var onChange: (() -> Void)?
     /// About 10 times per second while a clip plays: the clip, its time and its length.
@@ -570,8 +576,11 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
     var currentTime: TimeInterval { player?.currentTime ?? 0 }
 
     init(audio: VoicePlaybackAudio = VoicePlaybackAudio(session: SystemVoicePlaybackSession(),
-                                                        diagnostics: .shared)) {
+                                                        diagnostics: .shared),
+         nowPlaying: VoiceClipNowPlaying? = nil) {
         self.audio = audio
+        self.nowPlaying = nowPlaying ?? VoiceClipNowPlaying(controls: SystemVoiceClipRemoteControls(),
+                                                            diagnostics: audio.diagnostics)
         super.init()
     }
 
@@ -580,8 +589,7 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
     func toggle(_ url: URL) {
         if playingURL == url, let player {
             if player.isPlaying {
-                player.pause()
-                setPlaying(false)
+                pause()
             } else {
                 resume()
             }
@@ -609,6 +617,7 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
         observeInterruptions()
         observeRoute()
         setPlaying(true)
+        publishNowPlaying()
     }
 
     /// A missing or broken file plays nothing. Other audio comes back, and the screen shows the error.
@@ -623,7 +632,7 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
         guard playingURL == url, let player else { return play(url, from: time) }
         player.currentTime = min(max(0, time), player.duration)
         onProgress?(url, player.currentTime, player.duration)
-        if !player.isPlaying { resume() }
+        if player.isPlaying { publishNowPlaying() } else { resume() }
     }
 
     func stop() {
@@ -637,6 +646,7 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
         observer = nil
         if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
         routeObserver = nil
+        nowPlaying.clear()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         onChange?()
     }
@@ -647,6 +657,33 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
         try? audio.resume()
         guard player.play() else { return }
         setPlaying(true)
+        publishNowPlaying()
+    }
+
+    private func pause() {
+        player?.pause()
+        setPlaying(false)
+        publishNowPlaying()
+    }
+
+    /// Issue #130 round 2: the entry gets the time and the rate on each play, pause and seek. iOS moves the time on
+    /// from the rate, so there is no update per tick.
+    private func publishNowPlaying() {
+        guard let player, playingURL != nil else { return }
+        let info = VoiceClipNowPlayingInfo.make(chatTitle: chatTitle(), duration: player.duration,
+                                                elapsed: player.currentTime, playing: player.isPlaying)
+        nowPlaying.update(info) { [weak self] command in self?.remoteCommand(command) }
+    }
+
+    /// A lock screen, car or headset control. Play goes on from the same point.
+    func remoteCommand(_ command: VoiceClipRemoteCommand) {
+        nowPlaying.commandReceived(command)
+        guard let player else { return }
+        switch command {
+        case .play: if !player.isPlaying { resume() }
+        case .pause: if player.isPlaying { pause() }
+        case .togglePlayPause: if player.isPlaying { pause() } else { resume() }
+        }
     }
 
     private func setPlaying(_ playing: Bool) {
@@ -684,8 +721,7 @@ final class VoiceMemoPlayer: NSObject, AVAudioPlayerDelegate {
             guard began else { return }
             MainActor.assumeIsolated {
                 guard let self, self.isPlaying else { return }
-                self.player?.pause()
-                self.setPlaying(false)
+                self.pause()
             }
         }
     }
