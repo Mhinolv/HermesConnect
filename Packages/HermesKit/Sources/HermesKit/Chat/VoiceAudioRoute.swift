@@ -80,12 +80,30 @@ public final class VoiceAudioRoute: Sendable {
     }
 
     /// Hands-Free starts: the category, the activation, then the speaker check.
+    /// Issue #135: a failure writes its domain and code to the diagnostics, then goes to the caller.
     public func activate() throws {
         report("start")
-        try session.setVoiceCategory(mode: mode)
-        try session.setActive(true)
+        do {
+            try session.setVoiceCategory(mode: mode)
+            try session.setActive(true)
+        } catch {
+            failed(.session, error: error)
+            throw error
+        }
         report("active")
         keepSpeaker()
+    }
+
+    /// Issue #135: one start step failed. The line has the error domain and code only, never the text.
+    /// Safe on any queue.
+    public func failed(_ step: VoiceStartStep, error: any Error) {
+        let error = error as NSError
+        report("fail", detail: "step=\(step.rawValue) domain=\(error.domain) code=\(error.code)")
+    }
+
+    /// Issue #135: the input tap went on again with the input format now (HFP uses 16 kHz, for example).
+    public func tapInstalled(_ format: VoiceInputFormat) {
+        report("tap", detail: format.description)
     }
 
     /// The engine of the microphone and the reply started (issue #127). The line shows its voice processing.
@@ -120,18 +138,20 @@ public final class VoiceAudioRoute: Sendable {
         return true
     }
 
-    private func report(_ event: String, reason: String? = nil) {
-        let line = Self.line(event: event, reason: reason, state: session.routeState, processing: processing())
+    private func report(_ event: String, reason: String? = nil, detail: String? = nil) {
+        let line = Self.line(event: event, reason: reason, detail: detail, state: session.routeState,
+                             processing: processing())
         log.notice(line)
         diagnostics?.append("handsfree " + line)
         if printsDiagnostics { printLine("AUDIO_DIAG " + line) }
     }
 
     /// One diagnostic line: the event and the route. Port types and session settings only.
-    static func line(event: String, reason: String?, state: VoiceAudioRouteState,
+    static func line(event: String, reason: String?, detail: String? = nil, state: VoiceAudioRouteState,
                      processing: VoiceProcessingStatus = .off) -> String {
         var parts = ["event=\(event)"]
         if let reason { parts.append("reason=\(reason)") }
+        if let detail { parts.append(detail) }
         parts.append("out=\(state.outputs.isEmpty ? "none" : state.outputs.joined(separator: ","))")
         parts.append("category=\(state.category)")
         parts.append("mode=\(state.mode)")
