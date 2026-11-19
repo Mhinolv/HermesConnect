@@ -38,14 +38,21 @@ final class VoiceTabModel {
     @ObservationIgnored private let liveService: (any LiveModeService)?
     @ObservationIgnored private let makeLive: @MainActor (ChatViewModel, any LiveModeService) -> LiveModeSessionModel
     @ObservationIgnored private var server: UUID?
+    /// Issue #138: the Now Playing entry and the lock screen Stop. `nil` in tests and the demo.
+    @ObservationIgnored private let remoteControls: (any HandsFreeRemoteControls)?
+    @ObservationIgnored private var shownNowPlaying: HandsFreeNowPlayingInfo?
+    /// Issue #138: when the last session stopped. The foreground reconnect counts the time away from then.
+    @ObservationIgnored private(set) var stoppedAt: Date?
 
     /// - Parameters:
     ///   - makeSession: a new voice session for the active server. `nil` when there is no link (DEBUG demo).
     ///   - liveService: the `voice-live` calls (#97). `nil`: Live is not available.
     ///   - makeLive: a new live session in a chat. Tests give a fake connection. No test opens a real session.
     ///   - makePromptVoice: issue #121, on-device speech and STT for prompt lines. Tests give a fake.
+    ///   - remoteControls: issue #138, Now Playing and the lock screen Stop. Tests give a fake.
     init(sessions: SessionListModel, store: VoiceTargetStore = VoiceTargetStore(),
          modeStore: VoiceTabModeStore = VoiceTabModeStore(), liveService: (any LiveModeService)? = nil,
+         remoteControls: (any HandsFreeRemoteControls)? = nil,
          makeSession: @escaping @MainActor () -> VoiceModeSessionModel? = { nil },
          makeLive: @escaping @MainActor (ChatViewModel, any LiveModeService) -> LiveModeSessionModel = {
              LiveModeSessionModel(hermes: $0, service: $1)
@@ -58,14 +65,17 @@ final class VoiceTabModel {
         self.liveService = liveService
         self.makeLive = makeLive
         self.makeSession = makeSession
+        self.remoteControls = remoteControls
         target = store.load(server: nil)
         chosenMode = modeStore.load(server: nil)
         if liveService == nil { liveAvailability = .failed }
+        trackNowPlaying()
     }
 
     /// The live app: a session on the chat link. While VoiceOver runs, only Magic Tap interrupts a reply.
     static func live(sessions: SessionListModel, link: LiveChatTransport?) -> VoiceTabModel {
-        VoiceTabModel(sessions: sessions, liveService: link.map { $0 as any LiveModeService }) {
+        VoiceTabModel(sessions: sessions, liveService: link.map { $0 as any LiveModeService },
+                      remoteControls: SystemHandsFreeRemoteControls()) {
             guard let link else { return nil }
             var tuning = VoiceModeTuning()
             tuning.autoBargeIn = !UIAccessibility.isVoiceOverRunning
@@ -395,4 +405,51 @@ final class VoiceTabModel {
     }
 
     private static func newChatKey() -> String { "voice-\(UUID().uuidString)" }
+
+    // MARK: Background (issue #138)
+
+    /// The Now Playing entry of the running session. `nil` while no session runs.
+    var nowPlaying: HandsFreeNowPlayingInfo? {
+        HandsFreeNowPlayingInfo.make(handsFree: state.isActive, live: isLiveRunning, chatTitle: targetTitle)
+    }
+
+    /// The time away that counts for the foreground reconnect. While a session runs, iOS keeps the app and the link.
+    func awakeAway(backgroundedAt: Date, now: Date = .now) -> TimeInterval {
+        HandsFreeAwake.away(backgroundedAt: backgroundedAt, stoppedAt: stoppedAt, running: isRunning, now: now)
+    }
+
+    /// Follows `nowPlaying` without a view, so a session that ends on the lock screen also removes the controls.
+    private func trackNowPlaying() {
+        withObservationTracking({ _ = nowPlaying }, onChange: Self.nowPlayingChanged(self))
+    }
+
+    /// Observation calls `onChange` on the queue of the change. A block made in this `@MainActor` class gets main
+    /// actor isolation and traps off the main thread (#127 lesson). So the block comes from a `nonisolated` function.
+    nonisolated private static func nowPlayingChanged(_ model: VoiceTabModel) -> @Sendable () -> Void {
+        { [weak model] in
+            Task { @MainActor in
+                model?.syncNowPlaying()
+                model?.trackNowPlaying()
+            }
+        }
+    }
+
+    func syncNowPlaying() {
+        let info = nowPlaying
+        guard info != shownNowPlaying else { return }
+        if shownNowPlaying != nil, info == nil { stoppedAt = .now }
+        shownNowPlaying = info
+        guard let remoteControls else { return }
+        if let info {
+            remoteControls.show(info) { [weak self] in self?.stopFromLockScreen() }
+        } else {
+            remoteControls.hide()
+        }
+    }
+
+    /// A lock screen or Now Playing control: the session ends and the microphone closes.
+    func stopFromLockScreen() {
+        guard isRunning else { return }
+        end()
+    }
 }

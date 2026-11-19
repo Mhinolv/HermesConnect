@@ -1,5 +1,7 @@
+import AVFoundation
 import Foundation
 import HermesKit
+import MediaPlayer
 import SwiftUI
 import Testing
 import UIKit
@@ -78,11 +80,26 @@ private struct NoSpeech: Error {}
         #expect(model.display.title == "Tap to Talk")
     }
 
-    @Test func backgroundPausesAndResumeListensAgain() async throws {
+    /// Issue #138: background and Lock no longer pause (owner decision). The mic stays open in the session.
+    @Test func backgroundAndLockDoNotPauseTheSession() async throws {
         let (model, mic) = rig()
         await model.ringTap()
         NotificationCenter.default.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
-        #expect(model.state == .paused(.background))
+        NotificationCenter.default.post(name: UIApplication.protectedDataWillBecomeUnavailableNotification, object: nil)
+        #expect(model.state == .listening)
+        #expect(mic.isOpen)
+        #expect(mic.deactivations == 0)
+        model.end()
+        #expect(!mic.isOpen)
+    }
+
+    /// A call still pauses and closes the mic. Resume listens again.
+    @Test func aCallPausesAndResumeListensAgain() async throws {
+        let (model, mic) = rig()
+        await model.ringTap()
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification, object: nil, userInfo: [
+            AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
+        #expect(model.state == .paused(.call))
         #expect(model.display.action == .resume)
         #expect(!mic.isOpen)
         model.run(.resume)

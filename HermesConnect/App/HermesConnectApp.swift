@@ -461,7 +461,8 @@ extension RootView {
         case .active:
             guard let since = backgroundedAt else { return }
             backgroundedAt = nil
-            let away = Date.now.timeIntervalSince(since)
+            // Issue #138: a voice session kept the app and the link alive. Only the time after it ended counts.
+            let away = voice.awakeAway(backgroundedAt: since)
             Task {
                 await notifications?.refreshStatus()
                 await model.reconnectOnForeground(link: link?.status, away: away)
