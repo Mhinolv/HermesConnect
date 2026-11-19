@@ -34,6 +34,21 @@ import Testing
         #expect(!show(.paused(.lock)).muteEnabled)
     }
 
+    /// Issue #145: a drop during the turn. The title stays "Thinking…" and the sub line says "Reconnecting…".
+    @Test func thinkingWhileTheChatReattachesSaysReconnecting() {
+        let tool = ChatToolActivity(name: "web_search", isRunning: true)
+        let display = VoiceTabDisplay.make(state: .thinking, muted: false, thinkingSeconds: 12, tool: tool,
+                                           reconnecting: true)
+        #expect(display.title == "Thinking…")
+        #expect(display.subtitle == "Reconnecting…")
+        #expect(display.ring == .working)
+        #expect(display.action == nil)
+        // Only the thinking state shows it. A reply that plays keeps "Speaking".
+        let speaking = VoiceTabDisplay.make(state: .speaking, muted: false, thinkingSeconds: 0, reconnecting: true)
+        #expect(speaking.title == "Speaking")
+        #expect(VoiceTabDisplay.make(state: .thinking, muted: false, thinkingSeconds: 0).subtitle != "Reconnecting…")
+    }
+
     @Test func thinkingCountsSecondsThenSaysStillWorking() {
         #expect(show(.thinking, seconds: 6).subtitle == "Hermes is working · 6 s")
         #expect(show(.thinking, seconds: 9).subtitle == "Hermes is working · 9 s")

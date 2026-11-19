@@ -73,8 +73,10 @@ public struct VoiceTabDisplay: Sendable, Equatable {
     /// - Parameters:
     ///   - afterBargeIn: a barge-in stopped the last reply, and no clip ended since then.
     ///   - tool: issues #120 and #129, the last tool of the turn in the target chat ("Using…" or "Used…").
+    ///   - reconnecting: issue #145, the socket dropped during the turn and the chat reattaches to it.
     public static func make(state: VoiceModeState, muted: Bool, thinkingSeconds: Int,
-                            afterBargeIn: Bool = false, tool: ChatToolActivity? = nil) -> VoiceTabDisplay {
+                            afterBargeIn: Bool = false, tool: ChatToolActivity? = nil,
+                            reconnecting: Bool = false) -> VoiceTabDisplay {
         func session(_ ring: VoiceRingStyle, _ title: String, _ subtitle: String?, action: VoiceTabAction? = nil,
                      muteEnabled: Bool = true) -> VoiceTabDisplay {
             VoiceTabDisplay(ring: ring, title: title, subtitle: subtitle, action: action, isSession: true,
@@ -96,6 +98,8 @@ public struct VoiceTabDisplay: Sendable, Equatable {
         case .transcribing:
             return session(.working, "Transcribing…", workingLine(thinkingSeconds, counting: false))
         case .thinking:
+            // Issue #145: a drop is not a failure. The sub line says so until the reattach ends.
+            if reconnecting { return session(.working, "Thinking…", "Reconnecting…") }
             if let tool {
                 var display = session(.working, "Thinking…", tool.line)
                 display.showsTool = true

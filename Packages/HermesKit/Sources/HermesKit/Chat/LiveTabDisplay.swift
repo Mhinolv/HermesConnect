@@ -76,9 +76,10 @@ extension VoiceTabDisplay {
     ///   - speaking: Hermes talks (the remote audio plays). Else the owner has the floor: the ring is blue.
     ///   - failure: the error line of the failed state.
     ///   - tool: issues #120 and #129, the last tool of the turn. It takes the place of "Still working…".
+    ///   - reconnecting: issue #145, the chat socket dropped during the Hermes turn and the chat reattaches to it.
     public static func live(phase: LiveModePhase, muted: Bool, speaking: Bool, idleWarning: Bool,
                             stillWorking: Bool, failure: String? = nil,
-                            tool: ChatToolActivity? = nil) -> VoiceTabDisplay? {
+                            tool: ChatToolActivity? = nil, reconnecting: Bool = false) -> VoiceTabDisplay? {
         func session(_ ring: VoiceRingStyle, _ title: String, _ subtitle: String?, action: VoiceTabAction? = nil,
                      muteEnabled: Bool = true) -> VoiceTabDisplay {
             VoiceTabDisplay(ring: ring, title: title, subtitle: subtitle, action: action, isSession: true,
@@ -92,6 +93,8 @@ extension VoiceTabDisplay {
         case .reconnecting:
             return session(.working, "Reconnecting…", nil)
         case .working:
+            // Issue #145: the #102 line. The timer goes on, because the phase does not change.
+            if reconnecting { return session(.working, "Reconnecting…", nil) }
             if let tool {
                 var display = session(.working, "Hermes is working…", tool.line)
                 display.showsTool = true

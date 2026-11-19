@@ -42,11 +42,15 @@ struct ChatScreen: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .modifier(ChatTitleBar { maxWidth in
-                ChatNavigationTitle(title: model.title, link: link, updating: model.isUpdating, onRename: renameAction,
-                                    maxWidth: maxWidth)
+                ChatNavigationTitle(title: model.title, link: link, updating: model.isUpdating,
+                                    reattaching: model.isReattaching, onRename: renameAction, maxWidth: maxWidth)
             })
             .modifier(OptionalSessionActionDialogs(state: actions, model: sessions))
             .onAppear { model.startEvents() }
+            // Issue #145: VoiceOver says "Reconnecting" one time for each drop during a turn.
+            .onChange(of: model.isReattaching) { _, reattaching in
+                if reattaching { AccessibilityNotification.Announcement("Reconnecting").post() }
+            }
             // Issue #15: ask for notification permission after the first reply, not at first launch.
             .onChange(of: model.completedReplyId) { _, id in
                 if id != nil { notifications?.requestAfterFirstReply() }
@@ -66,6 +70,8 @@ struct ChatNavigationTitle: View {
     var link: LiveChatTransport?
     /// Issue #15: `open()` merges the server history into the cached messages.
     var updating = false
+    /// Issue #145: the socket dropped during a turn, and the chat reattaches to it.
+    var reattaching = false
     /// Issue #64: with an action, the title is a menu with "Rename", like a `.toolbarTitleMenu`.
     var onRename: (() -> Void)?
     /// Issue #107: the widest title that fits between the bar buttons. `nil` sets no limit.
@@ -92,7 +98,7 @@ struct ChatNavigationTitle: View {
                 titleText
                     .frame(maxWidth: maxWidth)
             }
-            ChatTitleStatus(link: link, updating: updating)
+            ChatTitleStatus(link: link, updating: updating, reattaching: reattaching)
         }
         .accessibilityElement(children: .contain)
     }
@@ -135,9 +141,11 @@ struct ChatTitleStatus: View {
     @Environment(AppModel.self) private var app
     var link: LiveChatTransport?
     var updating = false
+    var reattaching = false
 
     var body: some View {
-        switch ChatLaunch.subtitle(link: link?.status, connection: app.connection, updating: updating) {
+        switch ChatLaunch.subtitle(link: link?.status, connection: app.connection, updating: updating,
+                                   reattaching: reattaching) {
         case .updating:
             HStack(spacing: 4) {
                 ProgressView().controlSize(.mini)
@@ -345,8 +353,9 @@ enum ChatLaunch {
     }
 
     /// The SSH and serve stages win when they fail (Offline, Not connected). Else the chat link state shows.
+    /// Issue #145: `reattaching`, the socket dropped during a turn. "Reconnecting…" shows until the chat reattaches.
     static func subtitle(link: ChatLinkStatus?, connection: AppModel.ConnectionState,
-                         updating: Bool = false) -> Subtitle {
+                         updating: Bool = false, reattaching: Bool = false) -> Subtitle {
         switch connection {
         case .offline, .notStarted, .hostKeyChanged: return .connection
         case .idle, .connecting, .startingHermes, .connected: break
@@ -356,6 +365,7 @@ enum ChatLaunch {
         case .failed: return .chatFailed
         default: break
         }
+        if reattaching { return .reconnecting }
         if updating, case .connected = connection { return .updating }
         return .connection
     }
