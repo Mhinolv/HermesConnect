@@ -169,7 +169,7 @@ private final class Rig {
     var speechError: (any Error)?
     var engine: VoiceModeController!
 
-    init(tuning: VoiceModeTuning = VoiceModeTuning()) {
+    init(tuning: VoiceModeTuning = VoiceModeTuning(), ackVoice: FakeAckVoice? = nil) {
         var clips = 0
         let clock = clock
         engine = VoiceModeController(
@@ -186,7 +186,7 @@ private final class Rig {
                 return URL(fileURLWithPath: "/tmp/voice-mode-test/clip\(clips).m4a")
             },
             removeFile: { [weak self] in self?.removed.append($0) },
-            tuning: tuning, clock: { clock.now }, autoTick: false)
+            tuning: tuning, clock: { clock.now }, autoTick: false, ackVoice: ackVoice)
     }
 
     var speech: FakeVoiceSpeech? { speeches.last }
@@ -737,6 +737,92 @@ private func chatEvent(_ json: String) throws -> GatewayClientEvent {
         #expect(rig.microphone.isOpen)
     }
 
+    /// Issue #134: an interim message, then the final message. `message.complete` carries the final text only.
+    /// The speaker must get both messages in full, in order. `tickAfterFinalStart` ticks once inside the final.
+    private func speakInterimThenFinal(tickAfterFinalStart: Bool, streamedInterim: Bool = true) async throws -> String {
+        let rig = try Setup()
+        await rig.engine.start(chat: rig.vm)
+        rig.run(1, decibels: -20)
+        rig.run(3.1, decibels: -60)
+        try await until { rig.engine.state == .thinking && rig.vm.messages.first?.delivery == .delivered }
+        rig.vm.receive(try chatEvent(#"{"type":"message.start","session_id":"s1","payload":{"turn_id":"t1"}}"#))
+        if streamedInterim {
+            rig.vm.receive(try chatEvent(#"{"type":"message.delta","session_id":"s1","payload":{"text":"Looking into it.","turn_id":"t1","segment":0,"offset":0}}"#))
+            try await until {
+                rig.engine.tick()
+                return !rig.socket.sent.isEmpty
+            }
+            _ = try await sentTextFrames(rig.socket)
+        }
+        let streamed = streamedInterim ? "true" : "false"
+        rig.vm.receive(try chatEvent(#"{"type":"message.interim","session_id":"s1","payload":{"text":"Looking into it.","already_streamed":\#(streamed),"turn_id":"t1","segment":0}}"#))
+        rig.vm.receive(try chatEvent(#"{"type":"tool.start","session_id":"s1","payload":{"tool_id":"x1","name":"web_search"}}"#))
+        rig.vm.receive(try chatEvent(#"{"type":"tool.complete","session_id":"s1","payload":{"tool_id":"x1","name":"web_search"}}"#))
+        rig.vm.receive(try chatEvent(#"{"type":"message.delta","session_id":"s1","payload":{"text":"Here is the ","turn_id":"t1","segment":1,"offset":0}}"#))
+        if tickAfterFinalStart {
+            try await until {
+                rig.engine.tick()
+                return rig.socket.sent.contains { $0["text"]?.stringValue?.contains("Here is") == true }
+            }
+        }
+        rig.vm.receive(try chatEvent(#"{"type":"message.delta","session_id":"s1","payload":{"text":"final report.","turn_id":"t1","segment":1,"offset":12}}"#))
+        rig.vm.receive(try chatEvent(#"{"type":"message.complete","session_id":"s1","payload":{"text":"Here is the final report.","status":"complete"}}"#))
+        try await until {
+            rig.engine.tick()
+            return rig.socket.sent.contains { $0["done"]?.boolValue == true }
+        }
+        let texts = try await sentTextFrames(rig.socket).compactMap { $0["text"]?.stringValue }
+        rig.engine.end()
+        return texts.joined()
+    }
+
+    @Test func anInterimThenAFinalMessageAreBothSpokenInFull() async throws {
+        let spoken = try await speakInterimThenFinal(tickAfterFinalStart: false)
+        #expect(spoken == "Looking into it.\n\nHere is the final report.")
+    }
+
+    @Test func noCharactersOfTheFinalMessageAreLostAfterAnInterimMessage() async throws {
+        let spoken = try await speakInterimThenFinal(tickAfterFinalStart: true)
+        #expect(spoken == "Looking into it.\n\nHere is the final report.")
+    }
+
+    @Test func anInterimThatDidNotStreamIsSpokenToo() async throws {
+        let spoken = try await speakInterimThenFinal(tickAfterFinalStart: false, streamedInterim: false)
+        #expect(spoken == "Looking into it.\n\nHere is the final report.")
+    }
+
+    /// Issue #134: Live mode reads the same progress by a character offset. The text only grows during the turn.
+    @Test func theLiveReplyTextOnlyGrowsOverAnInterimMessage() async throws {
+        let rig = try Setup()
+        let memo = VoiceMemo(fileURL: URL(fileURLWithPath: "/tmp/voice-mode-test/x.m4a"), duration: 2, waveform: [])
+        guard case .delivered(let promptId) = await rig.vm.sendVoiceModeTurn(memo, transcript: "Hi") else {
+            Issue.record("not delivered")
+            return
+        }
+        var seen: [String] = []
+        func sample() {
+            switch rig.vm.liveReplyProgress(promptId: promptId) {
+            case .streaming(let text), .done(let text): seen.append(text)
+            case .waiting, .failed: break
+            }
+        }
+        rig.vm.receive(try chatEvent(#"{"type":"message.start","session_id":"s1","payload":{"turn_id":"t1"}}"#))
+        rig.vm.receive(try chatEvent(#"{"type":"message.delta","session_id":"s1","payload":{"text":"Looking into it.","segment":0,"offset":0}}"#))
+        sample()
+        rig.vm.receive(try chatEvent(#"{"type":"message.interim","session_id":"s1","payload":{"text":"Looking into it.","already_streamed":true,"segment":0}}"#))
+        sample()
+        rig.vm.receive(try chatEvent(#"{"type":"message.delta","session_id":"s1","payload":{"text":"Here is the ","segment":1,"offset":0}}"#))
+        sample()
+        rig.vm.receive(try chatEvent(#"{"type":"message.complete","session_id":"s1","payload":{"text":"Here is the final report.","status":"complete"}}"#))
+        sample()
+        #expect(rig.vm.liveReplyProgress(promptId: promptId) == .done("Looking into it.\n\nHere is the final report."))
+        for (before, after) in zip(seen, seen.dropFirst()) {
+            #expect(after.hasPrefix(before), "\(before.debugDescription) -> \(after.debugDescription)")
+        }
+        // The bubble still shows the final text of `message.complete`.
+        #expect(rig.vm.messages.last?.text == "Here is the final report.")
+    }
+
     @Test func aVoiceModeTurnThatGoesLaterUsesTheNormalSpeakCall() async throws {
         let rig = try Setup()
         let memo = VoiceMemo(fileURL: URL(fileURLWithPath: "/tmp/voice-mode-test/x.m4a"), duration: 2, waveform: [])
@@ -794,5 +880,217 @@ private func chatEvent(_ json: String) throws -> GatewayClientEvent {
         let rig = Rig()
         rig.engine.holdForPrompt()
         #expect(!rig.engine.promptHold)
+    }
+}
+
+/// Issue #134: the on-device ack voice. `speak` returns at `finishLine()` or `stop()`. No audio.
+@MainActor
+final class FakeAckVoice: VoiceModeAckVoice {
+    private(set) var lines: [String] = []
+    private(set) var stops = 0
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    var isSpeaking: Bool { waiter != nil }
+
+    func speak(_ line: String) async {
+        lines.append(line)
+        await withCheckedContinuation { waiter = $0 }
+    }
+
+    func stop() {
+        stops += 1
+        finishLine()
+    }
+
+    func finishLine() {
+        waiter?.resume()
+        waiter = nil
+    }
+}
+
+/// Issue #134: the quick ack while the Hermes turn runs.
+@MainActor
+@Suite(.timeLimit(.minutes(1))) struct VoiceModeAckTests {
+    /// Up to the delivered turn, with no reply text yet. The ack delay starts here.
+    private func reachDelivered(_ rig: Rig) async throws {
+        await rig.engine.start(chat: rig.chat)
+        rig.sayOneClip()
+        try await until("thinking") { rig.engine.state == .thinking && rig.chat.turns.count == 1 }
+        // `runTurn` sets the prompt id on the main actor after the send returns.
+        try await Task.sleep(for: .milliseconds(5))
+    }
+
+    @Test func noReplyTextAfterTheDelayPlaysOneShortLocalAck() async throws {
+        let ack = FakeAckVoice()
+        let rig = Rig(ackVoice: ack)
+        try await reachDelivered(rig)
+        rig.run(1.4, decibels: -60)
+        #expect(ack.lines.isEmpty)
+        rig.run(0.2, decibels: -60)
+        try await until("ack") { ack.isSpeaking }
+        #expect(ack.lines == ["Checking now."])
+        #expect(rig.engine.isAcking)
+        // The ring stays in the working state.
+        #expect(rig.engine.state == .thinking)
+        // The mic listens for a barge-in while the ack plays.
+        #expect(rig.microphone.isOpen)
+        ack.finishLine()
+        try await until("ack end") { !rig.engine.isAcking }
+        #expect(!rig.microphone.isOpen)
+        // One ack per turn, however long the turn runs.
+        rig.run(20, decibels: -60)
+        #expect(ack.lines.count == 1)
+        #expect(rig.engine.ackCount == 1)
+        #expect(rig.chat.transcribed.count == 1)
+    }
+
+    @Test func theNextTurnSaysTheNextLine() async throws {
+        let ack = FakeAckVoice()
+        let rig = Rig(ackVoice: ack)
+        try await reachDelivered(rig)
+        rig.run(1.6, decibels: -60)
+        try await until("ack") { ack.isSpeaking }
+        ack.finishLine()
+        rig.chat.progress = .done("It is noon.")
+        try await until("speech") {
+            rig.engine.tick()
+            return rig.speech?.finished == true
+        }
+        rig.speech?.push(.speaking(viaFallback: false))
+        try await until { rig.engine.state == .speaking }
+        rig.speech?.push(.ended)
+        try await until { rig.engine.state == .listening }
+        rig.chat.progress = .waiting
+        rig.chat.turnResult = .delivered(promptId: "p2")
+        rig.sayOneClip()
+        try await until { rig.engine.state == .thinking && rig.chat.turns.count == 2 }
+        try await Task.sleep(for: .milliseconds(5))
+        rig.run(1.6, decibels: -60)
+        try await until("second ack") { ack.lines.count == 2 }
+        #expect(ack.lines == ["Checking now.", "One moment."])
+    }
+
+    @Test func replyTextWithinTheDelayPlaysNoAck() async throws {
+        let ack = FakeAckVoice()
+        let rig = Rig(ackVoice: ack)
+        try await reachDelivered(rig)
+        rig.run(0.5, decibels: -60)
+        rig.chat.progress = .streaming("It is ")
+        try await until("speech") {
+            rig.engine.tick()
+            return rig.speech?.texts == ["It is "]
+        }
+        // The speaker is slow to start: still no ack.
+        rig.run(3, decibels: -60)
+        #expect(ack.lines.isEmpty)
+        #expect(!rig.engine.isAcking)
+        #expect(rig.engine.ackCount == 0)
+    }
+
+    @Test func aTapStopsTheAckAndTheTurnGoesOn() async throws {
+        let ack = FakeAckVoice()
+        let rig = Rig(ackVoice: ack)
+        try await reachDelivered(rig)
+        rig.run(1.6, decibels: -60)
+        try await until("ack") { ack.isSpeaking }
+        rig.engine.bargeIn()
+        #expect(ack.stops == 1)
+        #expect(!rig.engine.isAcking)
+        #expect(rig.engine.bargeInCount == 1)
+        #expect(rig.engine.state == .thinking)
+        #expect(!rig.microphone.isOpen)
+        // The reply still plays when it comes.
+        rig.chat.progress = .done("It is noon.")
+        try await until("speech") {
+            rig.engine.tick()
+            return rig.speech?.finished == true
+        }
+        #expect(rig.speech?.texts == ["It is noon."])
+        #expect(ack.lines.count == 1)
+    }
+
+    @Test func speechOverTheAckStopsItAndTheTurnGoesOn() async throws {
+        let ack = FakeAckVoice()
+        let rig = Rig(ackVoice: ack)
+        try await reachDelivered(rig)
+        rig.run(1.6, decibels: -60)
+        try await until("ack") { ack.isSpeaking }
+        rig.run(0.4, decibels: -15)
+        #expect(ack.stops == 1)
+        #expect(!rig.engine.isAcking)
+        #expect(rig.engine.state == .thinking)
+        #expect(rig.chat.transcribed.count == 1)
+        rig.chat.progress = .done("It is noon.")
+        try await until("speech") {
+            rig.engine.tick()
+            return rig.speech?.finished == true
+        }
+    }
+
+    @Test func theReplyAudioStopsAnAckThatStillPlays() async throws {
+        let ack = FakeAckVoice()
+        let rig = Rig(ackVoice: ack)
+        try await reachDelivered(rig)
+        rig.run(1.6, decibels: -60)
+        try await until("ack") { ack.isSpeaking }
+        rig.chat.progress = .done("It is noon.")
+        try await until("speech") {
+            rig.engine.tick()
+            return rig.speech?.finished == true
+        }
+        let monitor = rig.microphone.started.last
+        rig.speech?.push(.speaking(viaFallback: false))
+        try await until { rig.engine.state == .speaking }
+        #expect(ack.stops == 1)
+        #expect(!rig.engine.isAcking)
+        // The monitor clip of the ack stays as the barge-in monitor of the reply.
+        #expect(rig.microphone.isOpen)
+        #expect(rig.microphone.started.last == monitor)
+    }
+
+    @Test func endAndPauseStopTheAck() async throws {
+        let ack = FakeAckVoice()
+        let rig = Rig(ackVoice: ack)
+        try await reachDelivered(rig)
+        rig.run(1.6, decibels: -60)
+        try await until("ack") { ack.isSpeaking }
+        rig.engine.pause(.call)
+        #expect(ack.stops == 1)
+        #expect(!rig.engine.isAcking)
+        rig.engine.end()
+        #expect(ack.stops == 1)
+    }
+
+    @Test func muteClosesTheBargeInMicOfTheAck() async throws {
+        let ack = FakeAckVoice()
+        let rig = Rig(ackVoice: ack)
+        try await reachDelivered(rig)
+        rig.run(1.6, decibels: -60)
+        try await until("ack") { ack.isSpeaking }
+        #expect(rig.microphone.isOpen)
+        rig.engine.toggleMute()
+        #expect(!rig.microphone.isOpen)
+        #expect(rig.engine.isAcking)
+        rig.run(0.5, decibels: -10)
+        #expect(ack.stops == 0)
+        rig.engine.toggleMute()
+        #expect(rig.microphone.isOpen)
+    }
+
+    @Test func aPromptHoldStopsTheAckAndBlocksIt() async throws {
+        let ack = FakeAckVoice()
+        let rig = Rig(ackVoice: ack)
+        try await reachDelivered(rig)
+        rig.engine.holdForPrompt()
+        rig.run(3, decibels: -60)
+        #expect(ack.lines.isEmpty)
+    }
+
+    @Test func noAckVoiceMeansNoAck() async throws {
+        let rig = Rig()
+        try await reachDelivered(rig)
+        rig.run(3, decibels: -60)
+        #expect(rig.engine.ackCount == 0)
+        #expect(!rig.microphone.isOpen)
     }
 }

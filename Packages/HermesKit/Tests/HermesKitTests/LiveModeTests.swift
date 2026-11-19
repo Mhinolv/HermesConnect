@@ -283,6 +283,22 @@ private final class FakeHermes: LiveModeHermes {
         #expect(say.contains(#""delegation_id":"d1""#))
     }
 
+    /// Issue #134: a final text that drops the interim text. Live mode speaks the rest and repeats nothing.
+    @Test func aFinalTextWithoutTheInterimTextLosesNothing() async throws {
+        let h = try await live()
+        h.connection.server(#"{"type":"session.input_transcript.delta","delta":"Check the build.","end_ms":10}"#)
+        h.connection.server(#"{"type":"session.delegation.created","delegation":{"id":"d1"}}"#)
+        try await settle { !h.hermes.submits.isEmpty }
+        await Task.yield()
+        h.hermes.progress["p1"] = .streaming("Looking into it. Here is the")
+        h.controller.tick()
+        #expect(h.connection.commentary == ["Looking into it."])
+        h.hermes.progress["p1"] = .done("Here is the final report.")
+        h.controller.tick()
+        #expect(h.connection.commentary == ["Looking into it.", "Here is the final report."])
+        #expect(h.controller.phase == .live)
+    }
+
     @Test func slowTurnSaysStillWorkingAndANewDelegationStopsTheOldTurn() async throws {
         let h = try await live()
         h.connection.server(#"{"type":"session.input_transcript.delta","delta":"Run the tests."}"#)
