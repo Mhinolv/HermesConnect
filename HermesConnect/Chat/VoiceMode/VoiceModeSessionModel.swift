@@ -16,15 +16,17 @@ final class VoiceModeSessionModel {
 
     /// `speech` is the transport of the active server (`LiveChatTransport`).
     /// Issue #101: `tuning` turns off speech barge-in while VoiceOver runs.
+    /// Issue #134: `ackVoice` says the quick ack on the device (the #121 voice). Tests pass `nil`.
     convenience init(speech: any VoiceStreamTransport, microphone: AVVoiceModeMicrophone = AVVoiceModeMicrophone(),
-                     tuning: VoiceModeTuning = VoiceModeTuning()) {
+                     tuning: VoiceModeTuning = VoiceModeTuning(),
+                     ackVoice: (any VoiceModeAckVoice)? = OnDevicePromptVoice()) {
         // Issue #127: each reply checks the output route before it plays.
         let player = microphone.replyPlayer
         self.init(controller: VoiceModeController(
             microphone: microphone, player: player,
             makeSpeech: { try await speech.makeStreamedSpeech(player: $0) },
             makeClipURL: { VoiceMemoFiles.newFile(in: VoiceMemoFiles.directory()) },
-            tuning: tuning))
+            tuning: tuning, ackVoice: ackVoice))
     }
 
     /// Issue #101: tests give an engine with a fake microphone. The pause rules are the same.
@@ -75,9 +77,8 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
     let player: AVAudioEnginePCMPlayer
     let route: VoiceAudioRoute
     /// `player` with the route check before each reply.
-    private(set) lazy var replyPlayer: any StreamedSpeechPlaying = VoiceRoutePlayer(base: player) { [route] in
-        route.beforeReply()
-    }
+    private(set) lazy var replyPlayer: any StreamedSpeechPlaying = VoiceRoutePlayer(base: player,
+                                                                                    beforeReply: Self.beforeReply(route))
     /// The engine of the microphone: the engine of the reply too.
     var captureEngine: AVAudioEngine? { engine }
 
@@ -150,6 +151,12 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
     nonisolated static func installInputTap(on node: AVAudioNode, input: VoiceEngineInput) {
         node.installTap(onBus: 0, bufferSize: 1_024, format: node.outputFormat(forBus: 0),
                         block: inputTap(for: input))
+    }
+
+    /// Issue #134: `StreamedSpeech` calls this on its own executor, off the main actor. Like the input tap, the block
+    /// is made in a `nonisolated` function, so it has no main actor isolation. It writes the diagnostics only.
+    nonisolated static func beforeReply(_ route: VoiceAudioRoute) -> @Sendable (VoiceReplyStart) -> Void {
+        { @Sendable start in route.beforeReply(start) }
     }
 
     nonisolated private static func inputTap(for input: VoiceEngineInput) -> AVAudioNodeTapBlock {

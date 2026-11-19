@@ -106,7 +106,7 @@ private final class Lines: @unchecked Sendable {
         // For example a category change after a live session dropped the speaker.
         session.outputs = [VoiceAudioRoute.receiver]
         let base = FakeRoutePlayer()
-        let player = VoiceRoutePlayer(base: base) {
+        let player = VoiceRoutePlayer(base: base) { _ in
             route.beforeReply()
             base.events.withLock { $0.append(session.outputs.joined()) }
         }
@@ -163,6 +163,34 @@ private final class Lines: @unchecked Sendable {
         try route.activate()
         #expect(session.state.withLock { $0.mode } == .videoChat)
         #expect(VoiceAudioRoute(session: session, environment: ["HERMES_AUDIO_MODE": "bad"]).mode == .voiceChat)
+    }
+
+    /// Issue #134: one line per reply with the speak path and the `start` frame rate. `StreamedSpeech` calls the
+    /// player on its own executor, so the test calls it from background queues.
+    @Test func eachReplyLineShowsThePathAndTheRateFromABackgroundQueue() async throws {
+        let lines = Lines()
+        let directory = FileManager.default.temporaryDirectory.appending(path: "diag-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = AudioDiagnosticsFile(url: directory.appending(path: AudioDiagnosticsFile.fileName))
+        let route = VoiceAudioRoute(session: FakeVoiceAudioSession(outputs: [VoiceAudioRoute.speaker]),
+                                    environment: ["HERMES_AUDIO_DIAG": "1"], diagnostics: file) { lines.add($0) }
+        let player = VoiceRoutePlayer(base: FakeRoutePlayer()) { route.beforeReply($0) }
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                try? player.begin(sampleRate: 24_000)
+                done.resume()
+            }
+        }
+        try await Task.detached { try await player.playClip(SpokenAudio(data: Data(), mimeType: "audio/wav")) }.value
+        let replies = lines.all.filter { $0.hasPrefix("AUDIO_DIAG event=reply") }
+        #expect(replies.count == 2)
+        #expect(replies.first?.hasPrefix("AUDIO_DIAG event=reply path=stream rate=24000 out=Speaker") == true)
+        #expect(replies.last?.hasPrefix("AUDIO_DIAG event=reply path=fallback rate=none out=Speaker") == true)
+        // The diag file of #130 gets the same lines. No text and no audio.
+        let saved = file.read().filter { $0.contains("handsfree event=reply") }
+        #expect(saved.count == 2)
+        #expect(saved.first?.contains("path=stream rate=24000") == true)
+        #expect(saved.last?.contains("path=fallback rate=none") == true)
     }
 
     @Test func theEngineLineShowsVoiceProcessingAndDucking() throws {

@@ -216,6 +216,39 @@ private final class SpeakLoader: HTTPDataLoading, Sendable {
     }
 }
 
+/// Issue #134: the text of a reply that did not go to the speaker yet.
+@Suite struct VoiceReplyUnsentTests {
+    @Test func aGrowingReplyGivesTheNewTail() {
+        #expect(VoiceReplyText.unsent(in: "It is noon.", after: "") == "It is noon.")
+        #expect(VoiceReplyText.unsent(in: "It is noon.", after: "It is ") == "noon.")
+        #expect(VoiceReplyText.unsent(in: "It is noon.", after: "It is noon.") == "")
+        #expect(VoiceReplyText.unsent(in: "", after: "") == "")
+    }
+
+    @Test func aFinalTextThatDropsTheInterimLosesNothing() {
+        // The interim went, then part of the final message, then the final text alone came.
+        #expect(VoiceReplyText.unsent(in: "Here is the final report.", after: "Looking into it.Here is the ")
+            == "final report.")
+        // The final text is all spoken already.
+        #expect(VoiceReplyText.unsent(in: "Here is the final report.", after: "Looking into it.\n\nHere is the final report.")
+            == "")
+        #expect(VoiceReplyText.unsent(in: "Ok.", after: "Looking into it. Ok.") == "")
+    }
+
+    @Test func aNewMessageWithNoOverlapIsSpokenWholeAsANewParagraph() {
+        #expect(VoiceReplyText.unsent(in: "Here is the final report.", after: "Looking into it.")
+            == "\n\nHere is the final report.")
+        #expect(VoiceReplyText.unsent(in: "Here is it.", after: "Looking into it.\n\n") == "Here is it.")
+        // A short chance overlap (". ") does not count.
+        #expect(VoiceReplyText.unsent(in: "t. Next", after: "Wait.") == "\n\nt. Next")
+    }
+
+    @Test func emojiAndAccentsCountAsCharacters() {
+        #expect(VoiceReplyText.unsent(in: "Café 👋🏽 time. Done.", after: "Café 👋🏽 ") == "time. Done.")
+        #expect(VoiceReplyText.unsent(in: "👋🏽 Hello there friend.", after: "Hi.\n\n👋🏽 Hello there") == " friend.")
+    }
+}
+
 @Suite struct SpeakRequestTests {
     private func client(_ loader: SpeakLoader) throws -> HermesRESTClient {
         HermesRESTClient(endpoint: try GatewayEndpoint(port: 8123, token: speakToken), loader: loader)

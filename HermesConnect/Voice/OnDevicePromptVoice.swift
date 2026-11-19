@@ -116,6 +116,9 @@ final class OnDevicePromptVoice: NSObject, VoicePromptVoice {
     }
 }
 
+/// Issue #134: the quick ack of Hands-Free uses the same on-device voice. `speak` and `stop` are the same calls.
+extension OnDevicePromptVoice: VoiceModeAckVoice {}
+
 extension OnDevicePromptVoice: AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         let id = ObjectIdentifier(utterance)

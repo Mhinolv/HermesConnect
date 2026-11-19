@@ -163,7 +163,8 @@ public final class LiveModeController {
     private struct Delegation {
         var id: String
         var promptId: String?
-        var spokenCount = 0
+        /// Issue #134: the reply text that went to the live voice. The text of an interim message comes first.
+        var spokenText = ""
         var submittedAt: Date
     }
 
@@ -478,18 +479,19 @@ public final class LiveModeController {
         case .waiting:
             return
         case .streaming(let text):
-            guard let end = LiveModeText.lastSentenceEnd(in: text) else { return }
-            let count = text.distance(from: text.startIndex, to: end)
-            guard count > current.spokenCount else { return }
-            speak(current.id, String(text.dropFirst(current.spokenCount).prefix(count - current.spokenCount)))
-            current.spokenCount = count
+            // Issue #134: by text, not by a character count, so a rewritten final text loses nothing.
+            let rest = VoiceReplyText.unsent(in: text, after: current.spokenText)
+            guard let end = LiveModeText.lastSentenceEnd(in: rest) else { return }
+            let piece = String(rest[..<end])
+            speak(current.id, piece)
+            current.spokenText += piece
             delegation = current
         case .done(let text):
-            let rest = String(text.dropFirst(current.spokenCount))
+            let rest = VoiceReplyText.unsent(in: text, after: current.spokenText)
             let spoken = VoiceReplyText.spokenText(rest)
             if !spoken.isEmpty {
                 speak(current.id, rest)
-            } else if current.spokenCount == 0 {
+            } else if current.spokenText.isEmpty {
                 send(.thinking(delegationId: current.id, content: "Hermes finished that request without a spoken result.",
                                eventId: nextEventId("think")))
             }

@@ -87,6 +87,8 @@ public protocol VoiceModeChat: AnyObject {
 
 /// The limits of the loop. Tests make the times short.
 public struct VoiceModeTuning: Sendable, Equatable {
+    /// Issue #134: with no reply text this long after the turn is delivered, the local ack plays.
+    public var ackDelaySeconds: TimeInterval = 1.5
     /// A level at or above this is speech.
     public var speechDecibels: Float = -40
     /// Speech must last this long before a clip counts as speech. A click does not.
@@ -108,7 +110,19 @@ public struct VoiceModeTuning: Sendable, Equatable {
     public init() {}
 }
 
+/// Issue #134: the on-device voice of the quick ack (the #121 voice). Nothing goes to the server.
+@MainActor
+public protocol VoiceModeAckVoice: AnyObject {
+    /// Says one line, and returns when it ends or `stop()` cuts it.
+    func speak(_ line: String) async
+    /// Stops the speech at once.
+    func stop()
+}
+
 public enum VoiceModeText {
+    /// Issue #134: the quick ack lines, in turn (design notes).
+    public static let ackLines = ["Checking now.", "One moment.", "On it."]
+
     /// The single word "stop", with any case and punctuation.
     public static func isStopWord(_ transcript: String) -> Bool {
         transcript.lowercased().filter { $0.isLetter || $0.isNumber || $0.isWhitespace }
@@ -135,6 +149,10 @@ public final class VoiceModeController {
     public private(set) var clipEndCount = 0
     /// One more on each barge-in.
     public private(set) var bargeInCount = 0
+    /// Issue #134: the quick ack plays. The state stays `.thinking`. A tap or speech stops it.
+    public private(set) var isAcking = false
+    /// Issue #134: one more on each ack that starts.
+    public private(set) var ackCount = 0
 
     public typealias SpeechFactory = @MainActor (any StreamedSpeechPlaying) async throws -> any VoiceModeSpeaking
 
@@ -147,6 +165,9 @@ public final class VoiceModeController {
     @ObservationIgnored private let autoTick: Bool
     @ObservationIgnored public let tuning: VoiceModeTuning
     @ObservationIgnored private weak var chat: (any VoiceModeChat)?
+    @ObservationIgnored private let ackVoice: (any VoiceModeAckVoice)?
+    /// One more on each ack start and stop. An ack of an older serial changes nothing when it ends.
+    @ObservationIgnored private var ackSerial = 0
 
     /// One more on each start and end. A task of an older session changes nothing.
     @ObservationIgnored private var epoch = 0
@@ -184,9 +205,13 @@ public final class VoiceModeController {
         var tap: VoiceModeSpeechTap
         var speech: (any VoiceModeSpeaking)?
         var makingSpeech = false
-        /// Characters of the reply that went to the speaker.
-        var sentCount = 0
+        /// Issue #134: the reply text that went to the speaker. The text of an interim message comes first.
+        var sentText = ""
         var finished = false
+        /// Issue #134: when `prompt.submit` took the turn. The ack waits from here.
+        var deliveredAt: TimeInterval?
+        /// Issue #134: one ack per turn at most.
+        var ackStarted = false
         var commands: AsyncStream<SpeechCommand>.Continuation?
     }
 
@@ -194,13 +219,15 @@ public final class VoiceModeController {
     ///   - makeSpeech: a speaker for one reply. The app passes `VoiceStreamTransport.makeStreamedSpeech`.
     ///   - clock: seconds on a monotonic clock.
     ///   - autoTick: `false` in tests. The test calls `tick()`.
+    ///   - ackVoice: issue #134, the on-device voice of the quick ack. `nil`: no ack.
     public init(microphone: any VoiceModeMicrophone, player: any StreamedSpeechPlaying,
                 makeSpeech: @escaping SpeechFactory,
                 makeClipURL: @escaping @MainActor () -> URL,
                 removeFile: @escaping @MainActor (URL) -> Void = { try? FileManager.default.removeItem(at: $0) },
                 tuning: VoiceModeTuning = VoiceModeTuning(),
                 clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-                autoTick: Bool = true) {
+                autoTick: Bool = true, ackVoice: (any VoiceModeAckVoice)? = nil) {
+        self.ackVoice = ackVoice
         self.microphone = microphone
         self.player = player
         self.makeSpeech = makeSpeech
@@ -307,6 +334,9 @@ public final class VoiceModeController {
                 state = .muted
             case .speaking:
                 closeMicrophone()
+            case .thinking where isAcking:
+                // Issue #134: the barge-in mic of the ack closes. The ack goes on.
+                closeMicrophone()
             default:
                 break
             }
@@ -317,6 +347,8 @@ public final class VoiceModeController {
                 listen()
             case .speaking:
                 startMonitor()
+            case .thinking where isAcking:
+                startMonitor()
             default:
                 break
             }
@@ -326,6 +358,14 @@ public final class VoiceModeController {
     /// Barge-in: the reply stops (`{"stop":true}`) and the next listen turn opens. A tap on the ring calls it,
     /// and so does speech over the reply.
     public func bargeIn() {
+        if state == .thinking, isAcking {
+            // Issue #134: the ack stops. The Hermes turn goes on, and its reply plays when it comes.
+            bargeInCount += 1
+            stopAck()
+            closeMicrophone()
+            log.info("voice mode ack barge-in")
+            return
+        }
         guard state == .speaking, let current = turn else { return }
         bargeInCount += 1
         turn = nil
@@ -362,6 +402,7 @@ public final class VoiceModeController {
     public func holdForPrompt() {
         guard state.isActive, !promptHold else { return }
         promptHold = true
+        stopAck()
         closeMicrophone()
         level = 0
         log.info("voice mode held for a prompt")
@@ -405,6 +446,12 @@ public final class VoiceModeController {
             let seconds = max(0, Int(time - (turn?.startedAt ?? time) + 0.001))
             if seconds != thinkingSeconds { thinkingSeconds = seconds }
             pumpReply()
+            guard state == .thinking else { return }
+            if isAcking {
+                monitorTick(time)
+            } else {
+                ackTick(time)
+            }
         case .speaking:
             pumpReply()
             guard state == .speaking, let turn else { return }
@@ -523,6 +570,7 @@ public final class VoiceModeController {
         switch result {
         case .delivered(let promptId):
             turn?.promptId = promptId
+            turn?.deliveredAt = clock()
             log.info("voice mode turn delivered: message \(promptId)")
             pumpReply()
         case .queued:
@@ -555,7 +603,7 @@ public final class VoiceModeController {
             return setFailure(.turnFailed)
         }
         guard current.speech != nil else {
-            if done, current.sentCount == 0, VoiceReplyText.spokenText(text).isEmpty {
+            if done, current.sentText.isEmpty, VoiceReplyText.spokenText(text).isEmpty {
                 // Nothing to speak: listen again.
                 turn = nil
                 return afterReply()
@@ -566,12 +614,14 @@ public final class VoiceModeController {
             openSpeech(for: current)
             return
         }
-        let count = text.count
-        if count > current.sentCount {
-            current.commands?.yield(.append(String(text.dropFirst(current.sentCount))))
-            current.sentCount = count
+        guard !current.finished else { return }
+        // Issue #134: by text, not by a character count. A final text that drops the interim text loses nothing.
+        let delta = VoiceReplyText.unsent(in: text, after: current.sentText)
+        if !delta.isEmpty {
+            current.commands?.yield(.append(delta))
+            current.sentText += delta
         }
-        if done, !current.finished {
+        if done {
             current.finished = true
             current.commands?.yield(.finish)
             current.commands?.finish()
@@ -624,6 +674,8 @@ public final class VoiceModeController {
         switch speechState {
         case .speaking:
             guard state == .thinking else { return }
+            // Issue #134: the reply wins over the ack. The monitor clip of the ack stays for the reply.
+            stopAck()
             state = .speaking
             startMonitor()
         case .ended:
@@ -648,10 +700,49 @@ public final class VoiceModeController {
     }
 
     private func afterReply() {
+        stopAck()
         closeMicrophone()
         idleSince = clock()
         level = 0
         listen()
+    }
+
+    // MARK: Quick ack (issue #134)
+
+    /// About 1.5 s after the turn is delivered with no reply text: one short on-device line. One per turn.
+    /// Reply text before the delay opens the speaker, so no ack plays. The mic listens for a barge-in meanwhile.
+    private func ackTick(_ time: TimeInterval) {
+        guard let ackVoice, !promptHold, var current = turn, !current.ackStarted,
+              let deliveredAt = current.deliveredAt, current.speech == nil, !current.makingSpeech,
+              time - deliveredAt >= tuning.ackDelaySeconds else { return }
+        current.ackStarted = true
+        turn = current
+        let lines = VoiceModeText.ackLines
+        let line = lines[ackCount % lines.count]
+        ackCount += 1
+        ackSerial += 1
+        let serial = ackSerial
+        isAcking = true
+        log.info("voice mode ack")
+        startMonitor()
+        Task { [weak self] in
+            await ackVoice.speak(line)
+            self?.ackEnded(serial)
+        }
+    }
+
+    private func ackEnded(_ serial: Int) {
+        guard serial == ackSerial, isAcking else { return }
+        isAcking = false
+        // The turn still thinks: the monitor clip of the ack closes. A reply that plays keeps it.
+        if state == .thinking, clip?.monitor == true { closeMicrophone() }
+    }
+
+    private func stopAck() {
+        guard isAcking else { return }
+        ackSerial += 1
+        isAcking = false
+        ackVoice?.stop()
     }
 
     // MARK: Barge-in monitor
@@ -688,6 +779,7 @@ public final class VoiceModeController {
 
     /// Stops the reply of the current turn at once. The Hermes turn goes on in the chat.
     private func silenceTurn() {
+        stopAck()
         guard let current = turn else { return }
         turn = nil
         current.commands?.finish()
