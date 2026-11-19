@@ -13,6 +13,8 @@ final class SystemHandsFreeRemoteControls: HandsFreeRemoteControls {
     private var targets: [(MPRemoteCommand, Any)] = []
 
     func show(_ info: HandsFreeNowPlayingInfo, onStop: @escaping @MainActor @Sendable () -> Void) {
+        // Issue #130 round 2: a voice clip does not replace or clear this entry while it shows.
+        NowPlayingOwner.shared.claim(.handsFree)
         MPNowPlayingInfoCenter.default().nowPlayingInfo = Self.nowPlayingInfo(info)
         guard targets.isEmpty else { return }
         let center = MPRemoteCommandCenter.shared()
@@ -28,6 +30,7 @@ final class SystemHandsFreeRemoteControls: HandsFreeRemoteControls {
     }
 
     func hide() {
+        NowPlayingOwner.shared.release(.handsFree)
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         for (command, target) in targets {
             command.removeTarget(target)

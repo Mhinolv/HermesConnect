@@ -8,20 +8,24 @@ public protocol VoicePlaybackSession: AnyObject, Sendable {
     var routeState: VoiceAudioRouteState { get }
     /// `AVAudioSession.isOtherAudioPlaying`.
     var isOtherAudioPlaying: Bool { get }
-    /// `.playback` with `.spokenAudio`. With `duckOthers`, the option `.duckOthers` too.
-    func setPlaybackCategory(duckOthers: Bool) throws
+    /// `.playback` with `mode`. With `duckOthers`, the option `.duckOthers` too.
+    func setPlaybackCategory(duckOthers: Bool, mode: VoicePlaybackMode) throws
     func setActive(_ active: Bool) throws
 }
 
 /// Sets the audio session before a clip plays and writes the playback diagnostics.
 public final class VoicePlaybackAudio: Sendable {
     private let session: any VoicePlaybackSession
-    private let diagnostics: AudioDiagnosticsFile?
+    public let diagnostics: AudioDiagnosticsFile?
+    /// Issue #130 round 2: `.default`, or `.spokenAudio` with `HERMES_PLAYBACK_MODE=spokenAudio` (drive A/B).
+    public let mode: VoicePlaybackMode
     private let log = HermesLog(category: "audio")
 
-    public init(session: any VoicePlaybackSession, diagnostics: AudioDiagnosticsFile? = nil) {
+    public init(session: any VoicePlaybackSession, diagnostics: AudioDiagnosticsFile? = nil,
+                mode: VoicePlaybackMode = .current) {
         self.session = session
         self.diagnostics = diagnostics
+        self.mode = mode
     }
 
     /// A clip starts to play from the start or from a seek.
@@ -39,7 +43,7 @@ public final class VoicePlaybackAudio: Sendable {
     /// the session does not mix: a mixable session does not start the media stream of some car Bluetooth
     /// units, so the clip was silent until music played (issue #130). `.playback` also leaves the HFP call channel.
     private func start(_ event: String) throws {
-        try session.setPlaybackCategory(duckOthers: session.isOtherAudioPlaying)
+        try session.setPlaybackCategory(duckOthers: session.isOtherAudioPlaying, mode: mode)
         try session.setActive(true)
         report(event)
     }

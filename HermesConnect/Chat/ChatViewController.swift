@@ -426,6 +426,7 @@ final class ChatViewController: MessagesViewController {
             if url == self?.voice.reviewURL { self?.updateReviewPlayback(time: time) }
         }
         player.onFailure = { [weak self] url in self?.playbackFailed(url: url) }
+        player.chatTitle = { [weak self] in self?.model.title }
         updateSendButton()
     }
 
