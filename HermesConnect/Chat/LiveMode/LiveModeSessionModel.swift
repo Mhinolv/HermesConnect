@@ -7,7 +7,8 @@ import UIKit
 ///
 /// - The status gate: Live can start only when `voice-live/status` says `available: true`.
 /// - The microphone check before a session.
-/// - The app end rules: background and a phone call (audio interruption) end the session.
+/// - The app end rule: a phone call (audio interruption) ends the session.
+///   Issue #138: background and Lock do not end it. WebRTC keeps the audio session active, so the session goes on.
 /// - `LiveModeController` (HermesKit) does the rest: WebRTC, SDP, delegations, commentary, idle and reconnect.
 @MainActor @Observable
 final class LiveModeSessionModel {
@@ -33,10 +34,6 @@ final class LiveModeSessionModel {
         controller = LiveModeController(service: service, hermes: hermes, makeConnection: makeConnection,
                                         autoTick: autoTick)
         let center = NotificationCenter.default
-        observers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil,
-                                            queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.end(.background) }
-        })
         observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil,
                                             queue: .main) { [weak self] note in
             let began = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)

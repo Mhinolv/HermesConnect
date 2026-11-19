@@ -91,23 +91,37 @@ private final class StubConnection: LiveModeConnection {
         #expect(model.controller.lastEnd?.toast == "Live Mode Ended, 0:00")
     }
 
-    @Test func backgroundAndPhoneCallEndTheSession() async throws {
-        for note in [UIApplication.didEnterBackgroundNotification, AVAudioSession.interruptionNotification] {
-            let service = StatusService(VoiceLiveStatus(mode: .gptLive, available: true))
-            let connection = StubConnection()
-            let (model, chat) = session(service, connection: connection)
-            _ = chat
-            await model.start()
-            try await settle { !service.offers.isEmpty }
-            connection.onEvent?(.connected)
-            NotificationCenter.default.post(name: note, object: nil, userInfo: [
-                AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
-            try await settle { !model.controller.isActive }
-            #expect(model.controller.lastEnd?.reason == (note == AVAudioSession.interruptionNotification
-                                                          ? .phoneCall : .background))
-            try await settle { connection.closed }
-            #expect(connection.closed)
-        }
+    @Test func aPhoneCallEndsTheSession() async throws {
+        let service = StatusService(VoiceLiveStatus(mode: .gptLive, available: true))
+        let connection = StubConnection()
+        let (model, chat) = session(service, connection: connection)
+        _ = chat
+        await model.start()
+        try await settle { !service.offers.isEmpty }
+        connection.onEvent?(.connected)
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification, object: nil, userInfo: [
+            AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
+        try await settle { !model.controller.isActive }
+        #expect(model.controller.lastEnd?.reason == .phoneCall)
+        try await settle { connection.closed }
+        #expect(connection.closed)
+    }
+
+    /// Issue #138: background and Lock do not end a live session (owner decision).
+    @Test func backgroundAndLockDoNotEndTheSession() async throws {
+        let service = StatusService(VoiceLiveStatus(mode: .gptLive, available: true))
+        let connection = StubConnection()
+        let (model, chat) = session(service, connection: connection)
+        _ = chat
+        await model.start()
+        try await settle { !service.offers.isEmpty }
+        connection.onEvent?(.connected)
+        NotificationCenter.default.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.post(name: UIApplication.protectedDataWillBecomeUnavailableNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(model.controller.isActive)
+        #expect(!connection.closed)
+        model.end(.hangUp)
     }
 
     @Test func microphoneOffStartsNoSession() async throws {

@@ -7,7 +7,9 @@ import UIKit
 /// Issue #96: the app side of the voice mode engine. It has no views, so the #101 Voice tab can use it as is.
 ///
 /// - The real microphone and audio session (`AVVoiceModeMicrophone`) and the real player (`AVAudioEnginePCMPlayer`).
-/// - The pause rules: a call (audio interruption), background and Lock pause the loop and close the mic.
+/// - The pause rule: a call (audio interruption) pauses the loop and closes the mic.
+///   Issue #138: background and Lock do not pause. The audio session and the engine stay active, so the session
+///   goes on with the screen locked and in other apps.
 /// - `VoiceModeController` (HermesKit) does the rest: silence rules, transcript, voice turn, `speak-stream`, barge-in.
 @MainActor @Observable
 final class VoiceModeSessionModel {
@@ -29,7 +31,7 @@ final class VoiceModeSessionModel {
             tuning: tuning, ackVoice: ackVoice))
     }
 
-    /// Issue #101: tests give an engine with a fake microphone. The pause rules are the same.
+    /// Issue #101: tests give an engine with a fake microphone. The pause rule is the same.
     init(controller: VoiceModeController) {
         self.controller = controller
         let center = NotificationCenter.default
@@ -38,14 +40,6 @@ final class VoiceModeSessionModel {
             let began = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
                 .flatMap(AVAudioSession.InterruptionType.init(rawValue:)) == .began
             MainActor.assumeIsolated { if began { self?.controller.pause(.call) } }
-        })
-        observers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil,
-                                            queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.controller.pause(.background) }
-        })
-        observers.append(center.addObserver(forName: UIApplication.protectedDataWillBecomeUnavailableNotification,
-                                            object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.controller.pause(.lock) }
         })
     }
 
