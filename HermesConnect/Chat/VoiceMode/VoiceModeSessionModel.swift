@@ -18,17 +18,27 @@ final class VoiceModeSessionModel {
 
     /// `speech` is the transport of the active server (`LiveChatTransport`).
     /// Issue #101: `tuning` turns off speech barge-in while VoiceOver runs.
-    /// Issue #134: `ackVoice` says the quick ack on the device (the #121 voice). Tests pass `nil`.
+    /// Issue #134: `ackVoice` makes the voice of the quick ack. A `nil` voice: no ack.
+    /// Issue #139: the default is the bundled `af_bella` clips on the Hands-Free engine, with the on-device
+    /// voice (#121) as the fallback.
     convenience init(speech: any VoiceStreamTransport, microphone: AVVoiceModeMicrophone = AVVoiceModeMicrophone(),
                      tuning: VoiceModeTuning = VoiceModeTuning(),
-                     ackVoice: (any VoiceModeAckVoice)? = OnDevicePromptVoice()) {
+                     ackVoice: @MainActor (AVVoiceModeMicrophone) -> (any VoiceModeAckVoice)? =
+                        VoiceModeSessionModel.bundledAckVoice) {
         // Issue #127: each reply checks the output route before it plays.
         let player = microphone.replyPlayer
+        let ackVoice = ackVoice(microphone)
         self.init(controller: VoiceModeController(
             microphone: microphone, player: player,
             makeSpeech: { try await speech.makeStreamedSpeech(player: $0) },
             makeClipURL: { VoiceMemoFiles.newFile(in: VoiceMemoFiles.directory()) },
             tuning: tuning, ackVoice: ackVoice))
+    }
+
+    /// Issue #139: the ack clips play on their own node of the reply engine: the reply level, voice processing,
+    /// and the screen locked (#138). A missing or bad clip uses the on-device voice.
+    static func bundledAckVoice(_ microphone: AVVoiceModeMicrophone) -> (any VoiceModeAckVoice)? {
+        BundledAckVoice(bundle: .main, player: microphone.ackPlayer, fallback: OnDevicePromptVoice())
     }
 
     /// Issue #101: tests give an engine with a fake microphone. The pause rule is the same.
@@ -73,6 +83,8 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
     /// `player` with the route check before each reply.
     private(set) lazy var replyPlayer: any StreamedSpeechPlaying = VoiceRoutePlayer(base: player,
                                                                                     beforeReply: Self.beforeReply(route))
+    /// Issue #139: the quick ack clips, on `engine` too. Its own node, so a stop of the ack keeps the reply.
+    let ackPlayer: AVAudioEngineAckPlayer
     /// The engine of the microphone: the engine of the reply too.
     var captureEngine: AVAudioEngine? { engine }
 
@@ -86,6 +98,7 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         player = AVAudioEnginePCMPlayer(engine: engine)
+        ackPlayer = AVAudioEngineAckPlayer(engine: engine)
         let processing = processing
         route = VoiceAudioRoute(session: SystemVoiceAudioSession(), processing: { processing.value.withLock { $0 } },
                                 environment: environment, diagnostics: .shared)
@@ -134,6 +147,7 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
         observers = []
         discardClip()
         engine.inputNode.removeTap(onBus: 0)
+        ackPlayer.stop()
         player.shutdown()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }

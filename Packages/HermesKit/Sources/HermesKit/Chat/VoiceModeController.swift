@@ -110,7 +110,8 @@ public struct VoiceModeTuning: Sendable, Equatable {
     public init() {}
 }
 
-/// Issue #134: the on-device voice of the quick ack (the #121 voice). Nothing goes to the server.
+/// Issue #134: the voice of the quick ack. Nothing goes to the server.
+/// Issue #139: the app uses `BundledAckVoice` (bundled clips), with the on-device voice (#121) as the fallback.
 @MainActor
 public protocol VoiceModeAckVoice: AnyObject {
     /// Says one line, and returns when it ends or `stop()` cuts it.
@@ -120,8 +121,9 @@ public protocol VoiceModeAckVoice: AnyObject {
 }
 
 public enum VoiceModeText {
-    /// Issue #134: the quick ack lines, in turn (design notes).
-    public static let ackLines = ["Checking now.", "One moment.", "On it."]
+    /// Issue #134: the quick ack lines, in turn (design notes). In order, so no line follows itself.
+    /// Issue #139: the same lines as `HermesConnect/Resources/AckClips/ack_lines.txt`, one bundled clip each.
+    public static let ackLines = ["Checking now.", "One moment.", "On it.", "Just a moment.", "Let me check."]
 
     /// The single word "stop", with any case and punctuation.
     public static func isStopWord(_ transcript: String) -> Bool {

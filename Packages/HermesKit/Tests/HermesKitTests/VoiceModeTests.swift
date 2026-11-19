@@ -173,7 +173,7 @@ private final class Rig {
     var speechError: (any Error)?
     var engine: VoiceModeController!
 
-    init(tuning: VoiceModeTuning = VoiceModeTuning(), ackVoice: FakeAckVoice? = nil) {
+    init(tuning: VoiceModeTuning = VoiceModeTuning(), ackVoice: (any VoiceModeAckVoice)? = nil) {
         var clips = 0
         let clock = clock
         engine = VoiceModeController(
@@ -1117,6 +1117,45 @@ final class FakeAckVoice: VoiceModeAckVoice {
         rig.engine.holdForPrompt()
         rig.run(3, decibels: -60)
         #expect(ack.lines.isEmpty)
+    }
+
+    /// Issue #139: the bundled clip voice in the loop. Reply audio and a tap both stop the clip, and the
+    /// lines rotate with no repeat of the last line.
+    @Test func theBundledClipPlaysInTheLoopAndTheReplyAudioStopsIt() async throws {
+        let player = FakeAckClipPlayer()
+        let fallback = FakeAckVoice()
+        let rig = Rig(ackVoice: BundledAckVoice(clipURL: { AckClipFiles.url($0) }, player: player, fallback: fallback))
+        try await reachDelivered(rig)
+        rig.run(1.6, decibels: -60)
+        try await until("ack") { player.isPlaying }
+        #expect(player.urls == [AckClipFiles.url("Checking now.")])
+        rig.chat.progress = .done("It is noon.")
+        try await until("speech") {
+            rig.engine.tick()
+            return rig.speech?.finished == true
+        }
+        rig.speech?.push(.speaking(viaFallback: false))
+        try await until { rig.engine.state == .speaking }
+        #expect(!player.isPlaying)
+        #expect(!rig.engine.isAcking)
+        #expect(fallback.lines.isEmpty, "no on-device voice when the clip plays")
+
+        // The next turn: the next line, and a tap stops it.
+        rig.speech?.push(.ended)
+        try await until("listening") { rig.engine.state == .listening }
+        rig.chat.progress = .waiting
+        rig.chat.turnResult = .delivered(promptId: "p2")
+        rig.sayOneClip()
+        try await until("thinking") { rig.engine.state == .thinking && rig.chat.turns.count == 2 }
+        try await Task.sleep(for: .milliseconds(5))
+        rig.run(1.6, decibels: -60)
+        try await until("second ack") { player.isPlaying }
+        #expect(player.urls == [AckClipFiles.url("Checking now."), AckClipFiles.url("One moment.")])
+        rig.engine.bargeIn()
+        #expect(!player.isPlaying)
+        #expect(!rig.engine.isAcking)
+        #expect(rig.engine.state == .thinking)
+        rig.engine.end()
     }
 
     @Test func noAckVoiceMeansNoAck() async throws {
