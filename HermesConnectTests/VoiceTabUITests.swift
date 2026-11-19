@@ -164,6 +164,7 @@ private struct NoSpeech: Error {}
             ("10-muted", AnyView(screen(.muted, muted: true))),
             ("11-paused", AnyView(screen(.paused(.call)))),
             ("12-error-microphone", AnyView(screen(.error(.microphoneOff)))),
+            ("12-error-microphone-unavailable", AnyView(screen(.error(.microphoneUnavailable)))),
             ("12-error-offline", AnyView(screen(.error(.offline)))),
             ("13-ended-silence", AnyView(screen(.ended(.silence)))),
             ("08-choose-chat", AnyView(VoiceChatPicker(rows: [

@@ -20,8 +20,10 @@ public enum VoiceModeEndReason: Sendable, Equatable {
 }
 
 public enum VoiceModeFailure: Error, Sendable, Equatable {
-    /// No microphone permission, or the microphone did not start.
+    /// iOS microphone access is off.
     case microphoneOff
+    /// Issue #135: access is on, but the audio session or the microphone did not start. Try Again starts it again.
+    case microphoneUnavailable
     /// No link to the server. A clip that did not get a transcript waits in the outbox.
     case offline
     /// The transcription or the Hermes turn failed.
@@ -261,7 +263,7 @@ public final class VoiceModeController {
             guard self.epoch == epoch else { return }
             guard allowed else { return setFailure(.microphoneOff) }
         }
-        guard activateSession() else { return setFailure(.microphoneOff) }
+        guard activateSession() else { return setFailure(.microphoneUnavailable) }
         log.info("voice mode started")
         idleSince = clock()
         listen()
@@ -311,7 +313,7 @@ public final class VoiceModeController {
         }
         // Issue #121: a resume shows the prompt again. The prompt opens the mic after the answer.
         if microphone.access != .granted { return setFailure(.microphoneOff) }
-        guard activateSession() else { return setFailure(.microphoneOff) }
+        guard activateSession() else { return setFailure(.microphoneUnavailable) }
         idleSince = clock()
         listen()
         if autoTick, tickTask == nil { startTicker() }
@@ -484,7 +486,7 @@ public final class VoiceModeController {
         do {
             try microphone.startClip(url: url)
         } catch {
-            return setFailure(.microphoneOff)
+            return setFailure(.microphoneUnavailable)
         }
         clip = Clip(url: url, startedAt: clock(), monitor: false)
         state = .listening

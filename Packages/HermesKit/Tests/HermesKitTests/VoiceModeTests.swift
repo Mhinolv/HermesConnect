@@ -21,6 +21,7 @@ final class FakeVoiceMicrophone: VoiceModeMicrophone {
     var allowOnRequest = true
     var decibels: Float = -60
     var startError: (any Error)?
+    var activateError: (any Error)?
     private(set) var requests = 0
     private(set) var started: [URL] = []
     private(set) var stops = 0
@@ -37,7 +38,10 @@ final class FakeVoiceMicrophone: VoiceModeMicrophone {
         return allowOnRequest
     }
 
-    func activate() throws { activations += 1 }
+    func activate() throws {
+        if let activateError { throw activateError }
+        activations += 1
+    }
     func deactivate() { deactivations += 1 }
 
     func startClip(url: URL) throws {
@@ -479,6 +483,35 @@ private final class Rig {
         allowed.microphone.access = .undetermined
         await allowed.engine.start(chat: allowed.chat)
         #expect(allowed.engine.state == .listening)
+    }
+
+    /// Issue #135: with the permission on, a start failure is not "Microphone Off".
+    @Test func startFailureWithPermissionIsNotMicrophoneOff() async throws {
+        let rig = Rig()
+        rig.microphone.startError = FakeVoiceMicrophone.Failure()
+        await rig.engine.start(chat: rig.chat)
+        #expect(rig.engine.state != .error(.microphoneOff))
+        #expect(rig.engine.state == .error(.microphoneUnavailable))
+
+        // Try Again opens the microphone when the start works again.
+        rig.microphone.startError = nil
+        rig.engine.resume()
+        #expect(rig.engine.state == .listening)
+        #expect(rig.microphone.isOpen)
+
+        let session = Rig()
+        session.microphone.activateError = FakeVoiceMicrophone.Failure()
+        await session.engine.start(chat: session.chat)
+        #expect(session.engine.state == .error(.microphoneUnavailable))
+        session.microphone.activateError = nil
+        session.engine.resume()
+        #expect(session.engine.state == .listening)
+
+        // Permission off after a pause: Microphone Off.
+        rig.engine.pause(.background)
+        rig.microphone.access = .denied
+        rig.engine.resume()
+        #expect(rig.engine.state == .error(.microphoneOff))
     }
 
     @Test func offlineTranscriptKeepsTheClipAsAMemo() async throws {
