@@ -118,6 +118,9 @@ public struct VoiceTabDisplay: Sendable, Equatable {
             case .microphoneOff:
                 return session(.paused, "Microphone Off", "Turn on Microphone for Hermes in Settings",
                                action: .openSettings, muteEnabled: false)
+            case .microphoneUnavailable:
+                return session(.paused, "Microphone Unavailable", "Could not start the microphone",
+                               action: .tryAgain, muteEnabled: false)
             case .offline:
                 return session(.paused, "Offline", "Your clip waits in the chat",
                                action: .tryAgain, muteEnabled: false)

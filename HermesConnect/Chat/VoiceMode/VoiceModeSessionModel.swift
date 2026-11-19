@@ -84,18 +84,20 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
 
     private let input = VoiceEngineInput()
     private let processing = VoiceProcessingBox()
-    private let usesVoiceProcessing: Bool
+    /// Issue #135: starts the engine again after a route or configuration change, with a new tap.
+    private let keeper: VoiceEngineKeeper
     private var observers: [NSObjectProtocol] = []
-    private var active = false
 
     struct StartFailed: Error {}
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         player = AVAudioEnginePCMPlayer(engine: engine)
-        usesVoiceProcessing = environment["HERMES_AUDIO_VP"] != "0"
         let processing = processing
         route = VoiceAudioRoute(session: SystemVoiceAudioSession(), processing: { processing.value.withLock { $0 } },
                                 environment: environment, diagnostics: .shared)
+        keeper = VoiceEngineKeeper(engine: AVVoiceCaptureEngine(
+            engine: engine, input: input, processing: processing,
+            usesVoiceProcessing: environment["HERMES_AUDIO_VP"] != "0"), route: route)
     }
 
     var access: VoiceModeMicrophoneAccess {
@@ -110,64 +112,36 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
         await AVAudioApplication.requestRecordPermission()
     }
 
+    /// Issue #135: only a session failure throws. An engine failure is in the diagnostics, and the clip
+    /// start tries the engine again (`ensureRunning`), so Try Again works with the session still active.
     func activate() throws {
         try route.activate()
-        try startEngine()
-        active = true
+        keeper.active = true
+        try? keeper.start()
         guard observers.isEmpty else { return }
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil,
-                                            queue: .main) { [route] note in
+                                            queue: .main) { [weak self, route] note in
             let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
                 .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
             route.routeChanged(reason: reason.map(SystemVoiceAudioSession.name) ?? "unknown")
+            MainActor.assumeIsolated { self?.keeper.refresh() }
         })
-        // A route change stops the engine. The loop goes on: the tap gets the new input format.
+        // A route change stops the engine (HFP has another input format). The loop goes on with a new tap.
         observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine,
                                             queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self, self.active else { return }
-                try? self.startEngine()
-            }
+            MainActor.assumeIsolated { self?.keeper.refresh() }
         })
     }
 
     func deactivate() {
-        active = false
+        keeper.active = false
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
         discardClip()
         engine.inputNode.removeTap(onBus: 0)
         player.shutdown()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-    }
-
-    /// Voice processing can change only while the engine stops (Apple header of `setVoiceProcessingEnabled`).
-    private func startEngine() throws {
-        let inputNode = engine.inputNode
-        if !engine.isRunning, usesVoiceProcessing, !inputNode.isVoiceProcessingEnabled {
-            do {
-                try inputNode.setVoiceProcessingEnabled(true)
-            } catch {
-                HermesLog(category: "audio").notice("voice processing failed: \((error as NSError).code)")
-            }
-        }
-        var status = VoiceProcessingStatus.off
-        if inputNode.isVoiceProcessingEnabled {
-            // Our reply is the voice stream. Other audio (music, on-device speech) ducks as little as it can.
-            inputNode.voiceProcessingOtherAudioDuckingConfiguration =
-                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
-            status = VoiceProcessingStatus(enabled: true, ducking: "min")
-        }
-        processing.value.withLock { $0 = status }
-        _ = engine.mainMixerNode
-        inputNode.removeTap(onBus: 0)
-        Self.installInputTap(on: inputNode, input: input)
-        if !engine.isRunning {
-            engine.prepare()
-            try engine.start()
-        }
-        route.engineStarted()
     }
 
     /// Puts the tap on `node` (the engine input). AVFAudio calls the block on its own audio queue.
@@ -189,9 +163,16 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
         { @Sendable buffer, _ in input.receive(buffer) }
     }
 
+    /// Issue #135: a stopped engine or a new input format starts again first. Each failure is in the diagnostics.
     func startClip(url: URL) throws {
-        guard engine.isRunning else { throw StartFailed() }
-        try input.start(url: url, settings: AVVoiceRecorder.settings)
+        guard keeper.active else { throw StartFailed() }
+        try keeper.ensureRunning()
+        do {
+            try input.start(url: url, settings: AVVoiceRecorder.settings)
+        } catch {
+            route.failed(.clip, error: error)
+            throw error
+        }
     }
 
     func stopClip() -> TimeInterval {
@@ -202,8 +183,65 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
         input.discard()
     }
 
+    /// Issue #135: each tick also starts a stopped engine again, so a failed restart does not leave the mic silent.
     func level() -> Float {
-        input.level() ?? VoiceWaveform.floorDecibels
+        keeper.heal()
+        return input.level() ?? VoiceWaveform.floorDecibels
+    }
+}
+
+/// Issue #135: `AVAudioEngine` for `VoiceEngineKeeper`. The tap block stays nonisolated (#127 round 3).
+@MainActor
+final class AVVoiceCaptureEngine: VoiceCaptureEngine {
+    private let engine: AVAudioEngine
+    private let input: VoiceEngineInput
+    private let processing: VoiceProcessingBox
+    private let usesVoiceProcessing: Bool
+
+    init(engine: AVAudioEngine, input: VoiceEngineInput, processing: VoiceProcessingBox, usesVoiceProcessing: Bool) {
+        self.engine = engine
+        self.input = input
+        self.processing = processing
+        self.usesVoiceProcessing = usesVoiceProcessing
+    }
+
+    var isRunning: Bool { engine.isRunning }
+
+    var inputFormat: VoiceInputFormat {
+        let format = engine.inputNode.outputFormat(forBus: 0)
+        return VoiceInputFormat(sampleRate: format.sampleRate, channels: Int(format.channelCount))
+    }
+
+    /// Voice processing can change only while the engine stops (Apple header of `setVoiceProcessingEnabled`).
+    func prepareVoiceProcessing() {
+        let inputNode = engine.inputNode
+        if !engine.isRunning, usesVoiceProcessing, !inputNode.isVoiceProcessingEnabled {
+            do {
+                try inputNode.setVoiceProcessingEnabled(true)
+            } catch {
+                HermesLog(category: "audio").notice("voice processing failed: \((error as NSError).code)")
+            }
+        }
+        var status = VoiceProcessingStatus.off
+        if inputNode.isVoiceProcessingEnabled {
+            // Our reply is the voice stream. Other audio (music, on-device speech) ducks as little as it can.
+            inputNode.voiceProcessingOtherAudioDuckingConfiguration =
+                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
+            status = VoiceProcessingStatus(enabled: true, ducking: "min")
+        }
+        processing.value.withLock { $0 = status }
+    }
+
+    func installTap() {
+        _ = engine.mainMixerNode
+        let inputNode = engine.inputNode
+        inputNode.removeTap(onBus: 0)
+        AVVoiceModeMicrophone.installInputTap(on: inputNode, input: input)
+    }
+
+    func start() throws {
+        engine.prepare()
+        try engine.start()
     }
 }
 

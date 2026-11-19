@@ -57,6 +57,11 @@ import Testing
     @Test func errorsShowTheirActions() {
         #expect(show(.error(.microphoneOff)).action == .openSettings)
         #expect(show(.error(.microphoneOff)).title == "Microphone Off")
+        // Issue #135: a start failure with access on.
+        #expect(show(.error(.microphoneUnavailable)).title == "Microphone Unavailable")
+        #expect(show(.error(.microphoneUnavailable)).subtitle == "Could not start the microphone")
+        #expect(show(.error(.microphoneUnavailable)).action == .tryAgain)
+        #expect(VoiceTabDisplay.ringTap(.error(.microphoneUnavailable)) == .resume)
         #expect(show(.error(.offline)).action == .tryAgain)
         #expect(show(.error(.turnFailed)).action == .tryAgain)
         #expect(show(.error(.speakFailed)).subtitle == "The reply is in the chat")
