@@ -112,15 +112,19 @@ struct SettingsView: View {
 }
 
 /// Settings > Voice (issue #10). Auto-play is on by default (owner decision 2026-11-16).
+/// Issue #149: "Thinking Sound" is on by default (owner decision).
 struct VoiceSettingsSection: View {
     @AppStorage(VoiceReplySettings.autoPlayKey) private var autoPlay = true
+    @AppStorage(VoiceModeThinkingSoundSettings.key) private var thinkingSound = true
 
     static let toggleTitle = "Auto-Play Voice Replies"
-    static let footer = "Hermes speaks replies to your voice memos."
+    static let thinkingSoundTitle = "Thinking Sound"
+    static let footer = "Hermes speaks replies to your voice memos. In Hands-Free, a soft heartbeat plays while Hermes thinks."
 
     var body: some View {
         Section {
             Toggle(Self.toggleTitle, isOn: $autoPlay)
+            Toggle(Self.thinkingSoundTitle, isOn: $thinkingSound)
         } header: {
             Text("Voice")
         } footer: {

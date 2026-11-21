@@ -173,7 +173,11 @@ private final class Rig {
     var speechError: (any Error)?
     var engine: VoiceModeController!
 
-    init(tuning: VoiceModeTuning = VoiceModeTuning(), ackVoice: (any VoiceModeAckVoice)? = nil) {
+    /// Issue #149: the "Thinking Sound" setting.
+    var thinkingSoundOn = true
+
+    init(tuning: VoiceModeTuning = VoiceModeTuning(), ackVoice: (any VoiceModeAckVoice)? = nil,
+         thinkingSound: (any VoiceModeThinkingSound)? = nil) {
         var clips = 0
         let clock = clock
         engine = VoiceModeController(
@@ -190,7 +194,8 @@ private final class Rig {
                 return URL(fileURLWithPath: "/tmp/voice-mode-test/clip\(clips).m4a")
             },
             removeFile: { [weak self] in self?.removed.append($0) },
-            tuning: tuning, clock: { clock.now }, autoTick: false, ackVoice: ackVoice)
+            tuning: tuning, clock: { clock.now }, autoTick: false, ackVoice: ackVoice,
+            thinkingSound: thinkingSound, thinkingSoundOn: { [weak self] in self?.thinkingSoundOn ?? true })
     }
 
     var speech: FakeVoiceSpeech? { speeches.last }
@@ -1227,5 +1232,190 @@ final class FakeAckVoice: VoiceModeAckVoice {
         rig.run(3, decibels: -60)
         #expect(rig.engine.ackCount == 0)
         #expect(!rig.microphone.isOpen)
+    }
+}
+
+/// Issue #149: the thinking sound. It counts starts and stops. No audio.
+@MainActor
+final class FakeThinkingSound: VoiceModeThinkingSound {
+    private(set) var starts = 0
+    private(set) var stops = 0
+    var isPlaying: Bool { starts > stops }
+
+    func start() { starts += 1 }
+    func stop() { stops += 1 }
+}
+
+/// Issue #149: the soft heartbeat while Hermes thinks.
+@MainActor
+@Suite(.timeLimit(.minutes(1))) struct VoiceModeThinkingSoundTests {
+    private func reachDelivered(_ rig: Rig) async throws {
+        await rig.engine.start(chat: rig.chat)
+        rig.sayOneClip()
+        try await until("thinking") { rig.engine.state == .thinking && rig.chat.turns.count == 1 }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+
+    /// Up to the end of the ack: the loop may start from here.
+    private func reachAckEnd(_ rig: Rig, _ ack: FakeAckVoice) async throws {
+        try await reachDelivered(rig)
+        rig.run(1.6, decibels: -60)
+        try await until("ack") { ack.isSpeaking }
+        ack.finishLine()
+        try await until("ack end") { !rig.engine.isAcking }
+    }
+
+    private func playReply(_ rig: Rig) async throws {
+        rig.chat.progress = .done("It is noon.")
+        try await until("speech") {
+            rig.engine.tick()
+            return rig.speech?.finished == true
+        }
+        rig.speech?.push(.speaking(viaFallback: false))
+        try await until("speaking") { rig.engine.state == .speaking }
+    }
+
+    @Test func theLoopStartsAfterTheAckAndStopsWhenTheReplyPlays() async throws {
+        let ack = FakeAckVoice()
+        let sound = FakeThinkingSound()
+        let rig = Rig(ackVoice: ack, thinkingSound: sound)
+        try await reachDelivered(rig)
+        rig.run(1.6, decibels: -60)
+        try await until("ack") { ack.isSpeaking }
+        // The loop does not play over the ack.
+        rig.run(1, decibels: -60)
+        #expect(sound.starts == 0)
+        #expect(!rig.engine.isPulsing)
+        ack.finishLine()
+        try await until("ack end") { !rig.engine.isAcking }
+        rig.run(0.1, decibels: -60)
+        #expect(sound.starts == 1)
+        #expect(rig.engine.isPulsing)
+        #expect(rig.engine.state == .thinking)
+        // One start, however long the turn runs.
+        rig.run(10, decibels: -60)
+        #expect(sound.starts == 1)
+        try await playReply(rig)
+        #expect(sound.stops == 1)
+        #expect(!rig.engine.isPulsing)
+    }
+
+    @Test func theSettingOffPlaysNoLoop() async throws {
+        let ack = FakeAckVoice()
+        let sound = FakeThinkingSound()
+        let rig = Rig(ackVoice: ack, thinkingSound: sound)
+        rig.thinkingSoundOn = false
+        try await reachAckEnd(rig, ack)
+        rig.run(5, decibels: -60)
+        #expect(sound.starts == 0)
+        #expect(!rig.engine.isPulsing)
+    }
+
+    @Test func aTapStopsTheLoopForTheTurnAndTheTurnGoesOn() async throws {
+        let ack = FakeAckVoice()
+        let sound = FakeThinkingSound()
+        let rig = Rig(ackVoice: ack, thinkingSound: sound)
+        try await reachAckEnd(rig, ack)
+        rig.run(0.1, decibels: -60)
+        #expect(rig.engine.isPulsing)
+        rig.engine.bargeIn()
+        #expect(sound.stops == 1)
+        #expect(!rig.engine.isPulsing)
+        #expect(rig.engine.state == .thinking)
+        rig.run(5, decibels: -60)
+        #expect(sound.starts == 1)
+        // The reply still plays when it comes.
+        try await playReply(rig)
+        #expect(rig.speech?.texts == ["It is noon."])
+    }
+
+    @Test func theEndAndAnErrorStopTheLoop() async throws {
+        let ack = FakeAckVoice()
+        let sound = FakeThinkingSound()
+        let rig = Rig(ackVoice: ack, thinkingSound: sound)
+        try await reachAckEnd(rig, ack)
+        rig.run(0.1, decibels: -60)
+        #expect(sound.isPlaying)
+        rig.engine.end()
+        #expect(!sound.isPlaying)
+        #expect(!rig.engine.isPulsing)
+
+        let ack2 = FakeAckVoice()
+        let sound2 = FakeThinkingSound()
+        let failing = Rig(ackVoice: ack2, thinkingSound: sound2)
+        try await reachAckEnd(failing, ack2)
+        failing.run(0.1, decibels: -60)
+        #expect(sound2.isPlaying)
+        failing.chat.progress = .failed
+        failing.run(0.1, decibels: -60)
+        #expect(failing.engine.state == .error(.turnFailed))
+        #expect(!sound2.isPlaying)
+    }
+
+    @Test func replyTextWithinTheDelayPlaysNoLoop() async throws {
+        let ack = FakeAckVoice()
+        let sound = FakeThinkingSound()
+        let rig = Rig(ackVoice: ack, thinkingSound: sound)
+        try await reachDelivered(rig)
+        rig.run(0.5, decibels: -60)
+        rig.chat.progress = .streaming("It is ")
+        try await until("speech") {
+            rig.engine.tick()
+            return rig.speech?.texts == ["It is "]
+        }
+        rig.run(3, decibels: -60)
+        #expect(sound.starts == 0)
+    }
+
+    @Test func withNoAckVoiceTheLoopStartsAtTheAckDelay() async throws {
+        let sound = FakeThinkingSound()
+        let rig = Rig(thinkingSound: sound)
+        try await reachDelivered(rig)
+        rig.run(1.4, decibels: -60)
+        #expect(sound.starts == 0)
+        rig.run(0.2, decibels: -60)
+        #expect(sound.starts == 1)
+        try await playReply(rig)
+        #expect(sound.stops == 1)
+    }
+
+    @Test func eachTurnPlaysTheLoopAgain() async throws {
+        let ack = FakeAckVoice()
+        let sound = FakeThinkingSound()
+        let rig = Rig(ackVoice: ack, thinkingSound: sound)
+        try await reachAckEnd(rig, ack)
+        rig.run(0.1, decibels: -60)
+        try await playReply(rig)
+        rig.speech?.push(.ended)
+        try await until { rig.engine.state == .listening }
+        rig.chat.progress = .waiting
+        rig.chat.turnResult = .delivered(promptId: "p2")
+        rig.sayOneClip()
+        try await until { rig.engine.state == .thinking && rig.chat.turns.count == 2 }
+        try await Task.sleep(for: .milliseconds(5))
+        rig.run(1.6, decibels: -60)
+        try await until("second ack") { ack.lines.count == 2 && ack.isSpeaking }
+        ack.finishLine()
+        try await until("ack end") { !rig.engine.isAcking }
+        rig.run(0.1, decibels: -60)
+        #expect(sound.starts == 2)
+    }
+
+    @Test func theBundledLoopIsAShortMonoClip() throws {
+        let url = AckClipFiles.directory.deletingLastPathComponent()
+            .appending(path: "ThinkingSound/thinking-heartbeat.m4a")
+        let buffer = try VoiceModeAckClips.decode(url)
+        let seconds = Double(buffer.frameLength) / buffer.format.sampleRate
+        #expect(seconds > 1.4 && seconds < 1.9, "\(seconds) s")
+        #expect(buffer.format.channelCount == 1)
+        #expect(try #require(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize) < 50_000)
+        #expect(VoiceModeThinkingSoundSettings.resourceName == "thinking-heartbeat")
+    }
+
+    @Test func theSettingIsOnByDefault() throws {
+        let defaults = try #require(UserDefaults(suiteName: "thinking-sound-\(UUID().uuidString)"))
+        #expect(VoiceModeThinkingSoundSettings.isOn(defaults))
+        defaults.set(false, forKey: VoiceModeThinkingSoundSettings.key)
+        #expect(!VoiceModeThinkingSoundSettings.isOn(defaults))
     }
 }

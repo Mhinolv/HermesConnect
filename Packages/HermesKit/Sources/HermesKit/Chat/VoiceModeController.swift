@@ -155,6 +155,8 @@ public final class VoiceModeController {
     public private(set) var isAcking = false
     /// Issue #134: one more on each ack that starts.
     public private(set) var ackCount = 0
+    /// Issue #149: the thinking sound plays. The state stays `.thinking`. A tap stops it.
+    public private(set) var isPulsing = false
 
     public typealias SpeechFactory = @MainActor (any StreamedSpeechPlaying) async throws -> any VoiceModeSpeaking
 
@@ -168,6 +170,9 @@ public final class VoiceModeController {
     @ObservationIgnored public let tuning: VoiceModeTuning
     @ObservationIgnored private weak var chat: (any VoiceModeChat)?
     @ObservationIgnored private let ackVoice: (any VoiceModeAckVoice)?
+    @ObservationIgnored private let thinkingSound: (any VoiceModeThinkingSound)?
+    /// Issue #149: the "Thinking Sound" setting. Read at each turn, so a change applies at the next turn.
+    @ObservationIgnored private let thinkingSoundOn: @MainActor () -> Bool
     /// One more on each ack start and stop. An ack of an older serial changes nothing when it ends.
     @ObservationIgnored private var ackSerial = 0
 
@@ -214,6 +219,8 @@ public final class VoiceModeController {
         var deliveredAt: TimeInterval?
         /// Issue #134: one ack per turn at most.
         var ackStarted = false
+        /// Issue #149: the thinking sound started in this turn. It does not start again after a stop.
+        var pulseStarted = false
         var commands: AsyncStream<SpeechCommand>.Continuation?
     }
 
@@ -222,14 +229,20 @@ public final class VoiceModeController {
     ///   - clock: seconds on a monotonic clock.
     ///   - autoTick: `false` in tests. The test calls `tick()`.
     ///   - ackVoice: issue #134, the on-device voice of the quick ack. `nil`: no ack.
+    ///   - thinkingSound: issue #149, the loop while Hermes thinks. `nil`: no sound.
+    ///   - thinkingSoundOn: issue #149, the "Thinking Sound" setting.
     public init(microphone: any VoiceModeMicrophone, player: any StreamedSpeechPlaying,
                 makeSpeech: @escaping SpeechFactory,
                 makeClipURL: @escaping @MainActor () -> URL,
                 removeFile: @escaping @MainActor (URL) -> Void = { try? FileManager.default.removeItem(at: $0) },
                 tuning: VoiceModeTuning = VoiceModeTuning(),
                 clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-                autoTick: Bool = true, ackVoice: (any VoiceModeAckVoice)? = nil) {
+                autoTick: Bool = true, ackVoice: (any VoiceModeAckVoice)? = nil,
+                thinkingSound: (any VoiceModeThinkingSound)? = nil,
+                thinkingSoundOn: @escaping @MainActor () -> Bool = { true }) {
         self.ackVoice = ackVoice
+        self.thinkingSound = thinkingSound
+        self.thinkingSoundOn = thinkingSoundOn
         self.microphone = microphone
         self.player = player
         self.makeSpeech = makeSpeech
@@ -368,6 +381,12 @@ public final class VoiceModeController {
             log.info("voice mode ack barge-in")
             return
         }
+        if state == .thinking, isPulsing {
+            // Issue #149: a tap stops the thinking sound for this turn. The Hermes turn goes on.
+            stopPulse()
+            log.info("voice mode thinking sound stopped by a tap")
+            return
+        }
         guard state == .speaking, let current = turn else { return }
         bargeInCount += 1
         turn = nil
@@ -405,6 +424,7 @@ public final class VoiceModeController {
         guard state.isActive, !promptHold else { return }
         promptHold = true
         stopAck()
+        stopPulse()
         closeMicrophone()
         level = 0
         log.info("voice mode held for a prompt")
@@ -453,6 +473,7 @@ public final class VoiceModeController {
                 monitorTick(time)
             } else {
                 ackTick(time)
+                pulseTick(time)
             }
         case .speaking:
             pumpReply()
@@ -678,6 +699,8 @@ public final class VoiceModeController {
             guard state == .thinking else { return }
             // Issue #134: the reply wins over the ack. The monitor clip of the ack stays for the reply.
             stopAck()
+            // Issue #149: the thinking sound fades out under the reply.
+            stopPulse()
             state = .speaking
             startMonitor()
         case .ended:
@@ -703,6 +726,7 @@ public final class VoiceModeController {
 
     private func afterReply() {
         stopAck()
+        stopPulse()
         closeMicrophone()
         idleSince = clock()
         level = 0
@@ -747,6 +771,28 @@ public final class VoiceModeController {
         ackVoice?.stop()
     }
 
+    // MARK: Thinking sound (issue #149)
+
+    /// After the ack ends, the loop plays until the reply plays. With no ack voice, it starts at the ack delay.
+    /// Reply text before the delay opens the speaker, so no ack and no loop play. One start per turn.
+    private func pulseTick(_ time: TimeInterval) {
+        guard let thinkingSound, !isPulsing, !isAcking, !promptHold, var current = turn, !current.pulseStarted,
+              let deliveredAt = current.deliveredAt, time - deliveredAt >= tuning.ackDelaySeconds,
+              current.ackStarted || (ackVoice == nil && current.speech == nil && !current.makingSpeech),
+              thinkingSoundOn() else { return }
+        current.pulseStarted = true
+        turn = current
+        isPulsing = true
+        log.info("voice mode thinking sound")
+        thinkingSound.start()
+    }
+
+    private func stopPulse() {
+        guard isPulsing else { return }
+        isPulsing = false
+        thinkingSound?.stop()
+    }
+
     // MARK: Barge-in monitor
 
     /// While the reply plays, the microphone records, so speech over the reply stops it.
@@ -782,6 +828,7 @@ public final class VoiceModeController {
     /// Stops the reply of the current turn at once. The Hermes turn goes on in the chat.
     private func silenceTurn() {
         stopAck()
+        stopPulse()
         guard let current = turn else { return }
         turn = nil
         current.commands?.finish()
