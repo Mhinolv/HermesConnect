@@ -109,7 +109,7 @@ import UIKit
         #expect(abs(band - bar.padding.bottom) <= 1, "space under the field: \(band)")
         // Issue #49: `+`, field and mic stay on one center line.
         let plus = try #require(bar.leftStackView.arrangedSubviews.first)
-        let mic = try #require(bar.rightStackView.arrangedSubviews.first)
+        let mic = try #require(bar.rightStackView.arrangedSubviews.last)
         #expect(abs(centerY(plus, in: window) - field.midY) <= 1)
         #expect(abs(centerY(mic, in: window) - field.midY) <= 1)
         closeKeyboard(controller, window)
