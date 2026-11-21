@@ -363,7 +363,8 @@ final class VoiceTabModel {
             return
         }
         // Issue #134: a tap stops the quick ack. The ring stays in the working state and the turn goes on.
-        if let controller, controller.isAcking {
+        // Issue #149: a tap stops the thinking sound the same way.
+        if let controller, controller.isAcking || controller.isPulsing {
             controller.bargeIn()
             return
         }

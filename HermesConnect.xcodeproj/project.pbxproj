@@ -14,6 +14,7 @@
 		04DC34168B66E6DCE7820198 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D3CB166FF51053854FFDA4B /* SettingsView.swift */; };
 		0749FCE4C11CE9F40F56ECB8 /* ChatPromptCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AB3B618DA951682967BF10D /* ChatPromptCell.swift */; };
 		08E708D3A2E7FBA4E77E5EE4 /* SessionActionsUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = F298C712011FEAA64AF716E8 /* SessionActionsUI.swift */; };
+		0953ACC6071388997E104A70 /* thinking-heartbeat.m4a in Resources */ = {isa = PBXBuildFile; fileRef = 0C511AC6F32A9479D9EF5E71 /* thinking-heartbeat.m4a */; };
 		0AA71132C6D0F9DF6AD60D27 /* SessionListScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0EA96A6753C403E6A93EDFD /* SessionListScreen.swift */; };
 		0B68955E84DA5A28AC430454 /* PromptCardUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEBE8D9B22F94F0ACEFBE0FE /* PromptCardUITests.swift */; };
 		0C197036101D133537EA865D /* LocationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5573AB405E8B46FF30CD8C89 /* LocationController.swift */; };
@@ -143,6 +144,7 @@
 		081D5F40964B02A59BFB23A6 /* HermesConnect.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HermesConnect.entitlements; sourceTree = "<group>"; };
 		088A02E9628112F93B84A965 /* SlashSuggestionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashSuggestionUITests.swift; sourceTree = "<group>"; };
 		08D42E1C9B125E72F906974C /* VoiceLiveTabUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceLiveTabUITests.swift; sourceTree = "<group>"; };
+		0C511AC6F32A9479D9EF5E71 /* thinking-heartbeat.m4a */ = {isa = PBXFileReference; path = "thinking-heartbeat.m4a"; sourceTree = "<group>"; };
 		0D67FE54E3A48D6DF02775E2 /* SpeechPermission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPermission.swift; sourceTree = "<group>"; };
 		10EC6A9B6B3791BCF28648B0 /* LocationCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationCard.swift; sourceTree = "<group>"; };
 		12037EC69A1B3FFA5178CD6D /* InstallStepsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstallStepsView.swift; sourceTree = "<group>"; };
@@ -483,6 +485,7 @@
 				081D5F40964B02A59BFB23A6 /* HermesConnect.entitlements */,
 				48519F8E1A8B7BA59F02B2E9 /* Info.plist */,
 				CECF8F82EE73D940E89CC9EE /* AckClips */,
+				9FBAD9EB15FEEA26E27B483C /* ThinkingSound */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -493,6 +496,14 @@
 				4153B1A96CE372D51FAA0233 /* Fixtures */,
 			);
 			path = HermesKitTests;
+			sourceTree = "<group>";
+		};
+		9FBAD9EB15FEEA26E27B483C /* ThinkingSound */ = {
+			isa = PBXGroup;
+			children = (
+				0C511AC6F32A9479D9EF5E71 /* thinking-heartbeat.m4a */,
+			);
+			path = ThinkingSound;
 			sourceTree = "<group>";
 		};
 		B588AA2AA3A9AC1CBE6CCAA4 /* VoiceMode */ = {
@@ -658,6 +669,7 @@
 				93C0AE6C0E03E0EA25F44E34 /* ack-on-it.m4a in Resources */,
 				AEF334F6FEF2FB5153864A84 /* ack-one-moment.m4a in Resources */,
 				948A6F12063A80BFBDE60D9D /* ack_lines.txt in Resources */,
+				0953ACC6071388997E104A70 /* thinking-heartbeat.m4a in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

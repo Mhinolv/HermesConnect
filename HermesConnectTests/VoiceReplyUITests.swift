@@ -192,7 +192,10 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
 
     @Test func settingsTextMatchesTheDesign() {
         #expect(VoiceSettingsSection.toggleTitle == "Auto-Play Voice Replies")
-        #expect(VoiceSettingsSection.footer == "Hermes speaks replies to your voice memos.")
+        // Issue #149: the thinking sound switch, on by default.
+        #expect(VoiceSettingsSection.thinkingSoundTitle == "Thinking Sound")
+        #expect(VoiceSettingsSection.footer
+                == "Hermes speaks replies to your voice memos. In Hands-Free, a soft heartbeat plays while Hermes thinks.")
     }
 
     /// Issue #130: the bubble player sets `.playback` on each play and each resume, with no ducking when

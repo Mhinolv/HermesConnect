@@ -24,15 +24,24 @@ final class VoiceModeSessionModel {
     convenience init(speech: any VoiceStreamTransport, microphone: AVVoiceModeMicrophone = AVVoiceModeMicrophone(),
                      tuning: VoiceModeTuning = VoiceModeTuning(),
                      ackVoice: @MainActor (AVVoiceModeMicrophone) -> (any VoiceModeAckVoice)? =
-                        VoiceModeSessionModel.bundledAckVoice) {
+                        VoiceModeSessionModel.bundledAckVoice,
+                     thinkingSound: @MainActor (AVVoiceModeMicrophone) -> (any VoiceModeThinkingSound)? =
+                        VoiceModeSessionModel.bundledThinkingSound) {
         // Issue #127: each reply checks the output route before it plays.
         let player = microphone.replyPlayer
         let ackVoice = ackVoice(microphone)
+        let thinkingSound = thinkingSound(microphone)
         self.init(controller: VoiceModeController(
             microphone: microphone, player: player,
             makeSpeech: { try await speech.makeStreamedSpeech(player: $0) },
             makeClipURL: { VoiceMemoFiles.newFile(in: VoiceMemoFiles.directory()) },
-            tuning: tuning, ackVoice: ackVoice))
+            tuning: tuning, ackVoice: ackVoice, thinkingSound: thinkingSound,
+            thinkingSoundOn: { VoiceModeThinkingSoundSettings.isOn() }))
+    }
+
+    /// Issue #149: the heartbeat loop plays on its own node of the reply engine, like the ack clips (#139).
+    static func bundledThinkingSound(_ microphone: AVVoiceModeMicrophone) -> (any VoiceModeThinkingSound)? {
+        BundledThinkingSound(bundle: .main, player: microphone.loopPlayer)
     }
 
     /// Issue #139: the ack clips play on their own node of the reply engine: the reply level, voice processing,
@@ -85,6 +94,8 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
                                                                                     beforeReply: Self.beforeReply(route))
     /// Issue #139: the quick ack clips, on `engine` too. Its own node, so a stop of the ack keeps the reply.
     let ackPlayer: AVAudioEngineAckPlayer
+    /// Issue #149: the thinking sound loop, on `engine` too, on its own node.
+    let loopPlayer: AVAudioEngineLoopPlayer
     /// The engine of the microphone: the engine of the reply too.
     var captureEngine: AVAudioEngine? { engine }
 
@@ -99,6 +110,7 @@ final class AVVoiceModeMicrophone: VoiceModeMicrophone {
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         player = AVAudioEnginePCMPlayer(engine: engine)
         ackPlayer = AVAudioEngineAckPlayer(engine: engine)
+        loopPlayer = AVAudioEngineLoopPlayer(engine: engine)
         let processing = processing
         route = VoiceAudioRoute(session: SystemVoiceAudioSession(), processing: { processing.value.withLock { $0 } },
                                 environment: environment, diagnostics: .shared)
