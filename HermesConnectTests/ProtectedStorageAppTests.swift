@@ -29,6 +29,7 @@ import Testing
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = FileSessionCacheStore(directory: directory)
         store.saveSessions([SessionListItem(id: "k1", title: "Trip")])
+        FileSessionCacheStore.waitForWrites()
         #expect(ProtectedStorage.isExcludedFromBackup(directory))
     }
 

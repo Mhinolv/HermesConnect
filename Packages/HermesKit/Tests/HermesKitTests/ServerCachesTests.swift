@@ -45,6 +45,7 @@ import Testing
         #expect(cache.loadActiveSessionId() == nil)
         #expect(caches.jobs.loadJobs() == nil)
         cache.saveSessions([SessionListItem(id: "lab1")])
+        FileSessionCacheStore.waitForWrites()
 
         #expect(names(root) == [home.uuidString, lab.uuidString])
         #expect(names(ServerCaches.folder(root: root, server: home)) == ["sessions.json", "state.json", "transcripts",
@@ -110,6 +111,9 @@ import Testing
         flat.saveDraft("half typed", sessionId: rows[0].id)
         flat.saveActiveSessionId(rows[0].id)
         FileCronJobCacheStore(directory: root).saveJobs([CronJob(id: "j1", name: "Digest", scheduleDisplay: "Daily")])
+        // Issue #165: the saves go to the write queue. The flat files must be on disk before the test changes them.
+        flat.flush()
+        FileSessionCacheStore.waitForWrites()
     }
 
     @Test func migrationMovesTheFlatCacheToTheActiveServerWithNoLoss() throws {
@@ -202,6 +206,8 @@ import Testing
         flat.saveSessions([rows[0]])
         flat.saveTranscript([message("u1", "hello"), message("u9", "from the old build", at: 200)], sessionId: rows[0].id)
         flat.saveDraft("old build draft", sessionId: rows[0].id)
+        // Issue #165: the draft write waits for the draft delay. An older build wrote it at once.
+        flat.flush()
 
         let report = ServerCacheMigration.run(root: root, active: home, servers: [home])
         #expect(!report.incomplete)

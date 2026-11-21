@@ -336,6 +336,7 @@ import UserNotifications
             .appending(path: "launch-\(UUID().uuidString)/Cache", directoryHint: .isDirectory)
         FileSessionCacheStore(directory: root).saveSessions([SessionListItem(id: "x")])
         ServerCacheSetup.prepare(root: root, model: model)
+        FileSessionCacheStore.waitForWrites()
         #expect(FileManager.default.fileExists(atPath: root.appending(path: "sessions.json").path))
     }
 

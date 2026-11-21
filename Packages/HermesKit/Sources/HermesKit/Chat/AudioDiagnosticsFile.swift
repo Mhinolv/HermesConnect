@@ -23,6 +23,10 @@ public final class AudioDiagnosticsFile: Sendable {
     private let now: @Sendable () -> Date
     /// The lines in the file. `nil` until the first append reads the file.
     private let lines = Mutex<[String]?>(nil)
+    /// Issue #165: true while a file write waits on `writer`. Appends in that time join that write.
+    private let writePending = Mutex(false)
+    /// Issue #165: the file writes run here, not on the queue of the caller (often the main actor).
+    private let writer = DispatchQueue(label: "HermesConnect.AudioDiagnosticsFile", qos: .utility)
 
     public init(url: URL, limit: Int = AudioDiagnosticsFile.limit, now: @escaping @Sendable () -> Date = { Date() }) {
         self.url = url
@@ -30,7 +34,8 @@ public final class AudioDiagnosticsFile: Sendable {
         self.now = now
     }
 
-    /// Adds `line` with the time in front, then writes the file again. Errors stay silent: diagnostics only.
+    /// Adds `line` with the time in front. A serial queue then writes the file again. Errors stay silent:
+    /// diagnostics only. Issue #165: the caller does no file write. The first append reads the file once.
     public func append(_ line: String) {
         let stamp = ISO8601DateFormatter.string(from: now(), timeZone: TimeZone(identifier: "UTC")!,
                                                 formatOptions: [.withInternetDateTime])
@@ -40,11 +45,27 @@ public final class AudioDiagnosticsFile: Sendable {
             all.append(entry)
             if all.count > limit { all.removeFirst(all.count - limit) }
             cache = all
-            let data = Data((all.joined(separator: "\n") + "\n").utf8)
-            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                     withIntermediateDirectories: true)
-            try? data.write(to: url, options: .atomic)
         }
+        let schedule = writePending.withLock { pending in
+            defer { pending = true }
+            return !pending
+        }
+        guard schedule else { return }
+        writer.async { [self] in writeFile() }
+    }
+
+    /// Returns when the file has every line that was appended before the call (tests and checks).
+    public func flush() {
+        writer.sync {}
+    }
+
+    /// On `writer` only. Writes the lines in memory now.
+    private func writeFile() {
+        writePending.withLock { $0 = false }
+        guard let all = lines.withLock({ $0 }) else { return }
+        let data = Data((all.joined(separator: "\n") + "\n").utf8)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
     }
 
     /// The lines in the file now (tests and checks).

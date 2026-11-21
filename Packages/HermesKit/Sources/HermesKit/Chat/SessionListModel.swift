@@ -142,6 +142,13 @@ public final class SessionListModel {
     /// The chat screen of `chat` went away. Another chat that is open stays open.
     public func closeChat(_ chat: ChatViewModel) {
         if openChatModel === chat { openChatModel = nil }
+        // Issue #165: the draft of the closed chat goes to disk now, not after the draft delay.
+        cache.flush()
+    }
+
+    /// Issue #165: the app goes to the background. Every save that waits goes to disk now.
+    public func flushCache() {
+        cache.flush()
     }
 
     /// Issue #15: the number of sessions with the blue dot, cron runs too. Issue #122: the app badge uses `chatsUnreadCount`.

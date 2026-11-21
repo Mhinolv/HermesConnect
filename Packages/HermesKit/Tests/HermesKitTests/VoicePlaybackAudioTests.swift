@@ -144,10 +144,23 @@ private func tempFile() -> URL {
         #expect(lines.count == 3)
         #expect(lines.map { $0.split(separator: " ").last.map(String.init) } == ["event=3", "event=4", "event=5"])
         // A new writer reads the file, keeps the limit and adds after the old lines.
+        file.flush()
         let again = AudioDiagnosticsFile(url: file.url, limit: 3)
         again.append("event=6")
         #expect(again.read().last?.hasSuffix("event=6") == true)
         #expect(again.read().count == 3)
+    }
+
+    /// Issue #165: the append returns before the write. `flush` waits for it, and the file has every line.
+    @Test func writesTheFileOnItsOwnQueue() throws {
+        let file = AudioDiagnosticsFile(url: tempFile(), limit: 50)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+        for index in 1...20 { file.append("event=\(index)") }
+        file.flush()
+        let text = try String(contentsOf: file.url, encoding: .utf8)
+        let lines = text.split(separator: "\n")
+        #expect(lines.count == 20)
+        #expect(lines.last?.hasSuffix("event=20") == true)
     }
 
     @Test func eachLineStartsWithTheUTCTimeAndHasNoNewline() {

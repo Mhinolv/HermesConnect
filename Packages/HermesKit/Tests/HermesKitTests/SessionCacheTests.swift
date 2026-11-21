@@ -60,6 +60,7 @@ private func thread(_ count: Int) -> [ChatMessage] {
         store.saveSessions(rows)
         store.saveDraft("half a thought", sessionId: "k1")
         store.saveActiveSessionId("k1")
+        store.flush()
 
         let reopened = FileSessionCacheStore(directory: directory)
         #expect(reopened.loadSessions() == rows)
@@ -69,8 +70,10 @@ private func thread(_ count: Int) -> [ChatMessage] {
 
         reopened.saveDraft("", sessionId: "k1")
         reopened.saveActiveSessionId(nil)
-        #expect(store.loadDraft(sessionId: "k1") == "")
-        #expect(store.loadActiveSessionId() == nil)
+        // Issue #165: each instance keeps the state in memory. A new instance reads the file.
+        let third = FileSessionCacheStore(directory: directory)
+        #expect(third.loadDraft(sessionId: "k1") == "")
+        #expect(third.loadActiveSessionId() == nil)
     }
 
     /// A file from an older or newer build: missing keys get defaults, unknown keys are ignored.
@@ -122,6 +125,7 @@ private func thread(_ count: Int) -> [ChatMessage] {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = FileSessionCacheStore(directory: directory)
         store.saveActiveSessionId("k1")
+        FileSessionCacheStore.waitForWrites()
         let values = try directory.resourceValues(forKeys: [.isExcludedFromBackupKey])
         #expect(values.isExcludedFromBackup == true)
     }
@@ -560,5 +564,82 @@ private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         #expect(oneConnecting == .state(.connecting))
         let twoConnecting = await two.next()
         #expect(twoConnecting == .state(.connecting))
+    }
+}
+
+/// Issue #165: composer edits do no disk work on the queue of the caller, and the state file decodes once.
+@Suite struct SessionCacheWriteQueueTests {
+    @Test func aDraftDoesNotWriteTheFileUntilTheDelayOrAFlush() throws {
+        let directory = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FileSessionCacheStore(directory: directory, draftDelay: 60)
+        for count in 1...40 { store.saveDraft(String(repeating: "a", count: count), sessionId: "k1") }
+        FileSessionCacheStore.waitForWrites()
+        #expect(!FileManager.default.fileExists(atPath: store.stateURL.path))
+        #expect(store.loadDraft(sessionId: "k1").count == 40)
+
+        store.flush()
+        #expect(FileSessionCacheStore(directory: directory).loadDraft(sessionId: "k1").count == 40)
+    }
+
+    @Test func manyEditsInTheDelayWriteTheLastDraft() async throws {
+        let directory = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FileSessionCacheStore(directory: directory, draftDelay: 0.05)
+        for text in ["H", "He", "Hel", "Hell", "Hello"] { store.saveDraft(text, sessionId: "k1") }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(FileSessionCacheStore(directory: directory).loadDraft(sessionId: "k1") == "Hello")
+    }
+
+    @Test func theSendClearsTheDraftWithNoDelay() throws {
+        let directory = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FileSessionCacheStore(directory: directory, draftDelay: 60)
+        store.saveDraft("Hello", sessionId: "k1")
+        store.flush()
+        store.saveDraft("", sessionId: "k1")
+        #expect(FileSessionCacheStore(directory: directory).loadDraft(sessionId: "k1") == "")
+    }
+
+    @Test func theStateFileDecodesOncePerInstance() throws {
+        let directory = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FileSessionCacheStore(directory: directory)
+        store.saveActiveSessionId("k1")
+        store.saveOutbox(true, sessionId: "k1")
+        FileSessionCacheStore.waitForWrites()
+        // A file that does not decode now: the instance keeps the state that it read before.
+        try Data("not json".utf8).write(to: store.stateURL)
+        #expect(store.loadActiveSessionId() == "k1")
+        #expect(store.outboxSessionIds() == ["k1"])
+        store.saveDraft("kept", sessionId: "k2")
+        store.flush()
+        let reopened = FileSessionCacheStore(directory: directory)
+        #expect(reopened.loadActiveSessionId() == "k1")
+        #expect(reopened.outboxSessionIds() == ["k1"])
+        #expect(reopened.loadDraft(sessionId: "k2") == "kept")
+    }
+
+    @Test func aTranscriptSaveIsReadBackAtOnce() throws {
+        let directory = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FileSessionCacheStore(directory: directory)
+        store.saveTranscript(thread(4), sessionId: "k1")
+        store.saveTranscript(thread(6), sessionId: "k1")
+        #expect(store.loadTranscript(sessionId: "k1").count == 6)
+        #expect(FileSessionCacheStore(directory: directory).loadTranscript(sessionId: "k1").count == 6)
+        store.removeSession(sessionId: "k1")
+        #expect(store.loadTranscript(sessionId: "k1").isEmpty)
+    }
+
+    @Test func removeServerDropsAWaitingDraftWithTheFolder() throws {
+        let root = tempDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let server = UUID()
+        let caches = ServerCaches(root: root, active: server)
+        caches.sessions.saveDraft("late", sessionId: "k1")
+        caches.remove(server: server)
+        FileSessionCacheStore.waitForWrites()
+        #expect(!FileManager.default.fileExists(atPath: ServerCaches.folder(root: root, server: server).path))
     }
 }
