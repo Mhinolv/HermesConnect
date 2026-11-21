@@ -70,6 +70,16 @@ final class VoiceTabModel {
         chosenMode = modeStore.load(server: nil)
         if liveService == nil { liveAvailability = .failed }
         trackNowPlaying()
+        // Issue #151: the chat of a running voice session counts as open, so its replies are read.
+        sessions.voiceChat = { [weak self] in
+            guard let self, isRunning else { return nil }
+            return sessionChat
+        }
+    }
+
+    /// Issue #151: the owner talks in this chat now, so its blue dot goes.
+    private func readVoiceChat(_ chat: ChatViewModel) {
+        if let id = chat.storedSessionId { sessions.markRead(id) }
     }
 
     /// The live app: a session on the chat link. While VoiceOver runs, only Magic Tap interrupts a reply.
@@ -211,6 +221,7 @@ final class VoiceTabModel {
         let live = makeLive(chat, liveService)
         self.live = live
         sessionChat = chat
+        readVoiceChat(chat)
         liveToast = nil
         seenLiveEnd = live.controller.lastEnd?.serial ?? 0
         await live.start()
@@ -260,6 +271,7 @@ final class VoiceTabModel {
         guard let session = makeSession() else { return }
         self.session = session
         sessionChat = chat
+        readVoiceChat(chat)
         clipEndsAtBargeIn = nil
         seenBargeIns = 0
         await session.start(in: chat)

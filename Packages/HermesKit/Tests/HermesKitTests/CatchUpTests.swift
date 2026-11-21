@@ -352,3 +352,69 @@ private func row(_ id: String, _ count: Int?, title: String? = nil, unread: Bool
         Issue.record("condition not met")
     }
 }
+
+/// Issue #151: the chat of a voice session that runs (Hands-Free or Live) counts as open.
+@MainActor
+@Suite(.timeLimit(.minutes(1))) struct VoiceChatReadTests {
+    @Test func aRunningVoiceChatGetsNoDotAndOtherChatsDo() async {
+        let cache = InMemorySessionCacheStore(sessions: [row("k1", 2), row("k2", 2)])
+        let transport = FakeSessionsTransport(rows: [row("k1", 4), row("k2", 4)])
+        let list = SessionListModel(transport: transport, chatTransport: FakeChatTransport(), cache: cache)
+        let voice = list.chat(for: "k2")
+        var running = true
+        list.voiceChat = { running ? voice : nil }
+        #expect(list.voiceSessionId == "k2")
+        await list.refresh()
+        #expect(list.session(id: "k2")?.isUnread == false)
+        #expect(list.session(id: "k1")?.isUnread == true)
+        #expect(list.chatsUnreadCount == 1)
+
+        // The session ended: a later reply in that chat gets the dot.
+        running = false
+        #expect(list.voiceSessionId == nil)
+        transport.rows = [row("k1", 4), row("k2", 6)]
+        await list.refresh()
+        #expect(list.session(id: "k2")?.isUnread == true)
+    }
+
+    @Test func aCatchUpPostsNoNotificationForTheVoiceChat() async {
+        let cache = InMemorySessionCacheStore(sessions: [row("k1", 2), row("k2", 2)])
+        let transport = FakeSessionsTransport(rows: [row("k1", 4), row("k2", 4)])
+        let chats = FakeChatTransport()
+        chats.transcript = [TranscriptMessage(role: "assistant", text: "It is noon.", rowId: 1)]
+        let list = SessionListModel(transport: transport, chatTransport: chats, cache: cache)
+        let voice = list.chat(for: "k2")
+        list.voiceChat = { voice }
+        let notifier = FakeNotifier()
+        let result = await list.catchUp(showsPreview: false, notifier: notifier)
+        #expect(result?.notified == ["k1"])
+        #expect(result?.unreadCount == 1)
+        #expect(list.session(id: "k2")?.isUnread == false)
+    }
+
+    @Test func theVoiceChatAndTheChatOnTheScreenAreBothOpen() async {
+        let cache = InMemorySessionCacheStore(sessions: [row("k1", 2), row("k2", 2), row("k3", 2)])
+        let transport = FakeSessionsTransport(rows: [row("k1", 4), row("k2", 4), row("k3", 4)])
+        let list = SessionListModel(transport: transport, chatTransport: FakeChatTransport(), cache: cache)
+        list.openChat(list.chat(for: "k1"))
+        let voice = list.chat(for: "k2")
+        list.voiceChat = { voice }
+        await list.refresh()
+        #expect(list.sessions.map(\.isUnread) == [false, false, true])
+    }
+
+    @Test func aNewVoiceChatGetsNoDotWhenItsRowAppears() async {
+        let cache = InMemorySessionCacheStore(sessions: [row("k0", 2)])
+        let transport = FakeSessionsTransport(rows: [row("k0", 2)])
+        let list = SessionListModel(transport: transport, chatTransport: FakeChatTransport(), cache: cache)
+        let chat = list.newChat(key: "voice-1")
+        list.voiceChat = { chat }
+        #expect(list.voiceSessionId == nil)
+        await chat.send("Plan my week")?.value
+        let newId = "20261116_101500_ab12cd"
+        #expect(list.voiceSessionId == newId)
+        transport.rows = [row(newId, 4), row("k0", 2)]
+        await list.refresh()
+        #expect(list.unreadCount == 0)
+    }
+}
