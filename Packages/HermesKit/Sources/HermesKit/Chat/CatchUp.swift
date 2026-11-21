@@ -33,9 +33,17 @@ public enum CatchUp {
     /// The session that is open on the screen never gets a dot.
     public static func markUnread(_ fresh: [SessionListItem], unread: Set<String>, newContent: Set<String>,
                                   openSessionId: String?) -> [SessionListItem] {
+        markUnread(fresh, unread: unread, newContent: newContent, openSessionIds: Set([openSessionId].compactMap { $0 }))
+    }
+
+    /// Issue #151: the open sessions are the chat on the screen and the chat of a running voice session.
+    public static func markUnread(_ fresh: [SessionListItem], unread: Set<String>, newContent: Set<String>,
+                                  openSessionIds: Set<String>) -> [SessionListItem] {
         fresh.map { row in
             var row = row
-            if row.id != openSessionId, unread.contains(row.id) || newContent.contains(row.id) { row.isUnread = true }
+            if !openSessionIds.contains(row.id), unread.contains(row.id) || newContent.contains(row.id) {
+                row.isUnread = true
+            }
             return row
         }
     }
@@ -197,11 +205,13 @@ public struct CatchUpRefresher: Sendable {
     /// A session whose history fails gets the blue dot but no notification.
     /// Issue #84: `server` names the server in the notification. `setsBadge` false: the app sets the badge of
     /// all servers itself.
-    public func run(showsPreview: Bool, openSessionId: String? = nil, server: NotificationServer? = nil,
-                    setsBadge: Bool = true) async throws -> CatchUpResult {
+    /// Issue #151: `openSessionIds` adds the chat of a running voice session to `openSessionId`.
+    public func run(showsPreview: Bool, openSessionId: String? = nil, openSessionIds: Set<String> = [],
+                    server: NotificationServer? = nil, setsBadge: Bool = true) async throws -> CatchUpResult {
+        let open = openSessionIds.union([openSessionId].compactMap { $0 })
         let cached = cache.loadSessions()
         let fresh = try await sessions.fetchSessions()
-        let changed = CatchUp.changedSessions(cached: cached, fresh: fresh).filter { $0 != openSessionId }
+        let changed = CatchUp.changedSessions(cached: cached, fresh: fresh).filter { !open.contains($0) }
         var notified: [String] = []
         for id in changed.prefix(Self.maxSessions) {
             guard let row = fresh.first(where: { $0.id == id }),
@@ -214,7 +224,7 @@ public struct CatchUpRefresher: Sendable {
             notified.append(id)
         }
         let unread = Set(cached.filter(\.isUnread).map(\.id))
-        let merged = CatchUp.markUnread(fresh, unread: unread, newContent: Set(changed), openSessionId: openSessionId)
+        let merged = CatchUp.markUnread(fresh, unread: unread, newContent: Set(changed), openSessionIds: open)
         cache.saveSessions(merged)
         // Issue #122: the badge counts unread chats only, not cron runs.
         let count = SessionListItem.chats(merged).filter(\.isUnread).count

@@ -17,6 +17,13 @@ public final class SessionListModel {
     /// Issue #15: the stored id of the chat on the screen. A refresh never gives it the blue dot.
     /// It follows the chat, so a New Chat counts as soon as `session.create` gives it an id (QA #38 defect 2).
     public var openSessionId: String? { openChatModel?.storedSessionId }
+    /// Issue #151: the chat of a voice session that runs (Hands-Free or Live), or `nil`. The Voice tab sets it.
+    /// That chat counts as open: a refresh or a catch-up gives it no blue dot and no notification.
+    @ObservationIgnored public var voiceChat: (@MainActor () -> ChatViewModel?)?
+    /// Issue #151: the stored id of `voiceChat`. It follows the chat, so a new chat counts when it gets an id.
+    public var voiceSessionId: String? { voiceChat?()?.storedSessionId }
+    /// The chats that never get the blue dot: the chat on the screen and the chat of a running voice session.
+    private var openSessionIds: Set<String> { Set([openSessionId, voiceSessionId].compactMap { $0 }) }
     /// Issue #64: the rows that the list does not show. #73 hides cron runs here.
     public var filter = SessionListFilter()
     /// Issue #64: the number of archived sessions. The "Archived" row shows when it is more than 0.
@@ -116,7 +123,7 @@ public final class SessionListModel {
         carriedUnread = []
         // Issue #15: a row with more messages than the shown row has new content (blue dot).
         let newContent = Set(CatchUp.changedSessions(cached: sessions, fresh: rows))
-        let merged = CatchUp.markUnread(rows, unread: unread, newContent: newContent, openSessionId: openSessionId)
+        let merged = CatchUp.markUnread(rows, unread: unread, newContent: newContent, openSessionIds: openSessionIds)
         hasLoaded = true
         if merged != sessions {
             sessions = merged
@@ -230,7 +237,7 @@ public final class SessionListModel {
         let current = generation
         let refresher = CatchUpRefresher(sessions: transport, chats: chatTransport, cache: cache.pinned(),
                                          notifier: notifier)
-        guard let result = try? await refresher.run(showsPreview: showsPreview, openSessionId: openSessionId,
+        guard let result = try? await refresher.run(showsPreview: showsPreview, openSessionIds: openSessionIds,
                                                     server: server, setsBadge: setsBadge),
               current == generation
         else { return nil }
@@ -245,7 +252,7 @@ public final class SessionListModel {
         guard !carriedUnread.isEmpty else { return }
         let carried = carriedUnread
         carriedUnread = []
-        let marked = CatchUp.markUnread(sessions, unread: carried, newContent: [], openSessionId: openSessionId)
+        let marked = CatchUp.markUnread(sessions, unread: carried, newContent: [], openSessionIds: openSessionIds)
         guard marked != sessions else { return }
         sessions = marked
         cache.saveSessions(marked)

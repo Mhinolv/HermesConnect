@@ -80,6 +80,17 @@ private struct NoSpeech: Error {}
         #expect(model.display.title == "Tap to Talk")
     }
 
+    /// Issue #151: the chat of a running Hands-Free session counts as open. After the end it does not.
+    @Test func theRunningSessionChatIsTheVoiceChatOfTheList() async throws {
+        let (model, _) = rig()
+        #expect(model.sessions.voiceChat?() == nil)
+        await model.ringTap()
+        #expect(model.isRunning)
+        #expect(model.sessions.voiceChat?() != nil)
+        model.end()
+        #expect(model.sessions.voiceChat?() == nil)
+    }
+
     /// Issue #138: background and Lock no longer pause (owner decision). The mic stays open in the session.
     @Test func backgroundAndLockDoNotPauseTheSession() async throws {
         let (model, mic) = rig()
