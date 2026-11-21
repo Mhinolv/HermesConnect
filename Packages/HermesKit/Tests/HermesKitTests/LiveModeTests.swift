@@ -30,9 +30,42 @@ private let offer = "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\
                                                  voiceContext: "User: What is on my calendar?")
         let request = try await socket.waitForRequest("prompt.submit")
         #expect(request["params"] == ["session_id": "S", "text": "What is on my calendar?", "surface": "voice-live",
-                                      "voice_context": "User: What is on my calendar?"])
+                                      "voice_turn": true, "voice_context": "User: What is on my calendar?"])
         socket.reply(to: request, result: #"{"status":"streaming","user_row_id":7}"#)
         #expect(try await row == 7)
+    }
+
+    /// Issue #147: a Live delegation is a voice turn, so the server uses its voice route. A text turn is not.
+    @Test func delegationEncodesVoiceTurnAndTextTurnDoesNot() throws {
+        func json(_ params: PromptSubmitParams) throws -> String {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            return String(decoding: try encoder.encode(params), as: UTF8.self)
+        }
+        var live = PromptSubmitParams(sessionId: "S", text: "Hi", voiceTurn: true)
+        live.surface = LiveModeProtocol.surface
+        live.voiceContext = "User: Hi"
+        let liveJSON = try json(live)
+        #expect(liveJSON.contains(#""surface":"voice-live""#))
+        #expect(liveJSON.contains(#""voice_turn":true"#))
+        #expect(liveJSON.contains(#""voice_context":"User: Hi""#))
+        #expect(!(try json(PromptSubmitParams(sessionId: "S", text: "Hi"))).contains("voice_turn"))
+    }
+
+    @Test func textTurnSendsNoVoiceTurn() async throws {
+        let socket = FakeGatewaySocket()
+        let gateway = GatewayClient(endpoint: try GatewayEndpoint(port: 8123, token: liveToken),
+                                    connector: FakeGatewayConnector(socket), configuration: .init(heartbeatInterval: nil))
+        async let ready = gateway.connect()
+        socket.pushReady()
+        socket.reply(to: try await socket.waitForRequest("client.capabilities"), result: "{}")
+        _ = try await ready
+
+        async let row = gateway.submitPrompt(sessionId: "S", text: "Typed", retryBeforeRowId: nil)
+        let request = try await socket.waitForRequest("prompt.submit")
+        #expect(request["params"] == ["session_id": "S", "text": "Typed"])
+        socket.reply(to: request, result: #"{"status":"streaming","user_row_id":8}"#)
+        #expect(try await row == 8)
     }
 }
 

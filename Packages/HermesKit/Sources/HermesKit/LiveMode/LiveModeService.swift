@@ -50,14 +50,15 @@ public enum LiveModeStatusText {
 // MARK: - prompt.submit with surface `voice-live`
 
 /// A transport that sends a GPT-Live delegation as a Hermes turn (`prompt.submit`, `surface: "voice-live"`,
-/// `voice_context`). `GatewayClient` and `LiveChatTransport` conform (`methods_prompt.py:866-871`).
+/// `voice_turn: true`, `voice_context`). `GatewayClient` and `LiveChatTransport` conform (`methods_prompt.py:866-871`).
 public protocol LiveDelegationTransport: Sendable {
     func submitLivePrompt(sessionId: String, text: String, voiceContext: String) async throws -> Int?
 }
 
 extension GatewayClient: LiveDelegationTransport {
     public func submitLivePrompt(sessionId: String, text: String, voiceContext: String) async throws -> Int? {
-        var params = PromptSubmitParams(sessionId: sessionId, text: text)
+        // Issue #147: `voice_turn: true` makes the server use its voice route (`auxiliary.voice_chat`) for this turn.
+        var params = PromptSubmitParams(sessionId: sessionId, text: text, voiceTurn: true)
         params.surface = LiveModeProtocol.surface
         params.voiceContext = voiceContext.isEmpty ? nil : String(voiceContext.suffix(6000))
         return try await submitPrompt(params).userRowId
