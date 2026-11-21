@@ -456,6 +456,8 @@ extension RootView {
         guard model.isSetUp, !ChatLaunch.isDemo else { return }
         switch phase {
         case .background:
+            // Issue #165: a draft that waits for the draft delay goes to disk before a suspend.
+            sessions.flushCache()
             if backgroundedAt == nil { backgroundedAt = .now }
             BackgroundRefresh.schedule()
         case .active:

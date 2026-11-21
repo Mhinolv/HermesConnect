@@ -621,6 +621,7 @@ private struct Refused: Error {}
         store.saveActiveSessionId("k1")
 
         store.removeSession(sessionId: "k1")
+        FileSessionCacheStore.waitForWrites()
         #expect(!FileManager.default.fileExists(atPath: store.transcriptURL(sessionId: "k1").path))
         #expect(store.loadTranscript(sessionId: "k1").isEmpty)
         #expect(store.loadTranscript(sessionId: "k2").map(\.id) == ["m2"])

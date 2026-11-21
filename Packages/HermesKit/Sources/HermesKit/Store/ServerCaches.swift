@@ -96,8 +96,16 @@ public final class ServerCaches: @unchecked Sendable {
         }
     }
 
+    /// Issue #165: puts the saves that wait of every server on disk. The app calls it on the way to the background.
+    public func flush() {
+        let stores = lock.withLock { Array(sessionStores.values) + [noServerSessions] }
+        for store in stores { store.flush() }
+    }
+
     /// "Remove Server": delete the cache folder of that server. The caches of the other servers stay.
     public func remove(server: UUID) {
+        // Issue #165: the writes that wait go first, so no late write makes the folder again.
+        lock.withLock { sessionStores[server] }?.flush()
         lock.withLock {
             sessionStores[server] = nil
             cronStores[server] = nil
@@ -108,12 +116,14 @@ public final class ServerCaches: @unchecked Sendable {
             }
         }
         guard let root else { return }
-        try? FileManager.default.removeItem(at: Self.folder(root: root, server: server))
+        let folder = Self.folder(root: root, server: server)
+        FileSessionCacheStore.writer.sync { try? FileManager.default.removeItem(at: folder) }
     }
 
     /// Launch: delete the folders of servers that are not in the list any more. A chat of a removed server can
     /// save late, after the remove. Only folders with a server id as the name go. The flat files stay.
     public func removeFolders(except servers: Set<UUID>) {
+        FileSessionCacheStore.waitForWrites()
         guard let root,
               let names = try? FileManager.default.contentsOfDirectory(atPath: root.path) else { return }
         for name in names {
@@ -147,6 +157,8 @@ public final class ScopedSessionCacheStore: SessionCacheStore, @unchecked Sendab
     public func removeSession(sessionId: String) { store.removeSession(sessionId: sessionId) }
     public func outboxSessionIds() -> [String] { store.outboxSessionIds() }
     public func saveOutbox(_ hasQueued: Bool, sessionId: String) { store.saveOutbox(hasQueued, sessionId: sessionId) }
+    /// Issue #165: a chat can keep the store of a server that is not active now, so all servers flush.
+    public func flush() { caches.flush() }
 }
 
 /// Issue #84: the Jobs cache of the active server.
@@ -203,6 +215,8 @@ public enum ServerCacheMigration {
     @discardableResult
     public static func run(root: URL, active: UUID, servers: Set<UUID>, outboxes: [UUID: [String]] = [:]) -> Report {
         var report = Report()
+        // Issue #165: a save of a store instance can still wait on the write queue.
+        FileSessionCacheStore.waitForWrites()
         guard hasFlatCache(root: root) else { return report }
         let router = Router(active: active, servers: servers.union([active]), outboxes: outboxes)
         var touched: Set<UUID> = [active]

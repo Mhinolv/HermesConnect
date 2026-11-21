@@ -32,6 +32,8 @@ import Testing
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = FileSessionCacheStore(directory: directory)
         store.saveDraft("draft", sessionId: "k1")
+        store.flush()
+        FileSessionCacheStore.waitForWrites()
         #expect(ProtectedStorage.isExcludedFromBackup(directory))
     }
 
@@ -49,6 +51,7 @@ import Testing
 
         let store = FileSessionCacheStore(directory: directory)
         store.saveActiveSessionId("k1")
+        FileSessionCacheStore.waitForWrites()
         #expect(ProtectedStorage.isExcludedFromBackup(directory))
         #expect(store.loadTranscript(sessionId: "k1").map(\.text) == ["Hi"])
         #expect(store.loadSessions() == [SessionListItem(id: "k1", title: "Trip")])

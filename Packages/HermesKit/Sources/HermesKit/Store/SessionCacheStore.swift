@@ -27,6 +27,8 @@ public protocol SessionCacheStore: Sendable {
     /// Issue #84: the store of the server that is active now. A chat model keeps it, so a late save of a chat
     /// of the old server never goes to the folder of the new server. A plain store gives itself.
     func pinned() -> any SessionCacheStore
+    /// Issue #165: puts every save that waits on disk now. A store in memory has nothing to do.
+    func flush()
 }
 
 extension SessionCacheStore {
@@ -41,6 +43,7 @@ extension SessionCacheStore {
     public func outboxSessionIds() -> [String] { [] }
     public func saveOutbox(_: Bool, sessionId _: String) {}
     public func pinned() -> any SessionCacheStore { self }
+    public func flush() {}
 }
 
 public enum SessionCache {
@@ -299,7 +302,7 @@ struct CachedAttachment: Codable, Equatable {
 }
 
 /// One cached message. The file format: change it only with tolerant decoding.
-struct CachedMessage: Codable, Equatable {
+struct CachedMessage: Codable, Equatable, Sendable {
     var id: String
     var role: String
     var text: String
@@ -460,15 +463,36 @@ struct CacheState: Codable, Equatable {
 /// - `ProtectedStorage` rules (issue #18): files use `completeUntilFirstUserAuthentication`, so background
 ///   catch-up can read them after the first unlock, and the folder is excluded from backup.
 /// - The first write of each store instance applies the rules again, also to files of older builds.
-/// - One lock orders the reads and writes. A transcript file is at most 500 messages.
+/// - Issue #165: no save writes on the queue of the caller. Every file write of every instance goes to one
+///   serial queue (`writer`), and the queue encodes the JSON. A read waits for the writes before it on that
+///   queue, so a read always sees the last save, also from another instance.
+/// - Issue #165: the instance keeps `state.json` in memory. It decodes the file at most once. A draft write
+///   waits `draftDelay`, so the composer writes at most once in that time. `flush()` writes it at once.
 public final class FileSessionCacheStore: SessionCacheStore, @unchecked Sendable {
+    /// Issue #165: the one queue for all cache file writes. Reads wait on it.
+    static let writer = DispatchQueue(label: "HermesConnect.SessionCache.writer", qos: .utility)
+    /// Issue #165: the default wait before a draft goes to disk.
+    public static let defaultDraftDelay: TimeInterval = 0.5
+
     public let directory: URL
+    private let draftDelay: TimeInterval
+    /// Orders the fields below. Never held during a wait on `writer`.
     private let lock = NSLock()
-    /// True after `ProtectedStorage.prepare` ran for this instance.
+    /// The state file in memory. Nil until the first read or write of the state.
+    private var cachedState: CacheState?
+    /// Goes up on each state change. `writtenStateVersion` is the version on disk.
+    private var stateVersion = 0
+    private var writtenStateVersion = 0
+    /// True while a draft write waits for `draftDelay`.
+    private var draftWriteScheduled = false
+    /// The last write of each file that is not on disk yet. A newer save of the same file replaces it.
+    private var pendingWrites: [URL: @Sendable () -> Void] = [:]
+    /// True after `ProtectedStorage.prepare` ran for this instance. Only `writer` uses it.
     private var prepared = false
 
-    public init(directory: URL) {
+    public init(directory: URL, draftDelay: TimeInterval = FileSessionCacheStore.defaultDraftDelay) {
         self.directory = directory
+        self.draftDelay = draftDelay
     }
 
     /// The default location in Application Support.
@@ -476,6 +500,12 @@ public final class FileSessionCacheStore: SessionCacheStore, @unchecked Sendable
         let base = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                                appropriateFor: nil, create: true)
         return FileSessionCacheStore(directory: base.appending(path: "HermesConnect/Cache", directoryHint: .isDirectory))
+    }
+
+    /// Issue #165: returns when every write that is on the queue now is on disk. A draft that waits for
+    /// `draftDelay` is not included: call `flush()` of its store first.
+    public static func waitForWrites() {
+        writer.sync {}
     }
 
     var sessionsURL: URL { directory.appending(path: "sessions.json") }
@@ -490,80 +520,130 @@ public final class FileSessionCacheStore: SessionCacheStore, @unchecked Sendable
     // MARK: SessionCacheStore
 
     public func loadSessions() -> [SessionListItem] {
-        lock.withLock { read([SessionListItem].self, from: sessionsURL) ?? [] }
+        Self.writer.sync { read([SessionListItem].self, from: sessionsURL) ?? [] }
     }
 
     public func saveSessions(_ sessions: [SessionListItem]) {
-        lock.withLock { write(sessions, to: sessionsURL) }
+        let url = sessionsURL
+        enqueue(url) { $0.write(sessions, to: url) }
     }
 
     public func loadTranscript(sessionId: String) -> [ChatMessage] {
-        lock.withLock { read([CachedMessage].self, from: transcriptURL(sessionId: sessionId)) ?? [] }.map(\.message)
+        let url = transcriptURL(sessionId: sessionId)
+        return Self.writer.sync { read([CachedMessage].self, from: url) ?? [] }.map(\.message)
     }
 
     public func saveTranscript(_ messages: [ChatMessage], sessionId: String) {
         let cached = SessionCache.cacheable(messages).map(CachedMessage.init)
-        lock.withLock { write(cached, to: transcriptURL(sessionId: sessionId)) }
+        let url = transcriptURL(sessionId: sessionId)
+        enqueue(url) { $0.write(cached, to: url) }
     }
 
     public func loadDraft(sessionId: String) -> String {
-        lock.withLock { state().drafts[sessionId] ?? "" }
+        withState { $0.drafts[sessionId] ?? "" }
     }
 
+    /// Issue #165: a new draft goes to disk after `draftDelay`. An empty draft (the send) goes at once.
     public func saveDraft(_ text: String, sessionId: String) {
-        lock.withLock {
-            var state = state()
-            let value = text.isEmpty ? nil : text
-            guard state.drafts[sessionId] != value else { return }
-            state.drafts[sessionId] = value
-            write(state, to: stateURL)
-        }
+        let value = text.isEmpty ? nil : text
+        changeState(soon: value != nil) { $0.drafts[sessionId] = value }
     }
 
     public func loadActiveSessionId() -> String? {
-        lock.withLock { state().activeSessionId }
+        withState { $0.activeSessionId }
     }
 
     public func saveActiveSessionId(_ id: String?) {
-        lock.withLock {
-            var state = state()
-            guard state.activeSessionId != id else { return }
-            state.activeSessionId = id
-            write(state, to: stateURL)
-        }
+        changeState { $0.activeSessionId = id }
     }
 
     public func removeSession(sessionId: String) {
-        lock.withLock {
-            try? FileManager.default.removeItem(at: transcriptURL(sessionId: sessionId))
-            var state = state()
-            let active = state.activeSessionId == sessionId ? nil : state.activeSessionId
-            guard state.drafts[sessionId] != nil || active != state.activeSessionId || state.outbox.contains(sessionId)
-            else { return }
+        let url = transcriptURL(sessionId: sessionId)
+        enqueue(url) { _ in try? FileManager.default.removeItem(at: url) }
+        changeState { state in
             state.drafts[sessionId] = nil
-            state.activeSessionId = active
+            if state.activeSessionId == sessionId { state.activeSessionId = nil }
             state.outbox.removeAll { $0 == sessionId }
-            write(state, to: stateURL)
         }
     }
 
     public func outboxSessionIds() -> [String] {
-        lock.withLock { state().outbox }
+        withState { $0.outbox }
     }
 
     public func saveOutbox(_ hasQueued: Bool, sessionId: String) {
-        lock.withLock {
-            var state = state()
+        changeState { state in
             guard state.outbox.contains(sessionId) != hasQueued else { return }
             if hasQueued { state.outbox.append(sessionId) } else { state.outbox.removeAll { $0 == sessionId } }
-            write(state, to: stateURL)
         }
+    }
+
+    /// Issue #165: puts the draft that waits on the queue now, so it does not wait for `draftDelay`.
+    /// It does not block the caller. A later read of any instance waits for it.
+    public func flush() {
+        Self.writer.async { [self] in writeState() }
+    }
+
+    // MARK: State
+
+    /// Runs `body` on the state in memory. The first call reads the file, after the writes on the queue.
+    private func withState<T>(_ body: (CacheState) -> T) -> T {
+        loadStateIfNeeded()
+        return lock.withLock { body(cachedState ?? CacheState()) }
+    }
+
+    /// Changes the state in memory, then writes it on the queue: at once, or after `draftDelay` when `soon`.
+    private func changeState(soon: Bool = false, _ change: (inout CacheState) -> Void) {
+        loadStateIfNeeded()
+        let schedule: Bool = lock.withLock {
+            var state = cachedState ?? CacheState()
+            let old = state
+            change(&state)
+            guard state != old else { return false }
+            cachedState = state
+            stateVersion += 1
+            guard soon else { return true }
+            guard !draftWriteScheduled else { return false }
+            draftWriteScheduled = true
+            return true
+        }
+        guard schedule else { return }
+        if soon {
+            Self.writer.asyncAfter(deadline: .now() + draftDelay) { [self] in writeState() }
+        } else {
+            Self.writer.async { [self] in writeState() }
+        }
+    }
+
+    private func loadStateIfNeeded() {
+        guard lock.withLock({ cachedState == nil }) else { return }
+        let disk = Self.writer.sync { read(CacheState.self, from: stateURL) } ?? CacheState()
+        lock.withLock {
+            if cachedState == nil { cachedState = disk }
+        }
+    }
+
+    /// On `writer` only. Writes the state in memory if it is newer than the file.
+    private func writeState() {
+        let snapshot: (CacheState, Int)? = lock.withLock {
+            draftWriteScheduled = false
+            guard stateVersion != writtenStateVersion, let state = cachedState else { return nil }
+            return (state, stateVersion)
+        }
+        guard let (state, version) = snapshot else { return }
+        write(state, to: stateURL)
+        lock.withLock { writtenStateVersion = max(writtenStateVersion, version) }
     }
 
     // MARK: Files
 
-    private func state() -> CacheState {
-        read(CacheState.self, from: stateURL) ?? CacheState()
+    /// Puts the write of `url` on the queue. If an older write of `url` still waits, only this one runs.
+    private func enqueue(_ url: URL, _ job: @escaping @Sendable (FileSessionCacheStore) -> Void) {
+        lock.withLock { pendingWrites[url] = { [self] in job(self) } }
+        Self.writer.async { [self] in
+            let next = lock.withLock { pendingWrites.removeValue(forKey: url) }
+            next?()
+        }
     }
 
     private func read<Body: Codable>(_: Body.Type, from url: URL) -> Body? {
@@ -573,6 +653,7 @@ public final class FileSessionCacheStore: SessionCacheStore, @unchecked Sendable
         return try? decoder.decode(CacheFile<Body>.self, from: data).body
     }
 
+    /// On `writer` only.
     private func write<Body: Codable>(_ body: Body, to url: URL) {
         do {
             try prepareDirectory(url.deletingLastPathComponent())
@@ -584,7 +665,7 @@ public final class FileSessionCacheStore: SessionCacheStore, @unchecked Sendable
         }
     }
 
-    /// Called with the lock held.
+    /// On `writer` only.
     private func prepareDirectory(_ url: URL) throws {
         if !prepared {
             try ProtectedStorage.prepare(directory: directory)
