@@ -263,7 +263,7 @@ import UIKit
         let screen = makeScreen(thread())
         let bar = screen.controller.messageInputBar
         bar.layoutIfNeeded()
-        let mic = try #require(bar.rightStackView.arrangedSubviews.first)
+        let mic = try #require(bar.rightStackView.arrangedSubviews.last)
         let frame = mic.convert(mic.bounds, to: bar)
         #expect(screen.controller.micPressShouldReceive(at: CGPoint(x: frame.midX, y: frame.midY)))
         #expect(screen.controller.micPressShouldReceive(at: CGPoint(x: frame.minX - 9, y: frame.midY)))
@@ -278,7 +278,7 @@ import UIKit
     /// Recognizer points map to the slide: up 60 pt locks, and the finger can lift.
     @Test func micPressSlideUpLocks() throws {
         let screen = makeScreen(thread())
-        let mic = try #require(screen.controller.messageInputBar.rightStackView.arrangedSubviews.first)
+        let mic = try #require(screen.controller.messageInputBar.rightStackView.arrangedSubviews.last)
         let start = center(of: mic, in: screen)
         let controller = screen.controller
         controller.handleMicPress(.began, at: start)
@@ -296,7 +296,7 @@ import UIKit
     /// Recognizer points map to the slide: left 100 pt arms the cancel, and the release deletes.
     @Test func micPressSlideLeftThenReleaseDeletes() throws {
         let screen = makeScreen(thread())
-        let mic = try #require(screen.controller.messageInputBar.rightStackView.arrangedSubviews.first)
+        let mic = try #require(screen.controller.messageInputBar.rightStackView.arrangedSubviews.last)
         let start = center(of: mic, in: screen)
         let controller = screen.controller
         controller.handleMicPress(.began, at: start)
@@ -313,7 +313,7 @@ import UIKit
     /// A hold of 0.3 s or more, then the release, sends the memo. A system cancel pauses.
     @Test func micPressHoldThenReleaseSendsAndSystemCancelPauses() throws {
         let screen = makeScreen(thread())
-        let mic = try #require(screen.controller.messageInputBar.rightStackView.arrangedSubviews.first)
+        let mic = try #require(screen.controller.messageInputBar.rightStackView.arrangedSubviews.last)
         let start = center(of: mic, in: screen)
         let controller = screen.controller
         controller.handleMicPress(.began, at: start)

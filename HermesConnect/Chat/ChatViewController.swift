@@ -1,3 +1,4 @@
+import AVFoundation
 import HermesKit
 import InputBarAccessoryView
 import MessageKit
@@ -13,6 +14,14 @@ final class ChatViewController: MessagesViewController {
     let voice: VoiceMemoController
     private let player = VoiceMemoPlayer()
     private let micButton = InputBarButtonItem()
+    /// Issue #170: live dictation into the message box. The mic stays for voice memos (owner decision 2026-11-21).
+    let dictateButton = InputBarButtonItem()
+    /// Issue #170: tests give a fake recognizer.
+    static var makeDictationSource: @MainActor () -> any LiveSpeechSource = { AppleLiveDictationSource() }
+    private(set) lazy var dictation = LiveDictation(source: Self.makeDictationSource())
+    /// True while dictation puts text in the box, so the change does not count as typing.
+    private var applyingDictation = false
+    private var dictationObservers: [any NSObjectProtocol] = []
     private let recordingBar = VoiceRecordingBar()
     private lazy var micPress = UILongPressGestureRecognizer(target: self, action: #selector(micPressChanged(_:)))
     private let micPressDelegate = MicPressDelegate()
@@ -159,6 +168,7 @@ final class ChatViewController: MessagesViewController {
             configureAttachments()
             configureReply()
             configureVoice()
+            configureDictation()
             restoreDraft()
         }
         configureScrollButton()
@@ -382,7 +392,10 @@ final class ChatViewController: MessagesViewController {
         micButton.accessibilityLabel = "Record Voice Memo"
         micButton.accessibilityHint = "Starts a recording. Double-tap Send to send it."
         // Touches go to `micPress`. VoiceOver activation, and a touch the recognizer missed, start tap mode.
-        micButton.onTouchUpInside { [weak self] _ in self?.voice.startTapMode() }
+        micButton.onTouchUpInside { [weak self] _ in
+            guard let self, !self.dictation.isActive else { return }
+            self.voice.startTapMode()
+        }
 
         micPressDelegate.shouldReceive = { [weak self] touch in self?.micPressShouldReceive(touch) ?? false }
         micPress.minimumPressDuration = 0
@@ -437,7 +450,8 @@ final class ChatViewController: MessagesViewController {
 
     /// `point` is in the input bar. Tests call it with the points of a laid-out screen.
     func micPressShouldReceive(at point: CGPoint) -> Bool {
-        guard showsMic, !voice.isActive, !UIAccessibility.isVoiceOverRunning, micButton.window != nil else {
+        guard showsMic, !voice.isActive, !dictation.isActive, !UIAccessibility.isVoiceOverRunning,
+              micButton.window != nil else {
             return false
         }
         let area = micButton.convert(micButton.bounds, to: messageInputBar).insetBy(dx: -10, dy: -10)
@@ -526,7 +540,7 @@ final class ChatViewController: MessagesViewController {
 
     private func showMicrophoneOff() {
         let alert = UIAlertController(title: "Microphone Access Off",
-                                      message: "Turn on Microphone for Hermes in Settings to record voice memos.",
+                                      message: "Turn on Microphone for Hermes in Settings to record voice memos and dictate.",
                                       preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         let open = UIAlertAction(title: "Open Settings", style: .default) { _ in
@@ -535,6 +549,125 @@ final class ChatViewController: MessagesViewController {
         }
         alert.addAction(open)
         alert.preferredAction = open
+        present(alert, animated: true)
+    }
+
+    // MARK: Live dictation (issue #170)
+
+    private func configureDictation() {
+        let button = dictateButton
+        button.setSize(CGSize(width: ChatComposerLayout.control, height: ChatComposerLayout.control), animated: false)
+        button.layer.cornerRadius = ChatComposerLayout.control / 2
+        button.onTouchUpInside { [weak self] _ in self?.dictateTapped() }
+        updateDictateButton()
+        dictation.onText = { [weak self] text in self?.showDictation(text) }
+        dictation.onState = { [weak self] _ in self?.dictationStateChanged() }
+        dictation.onFinal = { phrase in
+            guard UIAccessibility.isVoiceOverRunning else { return }
+            UIAccessibility.post(notification: .announcement, argument: phrase)
+        }
+        dictation.onFailure = { [weak self] failure in self?.showDictationFailed(failure) }
+        let center = NotificationCenter.default
+        let stop: @Sendable (Notification) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated { self?.dictation.cancel() }
+        }
+        dictationObservers = [
+            center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main,
+                               using: stop),
+            center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main,
+                               using: stop),
+        ]
+    }
+
+    private func dictateTapped() {
+        guard !voice.isActive else { return }
+        if dictation.isActive {
+            dictation.stop()
+        } else {
+            dictation.start(after: messageInputBar.inputTextView.text ?? "")
+        }
+    }
+
+    /// Final words in the label color, partial words in the secondary color.
+    private func showDictation(_ value: DictationText) {
+        let textView = messageInputBar.inputTextView
+        let font = textView.font ?? .preferredFont(forTextStyle: .body)
+        let styled = NSMutableAttributedString(string: value.text,
+                                               attributes: [.font: font, .foregroundColor: UIColor.label])
+        if value.partialRange.length > 0 {
+            styled.addAttribute(.foregroundColor, value: UIColor.secondaryLabel, range: value.partialRange)
+        }
+        applyingDictation = true
+        textView.attributedText = styled
+        textView.typingAttributes = [.font: font, .foregroundColor: UIColor.label]
+        textView.selectedRange = NSRange(location: (value.text as NSString).length, length: 0)
+        textView.scrollRangeToVisible(textView.selectedRange)
+        applyingDictation = false
+        composerText = value.text
+        model.updateDraft(value.text)
+        updateSendButton()
+    }
+
+    /// The partial words become normal text.
+    private func clearDictationStyle() {
+        let textView = messageInputBar.inputTextView
+        let font = textView.font ?? .preferredFont(forTextStyle: .body)
+        let range = NSRange(location: 0, length: textView.textStorage.length)
+        textView.textStorage.addAttribute(.foregroundColor, value: UIColor.label, range: range)
+        textView.typingAttributes = [.font: font, .foregroundColor: UIColor.label]
+    }
+
+    private func dictationStateChanged() {
+        if !dictation.isActive { clearDictationStyle() }
+        updateDictateButton()
+        updateSendButton()
+    }
+
+    private func updateDictateButton() {
+        let button = dictateButton
+        let symbol = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        button.layer.removeAnimation(forKey: "dictationPulse")
+        if dictation.isActive {
+            button.setImage(UIImage(systemName: "stop.fill", withConfiguration: symbol), for: .normal)
+            button.tintColor = .white
+            button.backgroundColor = .systemRed
+            button.accessibilityLabel = "Stop Dictation"
+            button.accessibilityHint = "Keeps the text in the message box."
+            if !UIAccessibility.isReduceMotionEnabled {
+                let pulse = CABasicAnimation(keyPath: "opacity")
+                pulse.fromValue = 1
+                pulse.toValue = 0.6
+                pulse.duration = 0.8
+                pulse.autoreverses = true
+                pulse.repeatCount = .infinity
+                button.layer.add(pulse, forKey: "dictationPulse")
+            }
+        } else {
+            button.setImage(UIImage(systemName: "waveform", withConfiguration: symbol), for: .normal)
+            button.tintColor = .secondaryLabel
+            button.backgroundColor = .clear
+            button.accessibilityLabel = "Dictate"
+            button.accessibilityHint = "Your words show in the message box. Nothing sends until you tap Send."
+        }
+    }
+
+    private func showDictationFailed(_ failure: LiveDictationFailure) {
+        switch failure {
+        case .microphoneOff:
+            showMicrophoneOff()
+            return
+        case .failed:
+            showRecordFailed()
+            return
+        case .modelNotInstalled, .unsupported:
+            break
+        }
+        let title = failure == .modelNotInstalled ? "Apple Speech Model Not Installed" : "Dictation Not Available"
+        let message = failure == .modelNotInstalled
+            ? "Download it in Hermes Settings > Voice > Download Apple Speech Model."
+            : "On-device speech is not available for the language of this iPhone."
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
     }
 
@@ -802,17 +935,21 @@ final class ChatViewController: MessagesViewController {
     private func updateSendButton() {
         let bar = messageInputBar
         guard !voice.isActive else { return }
-        let current = bar.rightStackViewItems.first as? UIView
+        // Issue #170: the dictate key sits left of the mic or Send key.
+        let current = bar.rightStackViewItems.last as? UIView
+        bar.rightStackView.spacing = ChatComposerLayout.dictateSpacing
+        let lead = ChatComposerLayout.control + ChatComposerLayout.dictateSpacing
+        micButton.isEnabled = !dictation.isActive
         if showsMic {
-            if current !== micButton {
-                bar.setStackViewItems([micButton], forStack: .right, animated: false)
-                bar.setRightStackViewWidthConstant(to: 44, animated: false)
+            if current !== micButton || bar.rightStackViewItems.count != 2 {
+                bar.setStackViewItems([dictateButton, micButton], forStack: .right, animated: false)
+                bar.setRightStackViewWidthConstant(to: lead + 44, animated: false)
             }
             return
         }
-        if current !== bar.sendButton {
-            bar.setStackViewItems([bar.sendButton], forStack: .right, animated: false)
-            bar.setRightStackViewWidthConstant(to: 36, animated: false)
+        if current !== bar.sendButton || bar.rightStackViewItems.count != 2 {
+            bar.setStackViewItems([dictateButton, bar.sendButton], forStack: .right, animated: false)
+            bar.setRightStackViewWidthConstant(to: lead + 36, animated: false)
         }
         let send = bar.sendButton
         let symbol = UIImage.SymbolConfiguration(pointSize: 32)
@@ -1545,6 +1682,9 @@ final class ChatViewController: MessagesViewController {
 enum ChatComposerLayout {
     /// The size of the `+` button and the mic, and the height of a one-line field.
     static let control: CGFloat = 44
+    /// Issue #170: the space between the dictate key and the mic or Send key. The mic takes touches 10 pt
+    /// around it (`micPressShouldReceive`), so the space is more than 10 pt: a tap on Dictate never starts a memo.
+    static let dictateSpacing: CGFloat = 12
 
     /// The top and bottom text inset that puts one line in the middle of a 44 pt field. 8 pt at the least.
     static func textInset(lineHeight: CGFloat) -> CGFloat {
@@ -2016,6 +2156,9 @@ extension ChatViewController {
 
 extension ChatViewController: InputBarAccessoryViewDelegate {
     func inputBar(_ inputBar: InputBarAccessoryView, didPressSendButtonWith text: String) {
+        // Issue #170: Send ends the dictation. The text in the box goes, as the owner sees it.
+        dictation.cancel(publish: false)
+        clearDictationStyle()
         if showsStop {
             model.stop()
             return
@@ -2031,6 +2174,11 @@ extension ChatViewController: InputBarAccessoryViewDelegate {
     }
 
     func inputBar(_: InputBarAccessoryView, textViewTextDidChangeTo text: String) {
+        // Issue #170: the owner typed during dictation. The typed text wins, and the dictation stops.
+        if !applyingDictation, dictation.isActive {
+            dictation.cancel(publish: false)
+            clearDictationStyle()
+        }
         composerText = text
         model.updateDraft(text)
         updateSendButton()
@@ -2389,6 +2537,9 @@ extension ChatViewController {
     /// Issue #87 (QA #86 note 1): the owner left the chat. Each running transcription stops.
     func chatClosed() {
         audioTranscripts.cancelAll()
+        dictation.cancel()
+        dictationObservers.forEach(NotificationCenter.default.removeObserver)
+        dictationObservers = []
     }
 
     /// The bubbles of sent files (tests).

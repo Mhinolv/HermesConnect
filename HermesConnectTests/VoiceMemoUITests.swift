@@ -409,10 +409,10 @@ private final class VoiceHarness {
         let bar = controller.messageInputBar
         controller.inputBar(bar, textViewTextDidChangeTo: "hi")
         #expect(!controller.showsMic)
-        #expect((bar.rightStackViewItems.first as? UIView) === bar.sendButton)
+        #expect((bar.rightStackViewItems.last as? UIView) === bar.sendButton)
         controller.inputBar(bar, textViewTextDidChangeTo: "  ")
         #expect(controller.showsMic)
-        let mic = bar.rightStackViewItems.first as? UIView
+        let mic = bar.rightStackViewItems.last as? UIView
         #expect(mic?.accessibilityLabel == "Record Voice Memo")
     }
 

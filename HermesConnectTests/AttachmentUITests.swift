@@ -124,7 +124,7 @@ import UniformTypeIdentifiers
         let doc = try AttachmentImport.file(at: try pdf(pages: 2))
         composer.add([photo, doc])
         #expect(!vc.showsMic)
-        #expect(vc.messageInputBar.rightStackViewItems.first as? UIView === send)
+        #expect(vc.messageInputBar.rightStackViewItems.last as? UIView === send)
         #expect(send.isEnabled)
         #expect(!composer.strip.isHidden)
         #expect(send.accessibilityLabel == "Send")

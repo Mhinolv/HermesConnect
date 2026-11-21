@@ -73,7 +73,7 @@ import UIKit
         let bar = controller.messageInputBar
         bar.layoutIfNeeded()
         let plus = try #require(bar.leftStackView.arrangedSubviews.first)
-        let mic = try #require(bar.rightStackView.arrangedSubviews.first)
+        let mic = try #require(bar.rightStackView.arrangedSubviews.last)
         let field = bar.inputTextView
         let line = centerY(field, in: bar)
         #expect(abs(centerY(plus, in: bar) - line) <= 1, "plus \(centerY(plus, in: bar)) field \(line)")
