@@ -134,7 +134,8 @@ final class VoiceTabModel {
         let afterBargeIn = clipEndsAtBargeIn != nil && clipEndsAtBargeIn == controller?.clipEndCount
         return VoiceTabDisplay.make(state: state, muted: controller?.muted ?? false,
                                     thinkingSeconds: controller?.thinkingSeconds ?? 0, afterBargeIn: afterBargeIn,
-                                    tool: tool, reconnecting: sessionChat?.isReattaching ?? false)
+                                    tool: tool, reconnecting: sessionChat?.isReattaching ?? false,
+                                    connecting: controller?.isConnecting ?? false)
     }
 
     // MARK: Target chat
