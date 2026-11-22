@@ -765,7 +765,8 @@ public final class ChatViewModel {
 
     /// Issue #96: one voice mode turn. The memo bubble shows with its transcript, then goes as a voice turn.
     /// The voice mode engine speaks the reply with `speak-stream`, so the #10 speak call does not run for it.
-    /// Offline, the memo waits in the outbox, and the #10 rules apply when it goes later.
+    /// Issue #172: offline, the memo waits in the outbox and stays a voice mode turn. Voice mode speaks the reply
+    /// when the outbox sends it. `releaseVoiceModeTurn` makes it a normal memo, with the #10 rules.
     public func sendVoiceModeTurn(_ memo: VoiceMemo, transcript: String) async -> VoiceModeTurnResult {
         let id = makeId()
         thread.addOutgoingVoice(id: id, memo: memo, date: now())
@@ -783,12 +784,27 @@ public final class ChatViewModel {
         case .delivered?:
             return .delivered(promptId: id)
         case .queued?:
-            voiceModePrompts.remove(id)
-            return .queued
+            return .queued(promptId: id)
         default:
             voiceModePrompts.remove(id)
             return .failed
         }
+    }
+
+    /// Issue #172: the send state of a queued voice mode turn.
+    public func voiceModeTurnDelivery(promptId: String) -> VoiceModeTurnDelivery {
+        switch thread.message(id: promptId)?.delivery {
+        case .queued?: .queued
+        case .sending?: .sending
+        case .delivered?: .delivered
+        case .failed?, nil: .failed
+        }
+    }
+
+    /// Issue #172: voice mode does not wait for the turn. A turn that is not delivered yet becomes a normal memo.
+    public func releaseVoiceModeTurn(promptId: String) {
+        guard thread.message(id: promptId)?.delivery != .delivered else { return }
+        voiceModePrompts.remove(promptId)
     }
 
     /// Issue #96: the audio that voice mode played becomes the voice reply of the bubble (#10). It does not auto-play.

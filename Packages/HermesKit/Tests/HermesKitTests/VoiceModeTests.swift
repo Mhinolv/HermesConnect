@@ -73,6 +73,9 @@ final class FakeVoiceChat: VoiceModeChat {
     var turnResult: VoiceModeTurnResult = .delivered(promptId: "p1")
     var holdTurn = false
     var progress: LiveReplyProgress = .waiting
+    /// Issue #172: the send state of a queued turn.
+    var delivery: VoiceModeTurnDelivery = .queued
+    private(set) var released: [String] = []
     private(set) var transcribed: [URL] = []
     private(set) var turns: [(memo: VoiceMemo, transcript: String)] = []
     private(set) var attached: [SpokenAudio] = []
@@ -105,6 +108,10 @@ final class FakeVoiceChat: VoiceModeChat {
     }
 
     func replyProgress(promptId _: String) -> LiveReplyProgress { progress }
+
+    func voiceModeTurnDelivery(promptId _: String) -> VoiceModeTurnDelivery { delivery }
+
+    func releaseVoiceModeTurn(promptId: String) { released.append(promptId) }
 
     func attachVoiceModeAudio(_ audio: SpokenAudio, promptId _: String) { attached.append(audio) }
 
@@ -533,13 +540,7 @@ private final class Rig {
         #expect(rig.engine.state == .listening)
     }
 
-    @Test func aQueuedOrRefusedTurnIsAnError() async throws {
-        let queued = Rig()
-        queued.chat.turnResult = .queued
-        await queued.engine.start(chat: queued.chat)
-        queued.sayOneClip()
-        try await until { queued.engine.state == .error(.offline) }
-
+    @Test func aRefusedTurnIsAnError() async throws {
         let refused = Rig()
         refused.chat.turnResult = .failed
         await refused.engine.start(chat: refused.chat)
@@ -553,6 +554,118 @@ private final class Rig {
         failedReply.chat.progress = .failed
         failedReply.engine.tick()
         #expect(failedReply.engine.state == .error(.turnFailed))
+    }
+
+    // MARK: Connect wait (issue #172)
+
+    /// A turn that ends while the app connects: "Connecting…", then the outbox sends it and voice mode speaks the reply.
+    @Test func aQueuedTurnWaitsForTheConnectAndSpeaksTheReply() async throws {
+        let rig = Rig()
+        rig.chat.turnResult = .queued(promptId: "p1")
+        await rig.engine.start(chat: rig.chat)
+        rig.sayOneClip()
+        try await until("connecting") { rig.engine.isConnecting }
+        #expect(rig.engine.state == .thinking)
+        let display = VoiceTabDisplay.make(state: rig.engine.state, muted: false, thinkingSeconds: 2,
+                                           connecting: rig.engine.isConnecting)
+        #expect(display.title == "Thinking…")
+        #expect(display.subtitle == "Connecting…")
+        #expect(display.ring == .working)
+
+        // The connect takes about 6 s. A reply text before the delivery does not open the speaker.
+        rig.chat.progress = .done("It is noon.")
+        rig.run(6, decibels: -60)
+        #expect(rig.engine.state == .thinking)
+        #expect(rig.speeches.isEmpty)
+        rig.chat.delivery = .sending
+        rig.run(1, decibels: -60)
+        #expect(rig.engine.isConnecting)
+
+        rig.chat.delivery = .delivered
+        try await until("speech") {
+            rig.engine.tick()
+            return rig.speech?.finished == true
+        }
+        #expect(!rig.engine.isConnecting)
+        #expect(rig.speech?.texts.joined() == "It is noon.")
+        rig.speech?.push(.speaking(viaFallback: false))
+        try await until("speaking") { rig.engine.state == .speaking }
+        rig.speech?.push(.ended)
+        try await until("listening") { rig.engine.state == .listening }
+        // The turn went to the chat one time. Voice mode kept it.
+        #expect(rig.chat.turns.count == 1)
+        #expect(rig.chat.released.isEmpty)
+    }
+
+    @Test func aQueuedTurnShowsOfflineWhenTheConnectFails() async throws {
+        let tuning = VoiceModeTuning()
+        #expect(tuning.connectWaitSeconds == 45)
+        let rig = Rig()
+        rig.chat.turnResult = .queued(promptId: "p1")
+        await rig.engine.start(chat: rig.chat)
+        rig.sayOneClip()
+        try await until("connecting") { rig.engine.isConnecting }
+        rig.run(44, decibels: -60)
+        #expect(rig.engine.state == .thinking)
+        rig.run(1.1, decibels: -60)
+        #expect(rig.engine.state == .error(.offline))
+        #expect(!rig.engine.isConnecting)
+        #expect(rig.chat.released == ["p1"], "the memo waits in the chat as a normal memo")
+        #expect(rig.chat.turns.count == 1)
+        let display = VoiceTabDisplay.make(state: rig.engine.state, muted: false, thinkingSeconds: 0)
+        #expect(display.title == "Offline")
+    }
+
+    @Test func aQueuedMemoThatFailsShowsNotDelivered() async throws {
+        let rig = Rig()
+        rig.chat.turnResult = .queued(promptId: "p1")
+        await rig.engine.start(chat: rig.chat)
+        rig.sayOneClip()
+        try await until("connecting") { rig.engine.isConnecting }
+        rig.chat.delivery = .failed
+        rig.engine.tick()
+        #expect(rig.engine.state == .error(.turnFailed))
+        #expect(rig.chat.released == ["p1"])
+        let display = VoiceTabDisplay.make(state: rig.engine.state, muted: false, thinkingSeconds: 0)
+        #expect(display.title == "Not Delivered")
+    }
+
+    @Test func endAndPauseStopTheConnectWait() async throws {
+        let ended = Rig()
+        ended.chat.turnResult = .queued(promptId: "p1")
+        await ended.engine.start(chat: ended.chat)
+        ended.sayOneClip()
+        try await until("connecting") { ended.engine.isConnecting }
+        ended.engine.end()
+        #expect(ended.engine.state == .ended(.end))
+        #expect(!ended.engine.isConnecting)
+        #expect(ended.chat.released == ["p1"])
+        ended.chat.delivery = .delivered
+        ended.chat.progress = .done("It is noon.")
+        ended.run(1, decibels: -60)
+        #expect(ended.speeches.isEmpty)
+
+        let paused = Rig()
+        paused.chat.turnResult = .queued(promptId: "p2")
+        await paused.engine.start(chat: paused.chat)
+        paused.sayOneClip()
+        try await until("connecting") { paused.engine.isConnecting }
+        paused.engine.pause(.background)
+        #expect(paused.engine.state == .paused(.background))
+        #expect(!paused.engine.isConnecting)
+        #expect(paused.chat.released == ["p2"])
+
+        // An end while the chat still adds the turn: the late `.queued` result is released too.
+        let late = Rig()
+        late.chat.turnResult = .queued(promptId: "p3")
+        late.chat.holdTurn = true
+        await late.engine.start(chat: late.chat)
+        late.sayOneClip()
+        try await until("turn") { late.chat.turns.count == 1 }
+        late.engine.end()
+        late.chat.acceptTurn()
+        try await until("released") { late.chat.released == ["p3"] }
+        #expect(!late.engine.isConnecting)
     }
 
     @Test func aSpeechFailureIsAnErrorAndAnEmptyReplyListensAgain() async throws {
@@ -615,6 +728,13 @@ private final class FakeVoiceModeTransport: ChatTransport, @unchecked Sendable {
     private var _spoken = 0
 
     private var _replay: SessionEventsSinceResult?
+    private var _online = true
+
+    /// Issue #172: offline, the session and submit calls throw `GatewayError.notConnected`.
+    var online: Bool {
+        get { lock.withLock { _online } }
+        set { lock.withLock { _online = newValue } }
+    }
 
     var voiceSubmits: [String] { lock.withLock { _voiceSubmits } }
     var spoken: Int { lock.withLock { _spoken } }
@@ -625,11 +745,13 @@ private final class FakeVoiceModeTransport: ChatTransport, @unchecked Sendable {
     }
 
     func startSession(source _: String, idempotencyKey _: String) async throws -> ChatSessionRef {
-        ChatSessionRef(liveId: "s1", storedId: "st1")
+        if !online { throw GatewayError.notConnected }
+        return ChatSessionRef(liveId: "s1", storedId: "st1")
     }
 
     func resumeSession(storedId: String, source _: String) async throws -> ChatSessionRef {
-        ChatSessionRef(liveId: "s1", storedId: storedId, running: true)
+        if !online { throw GatewayError.notConnected }
+        return ChatSessionRef(liveId: "s1", storedId: storedId, running: true)
     }
 
     func eventsSince(sessionId _: String, lastSeen _: Int) async throws -> SessionEventsSinceResult {
@@ -640,6 +762,7 @@ private final class FakeVoiceModeTransport: ChatTransport, @unchecked Sendable {
     func submitPrompt(sessionId _: String, text _: String, retryBeforeRowId _: Int?) async throws -> Int? { 11 }
 
     func submitVoicePrompt(sessionId _: String, text: String, retryBeforeRowId _: Int?) async throws -> Int? {
+        if !online { throw GatewayError.notConnected }
         lock.withLock { _voiceSubmits.append(text) }
         return 12
     }
@@ -812,6 +935,66 @@ private func chatEvent(_ json: String) throws -> GatewayClientEvent {
         #expect(frames[2]["done"]?.boolValue == true)
         #expect(rig.engine.state == .thinking)
         #expect(rig.transport.voiceSubmits == ["What time is it"])
+    }
+
+    /// Issue #172: the clip ends while the app connects. The outbox sends the turn one time, and voice mode speaks
+    /// the reply with `speak-stream`. The #10 speak call does not run.
+    @Test func aTurnDuringTheConnectGoesOneTimeAndIsSpoken() async throws {
+        let rig = try Setup()
+        rig.transport.online = false
+        await rig.engine.start(chat: rig.vm)
+        rig.run(1, decibels: -20)
+        rig.run(3.1, decibels: -60)
+        try await until { rig.engine.isConnecting }
+        #expect(rig.engine.state == .thinking)
+        #expect(rig.vm.messages.first?.delivery == .queued)
+        #expect(rig.vm.voiceModeTurnDelivery(promptId: "m2") == .queued)
+        #expect(rig.transport.voiceSubmits.isEmpty)
+        rig.run(6, decibels: -60)
+        #expect(rig.engine.state == .thinking)
+
+        // The connect ends: the outbox sends the memo.
+        rig.transport.online = true
+        await rig.vm.sendQueued()?.value
+        #expect(rig.transport.voiceSubmits == ["What time is it"])
+        rig.engine.tick()
+        #expect(!rig.engine.isConnecting)
+
+        rig.vm.receive(try chatEvent(#"{"type":"message.start","session_id":"s1","payload":{"turn_id":"t1"}}"#))
+        rig.vm.receive(try chatEvent(#"{"type":"message.complete","session_id":"s1","payload":{"text":"It is noon.","status":"complete"}}"#))
+        try await until {
+            rig.engine.tick()
+            return !rig.socket.sent.isEmpty
+        }
+        let frames = try await sentFrames(rig.socket, count: 2)
+        #expect(frames[0]["text"]?.stringValue == "It is noon.")
+        #expect(frames[1]["done"]?.boolValue == true)
+        rig.socket.push(#"{"type":"start","sample_rate":1000,"channels":1}"#)
+        rig.socket.pushBinary(pcm(Array(repeating: 12_000, count: 1_000)))
+        try await until { rig.engine.state == .speaking }
+        rig.socket.push(#"{"type":"end"}"#)
+        try await until { rig.engine.state == .listening }
+        try await until { rig.vm.messages.last?.spokenReply?.audio != nil }
+        // One send only, and no second TTS call.
+        #expect(rig.transport.voiceSubmits == ["What time is it"])
+        #expect(rig.transport.spoken == 0)
+        #expect(rig.vm.autoPlayReplyId == nil)
+    }
+
+    /// Issue #172: a released turn that goes later is a normal memo, with the #10 speak call.
+    @Test func aReleasedQueuedTurnUsesTheNormalSpeakCall() async throws {
+        let rig = try Setup()
+        rig.transport.online = false
+        let memo = VoiceMemo(fileURL: URL(fileURLWithPath: "/tmp/voice-mode-test/x.m4a"), duration: 2, waveform: [])
+        let result = await rig.vm.sendVoiceModeTurn(memo, transcript: "Hi")
+        #expect(result == .queued(promptId: "m2"))
+        rig.vm.releaseVoiceModeTurn(promptId: "m2")
+        rig.transport.online = true
+        await rig.vm.sendQueued()?.value
+        #expect(rig.vm.voiceModeTurnDelivery(promptId: "m2") == .delivered)
+        rig.vm.receive(try chatEvent(#"{"type":"message.complete","session_id":"s1","payload":{"text":"Hello.","status":"complete"}}"#))
+        try await until { rig.transport.spoken == 1 }
+        #expect(rig.vm.voiceModeTurnDelivery(promptId: "gone") == .failed)
     }
 
     @Test func bargeInSendsStopOnSpeakStream() async throws {

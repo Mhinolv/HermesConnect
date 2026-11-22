@@ -65,8 +65,20 @@ public enum VoiceModeTurnResult: Sendable, Equatable {
     /// `prompt.submit` took the turn. `promptId` is the id of the memo bubble.
     case delivered(promptId: String)
     /// Offline: the memo waits in the outbox.
-    case queued
+    /// Issue #172: the chat keeps `promptId` as a voice mode turn. When the outbox sends it, voice mode speaks the reply.
+    case queued(promptId: String)
     /// The server refused the turn. The memo shows "Not Delivered".
+    case failed
+}
+
+/// Issue #172: the send state of a voice turn that waits in the outbox.
+public enum VoiceModeTurnDelivery: Sendable, Equatable {
+    /// The memo waits for the connect.
+    case queued
+    /// The outbox sends the memo now.
+    case sending
+    case delivered
+    /// The memo shows "Not Delivered", or it is gone.
     case failed
 }
 
@@ -79,6 +91,10 @@ public protocol VoiceModeChat: AnyObject {
     /// Adds the memo bubble with its transcript and sends it as a voice turn.
     func sendVoiceModeTurn(_ memo: VoiceMemo, transcript: String) async -> VoiceModeTurnResult
     func replyProgress(promptId: String) -> LiveReplyProgress
+    /// Issue #172: the send state of a turn that `sendVoiceModeTurn` returned as `.queued`.
+    func voiceModeTurnDelivery(promptId: String) -> VoiceModeTurnDelivery
+    /// Issue #172: voice mode stops the wait for a queued turn. When the outbox sends it later, it is a normal memo.
+    func releaseVoiceModeTurn(promptId: String)
     /// The audio that played. The reply bubble shows it as its #10 voice reply.
     func attachVoiceModeAudio(_ audio: SpokenAudio, promptId: String)
     /// A clip with no transcript: the normal memo path keeps it (outbox when offline, "Try Again" on a failure).
@@ -89,6 +105,8 @@ public protocol VoiceModeChat: AnyObject {
 public struct VoiceModeTuning: Sendable, Equatable {
     /// Issue #134: with no reply text this long after the turn is delivered, the local ack plays.
     public var ackDelaySeconds: TimeInterval = 1.5
+    /// Issue #172: a turn that waits in the outbox this long, with no send, shows "Offline".
+    public var connectWaitSeconds: TimeInterval = 45
     /// A level at or above this is speech.
     public var speechDecibels: Float = -40
     /// Speech must last this long before a clip counts as speech. A click does not.
@@ -157,6 +175,8 @@ public final class VoiceModeController {
     public private(set) var ackCount = 0
     /// Issue #149: the thinking sound plays. The state stays `.thinking`. A tap stops it.
     public private(set) var isPulsing = false
+    /// Issue #172: the turn waits in the outbox for the connect. The state stays `.thinking`.
+    public private(set) var isConnecting = false
 
     public typealias SpeechFactory = @MainActor (any StreamedSpeechPlaying) async throws -> any VoiceModeSpeaking
 
@@ -209,6 +229,9 @@ public final class VoiceModeController {
         var id: Int
         var startedAt: TimeInterval
         var promptId: String?
+        /// Issue #172: the memo waits in the outbox. `promptId` gets this id when the outbox sends it.
+        var queuedPromptId: String?
+        var queuedAt: TimeInterval = 0
         var tap: VoiceModeSpeechTap
         var speech: (any VoiceModeSpeaking)?
         var makingSpeech = false
@@ -467,6 +490,8 @@ public final class VoiceModeController {
             // A small margin keeps whole seconds whole on a clock that adds 1/30 s steps.
             let seconds = max(0, Int(time - (turn?.startedAt ?? time) + 0.001))
             if seconds != thinkingSeconds { thinkingSeconds = seconds }
+            connectTick(time)
+            guard state == .thinking else { return }
             pumpReply()
             guard state == .thinking else { return }
             if isAcking {
@@ -589,18 +614,50 @@ public final class VoiceModeController {
         var sent = memo
         sent.transcript = .done(transcript)
         let result = await chat.sendVoiceModeTurn(sent, transcript: transcript)
-        guard self.epoch == epoch, let tracked, turn?.id == tracked, state == .thinking else { return }
+        guard self.epoch == epoch, let tracked, turn?.id == tracked, state == .thinking else {
+            // Issue #172: the loop does not wait for the turn. The outbox sends it as a normal memo.
+            if case .queued(let promptId) = result { chat.releaseVoiceModeTurn(promptId: promptId) }
+            return
+        }
         switch result {
         case .delivered(let promptId):
             turn?.promptId = promptId
             turn?.deliveredAt = clock()
             log.info("voice mode turn delivered: message \(promptId)")
             pumpReply()
-        case .queued:
-            turn = nil
-            setFailure(.offline)
+        case .queued(let promptId):
+            // Issue #172: the app connects. The turn waits in the outbox, and the outbox sends it one time.
+            turn?.queuedPromptId = promptId
+            turn?.queuedAt = clock()
+            isConnecting = true
+            log.info("voice mode turn waits for the connect: message \(promptId)")
         case .failed:
             turn = nil
+            setFailure(.turnFailed)
+        }
+    }
+
+    // MARK: Connect wait (issue #172)
+
+    /// The outbox sends the queued turn when the connect ends. Voice mode never sends it again.
+    /// "Offline" shows when the memo stays queued for `connectWaitSeconds`. A failed memo shows "Not Delivered".
+    private func connectTick(_ time: TimeInterval) {
+        guard var current = turn, let promptId = current.queuedPromptId, let chat else { return }
+        switch chat.voiceModeTurnDelivery(promptId: promptId) {
+        case .delivered:
+            current.queuedPromptId = nil
+            current.promptId = promptId
+            current.deliveredAt = time
+            turn = current
+            isConnecting = false
+            log.info("voice mode turn delivered after the connect: message \(promptId)")
+        case .sending:
+            break
+        case .queued:
+            guard time - current.queuedAt >= tuning.connectWaitSeconds else { return }
+            log.notice("voice mode connect wait ended: message \(promptId)")
+            setFailure(.offline)
+        case .failed:
             setFailure(.turnFailed)
         }
     }
@@ -829,8 +886,11 @@ public final class VoiceModeController {
     private func silenceTurn() {
         stopAck()
         stopPulse()
+        isConnecting = false
         guard let current = turn else { return }
         turn = nil
+        // Issue #172: a turn that still waits in the outbox becomes a normal memo.
+        if let promptId = current.queuedPromptId { chat?.releaseVoiceModeTurn(promptId: promptId) }
         current.commands?.finish()
         if let speech = current.speech {
             Task { await speech.stop() }
