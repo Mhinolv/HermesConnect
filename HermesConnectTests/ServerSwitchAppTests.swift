@@ -12,10 +12,12 @@ import UserNotifications
         let store: InMemoryServerListStore
         let transport: ScriptedSSHTransport
         let defaults: UserDefaults
+        let tokens: InMemoryServeTokenStore
     }
 
     private func makeModel(_ servers: [ServerProfile], active: Int = 0,
                            defaults: UserDefaults? = nil) async -> Setup {
+        let tokens = InMemoryServeTokenStore()
         let keyStore = KeychainDeviceKeyStore(secrets: InMemorySecretStore(), factory: SoftwareKeyFactory())
         let store = InMemoryServerListStore(ServerList(servers: servers, activeID: servers[active].id))
         let transport = ScriptedSSHTransport(hostKey: .sample)
@@ -24,9 +26,9 @@ import UserNotifications
                                                         healthRetryDelay: .milliseconds(1)))
         let defaults = defaults ?? UserDefaults(suiteName: "test-\(UUID().uuidString)")!
         let model = AppModel(keyStore: keyStore, serverStore: store, defaults: defaults,
-                             deviceName: "Test iPhone", transport: transport, serve: serve)
+                             deviceName: "Test iPhone", transport: transport, serve: serve, tokenStore: tokens)
         await model.ensureKey()
-        return Setup(model: model, store: store, transport: transport, defaults: defaults)
+        return Setup(model: model, store: store, transport: transport, defaults: defaults, tokens: tokens)
     }
 
     private let home = ServerProfile(host: "home.example.com", displayName: "Home", hostKey: .sample)
@@ -424,6 +426,35 @@ import UserNotifications
         #expect(!ok)
         #expect(setup.transport.record.connectAttempts == 0)
         #expect(await setup.model.withBackgroundLink(to: home.id) { _ in true } == false, "never the active server")
+    }
+
+    /// Issue #173: a switch keeps the stored token of each server, so a switch back sends it again.
+    @Test func aSwitchKeepsTheStoredTokenOfEachServer() async throws {
+        let setup = await makeModel([home, lab])
+        await setup.model.connect()
+        let homeToken = try #require(try setup.tokens.loadToken(for: home.id))
+        await setup.model.switchServer(to: lab.id)
+        #expect(try setup.tokens.loadToken(for: home.id) == homeToken)
+        #expect(try setup.tokens.loadToken(for: lab.id) != nil)
+        await setup.model.switchServer(to: home.id)
+        #expect(setup.transport.record.stdins.last?.flatMap(SessionToken.init(storedBytes:)) == homeToken)
+    }
+
+    /// Issue #173: the background link sends the stored token of that server, so its live turn continues.
+    /// With no stored token, it mints one and saves it for the next link.
+    @Test func aBackgroundLinkSendsAndSavesTheTokenOfThatServer() async throws {
+        let setup = await makeModel([home, lab])
+        let stored = SessionToken.mint()
+        try setup.tokens.saveToken(stored, for: lab.id)
+        #expect(await setup.model.withBackgroundLink(to: lab.id) { _ in true })
+        #expect(setup.transport.record.stdins.last?.flatMap(SessionToken.init(storedBytes:)) == stored)
+        #expect(try setup.tokens.loadToken(for: lab.id) == stored)
+
+        try setup.tokens.deleteToken(for: lab.id)
+        #expect(await setup.model.withBackgroundLink(to: lab.id) { _ in true })
+        let sent = try #require(setup.transport.record.stdins.last ?? nil)
+        #expect(try setup.tokens.loadToken(for: lab.id) == SessionToken(storedBytes: sent))
+        #expect(try setup.tokens.loadToken(for: home.id) == nil, "the active server token does not change")
     }
 
     @Test func oneServerKeepsTheHermesTitle() async throws {

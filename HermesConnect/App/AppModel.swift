@@ -61,9 +61,12 @@ final class AppModel {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let connector: HostConnector
     @ObservationIgnored private let serve: ServeBootstrap
+    /// Issue #173: the token of each server in the Keychain. A relaunch sends it, so the gate reuses the live server.
+    @ObservationIgnored private let tokenStore: any ServeTokenStore
     @ObservationIgnored private var session: (any SSHSession)?
     @ObservationIgnored private var hermes: HermesServe?
-    /// The token of the last spawn, in memory only. The next connect sends it again, so the gate reuses the server.
+    /// The token of the last spawn of the active server. The next connect sends it again, so the gate reuses the server.
+    /// Issue #173: a copy is in `tokenStore`. When this is nil, the connect loads the stored token of the server.
     @ObservationIgnored private var serveToken: SessionToken?
     /// Counts connect attempts. A result from an old attempt is dropped (the server changed, or a disconnect ran).
     @ObservationIgnored private var attempt = 0
@@ -78,8 +81,10 @@ final class AppModel {
 
     init(keyStore: any DeviceKeyStore, serverStore: any ServerListStore,
          defaults: UserDefaults = .standard, deviceName: String, transport: any SSHTransport,
-         serve: ServeBootstrap = ServeBootstrap()) {
+         serve: ServeBootstrap = ServeBootstrap(),
+         tokenStore: any ServeTokenStore = InMemoryServeTokenStore()) {
         self.keyStore = keyStore
+        self.tokenStore = tokenStore
         self.serverStore = serverStore
         self.defaults = defaults
         self.connector = HostConnector(transport: transport)
@@ -105,7 +110,8 @@ final class AppModel {
         let serverStore: any ServerListStore = (try? FileServerListStore.applicationSupport())
             ?? InMemoryServerListStore()
         return AppModel(keyStore: KeychainDeviceKeyStore.system(), serverStore: serverStore,
-                        deviceName: UIDevice.current.name, transport: CitadelSSHTransport())
+                        deviceName: UIDevice.current.name, transport: CitadelSSHTransport(),
+                        tokenStore: KeychainServeTokenStore())
     }
 
     var isSetUp: Bool { profile != nil && deviceKey != nil }
@@ -137,6 +143,9 @@ final class AppModel {
         var list = serverList
         list.modifyAll { $0.servePort = nil }
         commitQuietly(list)
+        // Issue #173: the tokens belong to the old slots. The next connect to each server mints a new token.
+        serveToken = nil
+        try? tokenStore.deleteAllTokens()
         keyState = .creating
         deviceKey = nil
         let store = keyStore
@@ -190,7 +199,10 @@ final class AppModel {
         var list = serverList
         let change = try list.update(profile)
         try commit(list)
-        if change == .newServer, profile.id == self.profile?.id {
+        guard change == .newServer else { return }
+        // Issue #173: a new host, port or user is a different server. Its old token is of no use.
+        deleteStoredToken(for: profile.id)
+        if profile.id == self.profile?.id {
             resetConnection(ServerChange(from: profile.id, to: profile.id))
         }
     }
@@ -203,6 +215,7 @@ final class AppModel {
         var list = serverList
         list.remove(id: id)
         try commit(list)
+        deleteStoredToken(for: id)
         var book = serverBook
         book.keep(only: Set(list.servers.map(\.id)))
         saveBook(book)
@@ -271,7 +284,8 @@ final class AppModel {
     }
 
     /// The active server changed, or its host, port or user changed. Close the old connection.
-    /// The token belongs to the old server. Settings connects again when it closes.
+    /// The token in memory belongs to the old server. Settings connects again when it closes.
+    /// Issue #173: the stored token stays. A switch back sends it, so the live turn of that server continues.
     /// Issue #83: the app resets its lists first. The next connect waits until the old link is closed.
     private func resetConnection(_ change: ServerChange) {
         pendingTrust = nil
@@ -318,7 +332,8 @@ final class AppModel {
                 updateServer(id: serverID) { $0.lastAlgorithms = algorithms }
             }
             let pinsPort = ServeBootstrap.pinsPort(gateVersion: result.gateVersion)
-            let running = try await serve.start(on: result.session, reuse: serveToken,
+            let reuse = serveToken ?? storedToken(for: serverID)
+            let running = try await serve.start(on: result.session, reuse: reuse,
                                                 pinnedPort: pinsPort ? profile.servePort : nil)
             guard current == attempt else {
                 await running.forward.close()
@@ -326,6 +341,7 @@ final class AppModel {
             }
             hermes = running
             serveToken = running.token
+            if running.token != reuse { saveStoredToken(running.token, for: serverID) }
             // Issue #29 and #18: the port pin is saved in the profile, so a relaunch keeps it.
             updateServer(id: serverID) { $0.servePort = pinsPort ? running.remotePort : nil }
             hermesEndpoint = running.endpoint
@@ -339,7 +355,10 @@ final class AppModel {
                 connection = .hostKeyChanged(saved: saved, received: received)
                 showsHostKeyError = true
             default:
-                if error == .sessionTokenRejected { serveToken = nil }
+                if error == .sessionTokenRejected {
+                    serveToken = nil
+                    deleteStoredToken(for: serverID)
+                }
                 await closeSession()
                 connection = Self.failureState(for: error)
             }
@@ -363,6 +382,7 @@ final class AppModel {
     /// The next `serve` gets a new token, so the gate replaces the server.
     func renewHermesSession() async {
         serveToken = nil
+        if let id = profile?.id { deleteStoredToken(for: id) }
         await disconnect()
         await connect()
     }
@@ -397,6 +417,9 @@ final class AppModel {
         var list = serverList
         list.modify(id: target) { $0.hostKey = nil }
         try commit(list)
+        // Issue #173: the token goes only to a trusted server. A new trust starts with a new token.
+        deleteStoredToken(for: target)
+        if target == profile?.id { serveToken = nil }
         // The port pin stays: it belongs to the device key slot, not to the host key (issue #18).
         guard target == profile?.id else { return }
         showsHostKeyError = false
@@ -408,6 +431,24 @@ final class AppModel {
         var list = serverList
         list.modify(id: id, change)
         commitQuietly(list)
+    }
+
+    // MARK: Stored serve token (issue #173)
+
+    /// The stored token of a server, or nil. A Keychain failure gives nil, so the connect mints a new token.
+    private func storedToken(for id: UUID) -> SessionToken? {
+        (try? tokenStore.loadToken(for: id)) ?? nil
+    }
+
+    /// A save that fails keeps the token in memory only. The next relaunch then mints a new token.
+    /// A server that the owner removed during the link gets no token.
+    private func saveStoredToken(_ token: SessionToken, for id: UUID) {
+        guard serverList.server(id: id) != nil else { return }
+        try? tokenStore.saveToken(token, for: id)
+    }
+
+    private func deleteStoredToken(for id: UUID) {
+        try? tokenStore.deleteToken(for: id)
     }
 
     // MARK: Background refresh of another server (issue #84)
@@ -422,6 +463,8 @@ final class AppModel {
         await disconnect()
         let connector = self.connector
         let serve = self.serve
+        // Issue #173: send the stored token of that server, so the gate does not stop its live turn.
+        let reuse = storedToken(for: id)
         let previous = pendingClose
         let work = Task { @MainActor [weak self] () -> Bool in
             await previous?.value
@@ -429,12 +472,17 @@ final class AppModel {
                   let result = try? await connector.connect(profile: server, key: deviceKey) else { return false }
             var ok = false
             let pinsPort = ServeBootstrap.pinsPort(gateVersion: result.gateVersion)
-            if !Task.isCancelled,
-               let running = try? await serve.start(on: result.session, reuse: nil,
-                                                    pinnedPort: pinsPort ? server.servePort : nil) {
-                self?.updateServer(id: id) { $0.servePort = pinsPort ? running.remotePort : nil }
-                ok = await body(running.endpoint)
-                await running.forward.close()
+            if !Task.isCancelled {
+                do throws(SSHConnectionError) {
+                    let running = try await serve.start(on: result.session, reuse: reuse,
+                                                        pinnedPort: pinsPort ? server.servePort : nil)
+                    self?.updateServer(id: id) { $0.servePort = pinsPort ? running.remotePort : nil }
+                    if running.token != reuse { self?.saveStoredToken(running.token, for: id) }
+                    ok = await body(running.endpoint)
+                    await running.forward.close()
+                } catch .sessionTokenRejected {
+                    self?.deleteStoredToken(for: id)
+                } catch {}
             }
             await result.session.close()
             return ok
