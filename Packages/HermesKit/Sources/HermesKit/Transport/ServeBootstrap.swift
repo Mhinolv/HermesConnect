@@ -2,7 +2,7 @@ import Foundation
 import Security
 
 /// The 64-hex session token of one `hermes serve` spawn (docs/hermes-protocol.md 1.6).
-/// The app keeps it in memory only. It goes to the gate on stdin and to Hermes in the
+/// Issue #173: the app keeps it in the Keychain for each server (`ServeTokenStore`). It goes to the gate on stdin and to Hermes in the
 /// `X-Hermes-Session-Token` header. `description` hides it, so a print or a log line cannot leak it.
 public struct SessionToken: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible {
     /// 64 lowercase hex characters.
@@ -41,7 +41,7 @@ public struct HermesServe: Sendable {
     public let forward: any LoopbackForward
     /// The server port from `PORT <n>`. A fixed-port gate (version 2 or later) always prints the same port (#29).
     public let remotePort: Int
-    /// Keep it in memory for the next connect. The gate then reuses the live server.
+    /// Keep it for the next connect (issue #173: in the Keychain, `ServeTokenStore`). The gate then reuses the live server.
     public let token: SessionToken
 }
 

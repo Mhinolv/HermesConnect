@@ -159,12 +159,13 @@ private struct FailingKeyStore: DeviceKeyStore {
         let http: ScriptedHermesHTTP
         let keyStore: KeychainDeviceKeyStore
         let serve: ServeBootstrap
+        let tokens: InMemoryServeTokenStore
 
         /// A new model on the same stores and server: the app after a relaunch.
         @MainActor func relaunch() -> AppModel {
             AppModel(keyStore: keyStore, serverStore: profiles,
                      defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!,
-                     deviceName: "Test iPhone", transport: transport, serve: serve)
+                     deviceName: "Test iPhone", transport: transport, serve: serve, tokenStore: tokens)
         }
     }
 
@@ -176,11 +177,13 @@ private struct FailingKeyStore: DeviceKeyStore {
         let http = ScriptedHermesHTTP()
         let serve = ServeBootstrap(loader: http, configuration: .init(serveTimeout: .seconds(5), healthAttempts: 1,
                                                                       healthRetryDelay: .milliseconds(1)))
+        let tokens = InMemoryServeTokenStore()
         let model = AppModel(keyStore: keyStore, serverStore: profiles,
                              defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!,
-                             deviceName: "Test iPhone", transport: transport, serve: serve)
+                             deviceName: "Test iPhone", transport: transport, serve: serve, tokenStore: tokens)
         await model.ensureKey()
-        return Setup(model: model, transport: transport, profiles: profiles, http: http, keyStore: keyStore, serve: serve)
+        return Setup(model: model, transport: transport, profiles: profiles, http: http, keyStore: keyStore,
+                     serve: serve, tokens: tokens)
     }
 
     @Test func firstConnectAsksForTrustAndSavesNothing() async throws {
@@ -414,6 +417,97 @@ private struct FailingKeyStore: DeviceKeyStore {
         await setup.model.connect()
         #expect(setup.model.connection == .connected(gateVersion: "1"))
         #expect(setup.transport.record.stdins.last != first)
+    }
+
+    // MARK: Issue #173: the stored serve token
+
+    @Test func aRelaunchSendsTheStoredTokenAndTheGateReusesTheServer() async throws {
+        let setup = await makeModel(pin: .sample)
+        await setup.model.connect()
+        let first = try #require(setup.transport.record.stdins.last ?? nil)
+        let id = try #require(setup.model.profile?.id)
+        #expect(try setup.tokens.loadToken(for: id) == SessionToken(storedBytes: first))
+        await setup.model.disconnect()
+
+        let relaunched = setup.relaunch()
+        await relaunched.ensureKey()
+        await relaunched.connect()
+        #expect(relaunched.connection == .connected(gateVersion: "1"))
+        #expect(setup.transport.record.stdins.last == first, "the first connect sends the stored token")
+        #expect(setup.transport.record.spawns == 1)
+        #expect(setup.transport.record.reuses == 1)
+    }
+
+    @Test func aStaleStoredTokenGetsOneRetryAndTheNewTokenIsSaved() async throws {
+        let setup = await makeModel(pin: .sample)
+        let id = try #require(setup.model.profile?.id)
+        let stale = SessionToken.mint()
+        try setup.tokens.saveToken(stale, for: id)
+        setup.http.ownershipStatus = 401
+        await setup.model.connect()
+        #expect(setup.model.connection == .offline(.sessionTokenRejected))
+        #expect(setup.transport.record.stdins.compactMap { $0 }.first.flatMap(SessionToken.init(storedBytes:)) == stale)
+        #expect(try setup.tokens.loadToken(for: id) == nil, "a rejected token is deleted")
+
+        setup.http.ownershipStatus = 200
+        await setup.model.connect()
+        #expect(setup.model.connection == .connected(gateVersion: "1"))
+        let sent = try #require(setup.transport.record.stdins.last ?? nil)
+        #expect(SessionToken(storedBytes: sent) != stale)
+        #expect(try setup.tokens.loadToken(for: id) == SessionToken(storedBytes: sent), "the new token is saved")
+    }
+
+    @Test func renewDeletesTheStoredTokenAndSavesTheNewOne() async throws {
+        let setup = await makeModel(pin: .sample)
+        await setup.model.connect()
+        let id = try #require(setup.model.profile?.id)
+        let first = try #require(try setup.tokens.loadToken(for: id))
+        await setup.model.renewHermesSession()
+        let second = try #require(try setup.tokens.loadToken(for: id))
+        #expect(second != first)
+        #expect(setup.transport.record.stdins.last?.flatMap(SessionToken.init(storedBytes:)) == second)
+    }
+
+    @Test func resetDeviceKeyRemovesEveryStoredToken() async throws {
+        let setup = await makeModel(pin: .sample)
+        await setup.model.connect()
+        try setup.tokens.saveToken(SessionToken.mint(), for: UUID())
+        await setup.model.resetKey()
+        #expect(setup.tokens.servers.isEmpty)
+        let first = try #require(setup.transport.record.stdins.last ?? nil)
+        await setup.model.connect()
+        #expect(setup.transport.record.stdins.last != first, "the next connect mints a new token")
+    }
+
+    @Test(arguments: ["host", "port", "user"])
+    func aNewHostPortOrUserRemovesTheStoredToken(field: String) async throws {
+        let setup = await makeModel(pin: .sample)
+        await setup.model.connect()
+        var profile = try #require(setup.model.profile)
+        #expect(try setup.tokens.loadToken(for: profile.id) != nil)
+        profile.displayName = "Box"
+        try setup.model.saveProfile(profile)
+        #expect(try setup.tokens.loadToken(for: profile.id) != nil, "a new name keeps the token")
+        switch field {
+        case "host": profile.host = "other.example.com"
+        case "port": profile.port = 2222
+        default: profile.user = "other"
+        }
+        try setup.model.saveProfile(profile)
+        #expect(try setup.tokens.loadToken(for: profile.id) == nil)
+        #expect(setup.model.connection == .idle)
+    }
+
+    @Test func removeServerAndForgetHostKeyRemoveTheStoredToken() async throws {
+        let setup = await makeModel(pin: .sample)
+        await setup.model.connect()
+        let id = try #require(setup.model.profile?.id)
+        try await setup.model.forgetHostKey()
+        #expect(try setup.tokens.loadToken(for: id) == nil)
+
+        try setup.tokens.saveToken(SessionToken.mint(), for: id)
+        try setup.model.removeServer(id: id)
+        #expect(setup.tokens.servers.isEmpty)
     }
 
     @Test func gateFailureAlertTextHasNoServerDetails() {
