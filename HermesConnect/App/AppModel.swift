@@ -500,6 +500,9 @@ final class AppModel {
         /// The connection can be dead after a suspend: close it, then connect again. The token stays,
         /// so the gate reuses the running Hermes.
         case reconnect
+        /// Issue #176: the link looks ready after a long time away. Test it with one ping first.
+        /// Reconnect only when the ping fails.
+        case probe
     }
 
     /// The server reaps an idle live session 20 s after its socket drops. After a longer time away, the
@@ -516,17 +519,27 @@ final class AppModel {
         case .idle, .offline: return .connect
         case .connecting, .startingHermes, .notStarted, .hostKeyChanged: return .none
         case .connected:
-            if link == .notConnected || away >= staleAfter { return .reconnect }
+            if link == .notConnected { return .reconnect }
+            if away >= staleAfter { return link == .ready ? .probe : .reconnect }
             return .none
         }
     }
 
     /// The root calls this when the scene is active again after the background.
-    func reconnectOnForeground(link: ChatLinkStatus?, away: TimeInterval) async {
+    /// Issue #176: `probe` tests the link (one ping with a time limit). `true` keeps the link.
+    func reconnectOnForeground(link: ChatLinkStatus?, away: TimeInterval,
+                               probe: @MainActor () async -> Bool = { false }) async {
         guard isSetUp, pendingTrust == nil else { return }
         switch Self.foregroundAction(connection: connection, link: link, away: away) {
         case .none: return
         case .connect: await connect()
+        case .probe:
+            let current = attempt
+            if await probe() { return }
+            // A disconnect or a server change during the ping wins.
+            guard current == attempt, case .connected = connection else { return }
+            await disconnect()
+            await connect()
         case .reconnect:
             await disconnect()
             await connect()

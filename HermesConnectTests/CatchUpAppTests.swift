@@ -2,6 +2,7 @@ import BackgroundTasks
 import Foundation
 import HermesKit
 import Testing
+import UIKit
 import UserNotifications
 @testable import HermesConnect
 
@@ -65,7 +66,9 @@ private func freshDefaults(_ name: String) -> UserDefaults {
         // The owner cancelled the trust sheet: no new sheet on its own.
         #expect(AppModel.foregroundAction(connection: .offline(nil), link: nil, away: 600) == .none)
         #expect(AppModel.foregroundAction(connection: connected, link: .ready, away: 5) == .none)
-        #expect(AppModel.foregroundAction(connection: connected, link: .ready, away: 20) == .reconnect)
+        // Issue #176: a link that looks ready after a long time away gets one ping first.
+        #expect(AppModel.foregroundAction(connection: connected, link: .ready, away: 20) == .probe)
+        #expect(AppModel.foregroundAction(connection: connected, link: .connecting, away: 20) == .reconnect)
         #expect(AppModel.foregroundAction(connection: connected, link: .notConnected, away: 1) == .reconnect)
         #expect(AppModel.foregroundAction(connection: .connecting, link: nil, away: 600) == .none)
         #expect(AppModel.foregroundAction(connection: .startingHermes, link: nil, away: 600) == .none)
@@ -81,6 +84,48 @@ private func freshDefaults(_ name: String) -> UserDefaults {
         await model.reconnectOnForeground(link: nil, away: 60)
         #expect(model.pendingTrust == .sample)
         #expect(model.hermesEndpoint == nil)
+    }
+
+    /// Issue #176: a probe is not run for a link that needs a connect. The pin flow stays.
+    @Test func probeRunsOnlyForAReadyLink() async {
+        let model = AppModel.preview(setUp: true, hostKey: nil)
+        var probed = false
+        await model.reconnectOnForeground(link: nil, away: 60, probe: { probed = true; return true })
+        #expect(probed == false)
+        #expect(model.pendingTrust == .sample)
+    }
+
+    /// Issue #176: a link that answers the ping is kept. A link that does not answer reconnects.
+    @Test func probeKeepsALiveLinkAndReconnectsADeadOne() async {
+        let model = AppModel.preview(setUp: true)
+        model.previewConnection(.connected(gateVersion: "1"))
+        await model.reconnectOnForeground(link: .ready, away: 60, probe: { true })
+        #expect(model.connection == .connected(gateVersion: "1"))
+
+        var probed = false
+        await model.reconnectOnForeground(link: .ready, away: 60, probe: { probed = true; return false })
+        #expect(probed)
+        #expect(model.connection != .connected(gateVersion: "1"))
+    }
+
+    /// Issue #176: one background task while away. It ends on return or when iOS ends the time.
+    @Test func linkKeeperHoldsOneTaskAndReleasesIt() {
+        let app = FakeBackgroundTime()
+        let keeper = LinkKeeper(application: app)
+        keeper.hold()
+        keeper.hold()
+        #expect(app.begun == [LinkKeeper.taskName])
+        #expect(keeper.isHolding)
+        keeper.release()
+        #expect(app.ended.count == 1)
+        #expect(!keeper.isHolding)
+        keeper.release()
+        #expect(app.ended.count == 1)
+
+        keeper.hold()
+        app.expire()
+        #expect(app.ended.count == 2)
+        #expect(!keeper.isHolding)
     }
 
     @Test func updatingSubtitleShowsOnlyWhenConnected() {
@@ -190,4 +235,25 @@ private func freshDefaults(_ name: String) -> UserDefaults {
         }
         Issue.record("condition not met")
     }
+}
+
+/// Records the background tasks. No `UIApplication`.
+@MainActor
+final class FakeBackgroundTime: BackgroundTimeGranting {
+    var begun: [String] = []
+    var ended: [UIBackgroundTaskIdentifier] = []
+    private var handler: (@MainActor @Sendable () -> Void)?
+    private var next = 1
+
+    func beginBackgroundTask(withName name: String?,
+                             expirationHandler: (@MainActor @Sendable () -> Void)?) -> UIBackgroundTaskIdentifier {
+        begun.append(name ?? "")
+        handler = expirationHandler
+        next += 1
+        return UIBackgroundTaskIdentifier(rawValue: next)
+    }
+
+    func endBackgroundTask(_ identifier: UIBackgroundTaskIdentifier) { ended.append(identifier) }
+
+    func expire() { handler?() }
 }
