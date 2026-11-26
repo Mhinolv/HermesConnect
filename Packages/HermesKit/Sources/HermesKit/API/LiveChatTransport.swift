@@ -44,13 +44,17 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
 
     /// Issue #97: opens the `speak-stream` sockets on the same forward.
     @ObservationIgnored private let audioConnector: any GatewayWebSocketConnecting
+    /// Issue #180: the socket of a new endpoint is the `socket-ready` step of the current connect.
+    @ObservationIgnored private let timeline: ConnectTimeline
 
     public init(makeClient: @escaping @Sendable (GatewayEndpoint) -> GatewayClient = { GatewayClient(endpoint: $0) },
                 makeREST: @escaping @Sendable (GatewayEndpoint) -> HermesRESTClient = { HermesRESTClient(endpoint: $0) },
-                audioConnector: any GatewayWebSocketConnecting = URLSessionGatewayConnector()) {
+                audioConnector: any GatewayWebSocketConnecting = URLSessionGatewayConnector(),
+                timeline: ConnectTimeline = .shared) {
         self.makeClient = makeClient
         self.makeREST = makeREST
         self.audioConnector = audioConnector
+        self.timeline = timeline
     }
 
     /// `true` for errors that mean "the token is not valid any more".
@@ -106,27 +110,30 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
 
     private func startConnect(_ client: GatewayClient) {
         if status != .reconnecting { status = .connecting }
+        let timing = timeline.current
+        timing?.start(.socketReady)
         connectTask = Task { [weak self] in
             do {
                 try await client.connect()
-                self?.connected(client)
+                self?.connected(client, timing: timing)
             } catch {
                 // A stale token shows up as a `.state(.disconnected)` event too. `forward` handles it.
-                self?.connectFailed(client, error)
+                self?.connectFailed(client, error, timing: timing)
             }
         }
     }
 
-    private func connected(_ client: GatewayClient) {
+    private func connected(_ client: GatewayClient, timing: ConnectRun? = nil) {
         guard client === self.client else { return }
         renewed = false
         status = .ready
+        timing?.finish(.socketReady, ok: true)
     }
 
-    private func connectFailed(_ client: GatewayClient, _ error: any Error) {
-        guard client === self.client, !Self.isStaleToken(error), status != .reconnecting, status != .failed else {
-            return
-        }
+    private func connectFailed(_ client: GatewayClient, _ error: any Error, timing: ConnectRun?) {
+        guard client === self.client else { return }
+        timing?.finish(.socketReady, ok: false)
+        guard !Self.isStaleToken(error), status != .reconnecting, status != .failed else { return }
         status = .notConnected
     }
 

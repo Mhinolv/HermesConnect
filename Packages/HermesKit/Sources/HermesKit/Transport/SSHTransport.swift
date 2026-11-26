@@ -171,17 +171,32 @@ public struct HostConnector: Sendable {
     }
 
     /// Connect, check the host key against `profile.hostKey`, authenticate, then run the gate `ping`.
+    /// - Parameter timing: Issue #180: the run that records the `ssh-login` and `ping` steps, or nil.
+    ///   A failure ends the run with the step that failed.
     /// - Throws: `SSHConnectionError`. `hostKeyUnknown` and `hostKeyChanged` come before authentication.
-    public func connect(profile: ServerProfile, key: DeviceKey) async throws(SSHConnectionError) -> GateConnection {
+    public func connect(profile: ServerProfile, key: DeviceKey,
+                        timing: ConnectRun? = nil) async throws(SSHConnectionError) -> GateConnection {
+        do throws(SSHConnectionError) {
+            return try await connectSteps(profile: profile, key: key, timing: timing)
+        } catch {
+            timing?.fail()
+            throw error
+        }
+    }
+
+    private func connectSteps(profile: ServerProfile, key: DeviceKey,
+                              timing: ConnectRun?) async throws(SSHConnectionError) -> GateConnection {
         let pinned = profile.hostKey
         let session: any SSHSession
         do {
-            session = try await transport.connect(to: SSHEndpoint(profile: profile), key: key) { received in
-                switch HostKeyVerdict.evaluate(received: received, pinned: pinned) {
-                case .trusted: return
-                case .unknown(let key): throw SSHConnectionError.hostKeyUnknown(key)
-                case .changed(let saved, let received):
-                    throw SSHConnectionError.hostKeyChanged(saved: saved, received: received)
+            session = try await timing.measure(.sshLogin) {
+                try await transport.connect(to: SSHEndpoint(profile: profile), key: key) { received in
+                    switch HostKeyVerdict.evaluate(received: received, pinned: pinned) {
+                    case .trusted: return
+                    case .unknown(let key): throw SSHConnectionError.hostKeyUnknown(key)
+                    case .changed(let saved, let received):
+                        throw SSHConnectionError.hostKeyChanged(saved: saved, received: received)
+                    }
                 }
             }
         } catch let error as SSHConnectionError {
@@ -190,8 +205,11 @@ public struct HostConnector: Sendable {
             throw .unreachable
         }
         do {
-            let reply = try await session.execute(.ping)
-            guard let version = Self.parsePong(reply) else { throw SSHConnectionError.unexpectedReply }
+            let version = try await timing.measure(.ping) {
+                let reply = try await session.execute(.ping)
+                guard let version = Self.parsePong(reply) else { throw SSHConnectionError.unexpectedReply }
+                return version
+            }
             let algorithms = await session.negotiatedAlgorithms()
             log.info("SSH connected: gate \(version), \(algorithms?.displayText ?? "algorithms unknown")")
             return GateConnection(session: session, gateVersion: version, algorithms: algorithms)
