@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import json
 import os
 import re
 import struct
@@ -11,6 +12,38 @@ import tempfile
 import unittest
 
 from support import GATE, INSTALL, slot_port
+
+GRACE_KEY = "dashboard.ssh_isolated_idle_grace_s"
+
+# A fake `hermes config get|set`. It keeps the config in $HOME/.hermes/config.json and writes one
+# JSON record per call to $HOME/calls.jsonl. `config get` of a missing key fails like Hermes
+# (hermes_cli/config.py get_config_value): "Config key not set: <key>" on stderr, exit 1.
+# FAKE_CONFIG_MODE=broken makes `config get` fail for another reason.
+FAKE_HERMES_CONFIG = r'''#!{python}
+import json, os, sys
+home = os.environ["HOME"]
+with open(os.path.join(home, "calls.jsonl"), "a") as log:
+    log.write(json.dumps({{"argv": sys.argv[1:], "home": home, "hermesHome": os.environ.get("HERMES_HOME"),
+                          "cwd": os.getcwd()}}) + "\n")
+path = os.path.join(home, ".hermes", "config.json")
+config = json.load(open(path)) if os.path.exists(path) else {{}}
+cmd = sys.argv[1:]
+if cmd[:2] == ["config", "get"] and len(cmd) == 3:
+    if os.environ.get("FAKE_CONFIG_MODE") == "broken":
+        print("Error: config.yaml is not valid YAML", file=sys.stderr)
+        sys.exit(1)
+    if cmd[2] not in config:
+        print("Config key not set: " + cmd[2], file=sys.stderr)
+        sys.exit(1)
+    print(config[cmd[2]])
+elif cmd[:2] == ["config", "set"] and len(cmd) == 4:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    config[cmd[2]] = int(cmd[3])
+    json.dump(config, open(path, "w"))
+    print("Set " + cmd[2])
+else:
+    sys.exit("unexpected call")
+'''
 
 OPTIONS = 'restrict,port-forwarding,permitopen="127.0.0.1:%d",permitlisten="127.0.0.1:1",command="'
 
@@ -45,9 +78,38 @@ class InstallTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def install(self, *args, stdin=None):
+    def install(self, *args, stdin=None, env=None):
         argv = ["bash", INSTALL, "--authorized-keys", self.keys, "--gate-dest", self.gate_dest] + list(args)
-        return subprocess.run(argv, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        return subprocess.run(argv, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+                              env=dict(os.environ, **(env or {})))
+
+    def home(self, *parts):
+        return os.path.join(self.tmp, "home", *parts)
+
+    def fake_hermes(self, path=None):
+        """Put the fake hermes CLI at ``path`` (default: ~/.local/bin/hermes of the temporary home)."""
+        path = path or self.home(".local", "bin", "hermes")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as out:
+            out.write(FAKE_HERMES_CONFIG.format(python=sys.executable))
+        os.chmod(path, 0o755)
+        return path
+
+    def config_calls(self):
+        try:
+            with open(self.home("calls.jsonl")) as stream:
+                return [json.loads(line) for line in stream]
+        except FileNotFoundError:
+            return []
+
+    def config(self):
+        with open(self.home(".hermes", "config.json")) as stream:
+            return json.load(stream)
+
+    def set_config(self, values):
+        os.makedirs(self.home(".hermes"), exist_ok=True)
+        with open(self.home(".hermes", "config.json"), "w") as out:
+            json.dump(values, out)
 
     def lines(self):
         with open(self.keys) as stream:
@@ -240,6 +302,77 @@ class InstallTests(unittest.TestCase):
         result = subprocess.run([sys.executable] + command, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, timeout=60)
         self.assertEqual(result.stdout, b"PONG 3\n", result.stderr)
+
+
+    # Issue #183: keep hermes serve alive for 24 h after the last client goes.
+
+    def test_install_sets_the_idle_grace_when_it_is_not_set(self):
+        self.fake_hermes()
+        result = self.install(self.line, env={"HERMES_HOME": os.path.join(self.tmp, "elsewhere")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config(), {GRACE_KEY: 86400})
+        self.assertIn(b"hermes config: set dashboard.ssh_isolated_idle_grace_s to 86400", result.stdout)
+        calls = self.config_calls()
+        self.assertEqual([c["argv"] for c in calls],
+                         [["config", "get", GRACE_KEY], ["config", "set", GRACE_KEY, "86400"]])
+        for call in calls:
+            # The config of the account that runs hermes serve, not a HERMES_HOME of the caller.
+            self.assertEqual(call["home"], self.home())
+            self.assertIsNone(call["hermesHome"])
+            self.assertEqual(os.path.realpath(call["cwd"]), self.home())
+        self.assertEqual(self.lines(), [self.expected_line()])
+
+    def test_install_keeps_an_idle_grace_that_the_owner_set(self):
+        self.fake_hermes()
+        self.set_config({GRACE_KEY: 3600})
+        result = self.install(self.line)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config(), {GRACE_KEY: 3600})
+        self.assertIn(b"hermes config: kept dashboard.ssh_isolated_idle_grace_s = 3600", result.stdout)
+        self.assertEqual([c["argv"] for c in self.config_calls()], [["config", "get", GRACE_KEY]])
+
+    def test_second_install_keeps_the_idle_grace(self):
+        self.fake_hermes()
+        self.assertEqual(self.install(self.line).returncode, 0)
+        self.set_config({GRACE_KEY: 7200})
+        result = self.install(self.line)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"authorized_keys: unchanged", result.stdout)
+        self.assertIn(b"kept dashboard.ssh_isolated_idle_grace_s = 7200", result.stdout)
+        self.assertEqual(self.config(), {GRACE_KEY: 7200})
+        self.assertEqual(sum(c["argv"][1] == "set" for c in self.config_calls()), 1)
+
+    def test_failed_config_get_changes_nothing(self):
+        self.fake_hermes()
+        result = self.install(self.line, env={"FAKE_CONFIG_MODE": "broken"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"warning: hermes config get failed", result.stderr)
+        self.assertEqual([c["argv"][1] for c in self.config_calls()], ["get"])
+        self.assertFalse(os.path.exists(self.home(".hermes", "config.json")))
+        self.assertEqual(self.lines(), [self.expected_line()])
+
+    def test_no_hermes_binary_gives_a_warning_only(self):
+        result = self.install(self.line)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"warning: no hermes binary found. Set dashboard.ssh_isolated_idle_grace_s by hand",
+                      result.stderr)
+        self.assertEqual(self.lines(), [self.expected_line()])
+
+    def test_hermes_option_is_used_for_the_idle_grace(self):
+        wrapper = self.fake_hermes(os.path.join(self.tmp, "opt", "hermes-wrapper"))
+        result = self.install("--hermes", wrapper, self.line)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config(), {GRACE_KEY: 86400})
+        self.assertEqual(self.lines(), [self.expected_line(extra=" --hermes " + wrapper)])
+
+    def test_remove_and_dry_run_do_not_touch_the_config(self):
+        self.fake_hermes()
+        self.assertEqual(self.install("--dry-run", self.line).returncode, 0)
+        self.assertEqual(self.config_calls(), [])
+        self.assertEqual(self.install(self.line).returncode, 0)
+        calls = len(self.config_calls())
+        self.assertEqual(self.install("--remove", self.line).returncode, 0)
+        self.assertEqual(len(self.config_calls()), calls)
 
 
 if __name__ == "__main__":
