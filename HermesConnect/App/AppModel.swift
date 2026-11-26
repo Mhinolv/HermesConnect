@@ -55,6 +55,11 @@ final class AppModel {
     /// Issue #84: the owner removed a server. The app deletes its cache folder and its notifications.
     /// It runs after the switch to the next server.
     @ObservationIgnored var onServerRemoved: (@MainActor (ServerProfile) -> Void)?
+    /// Issue #178: the SSH connection of the active link closed, and the app did not close it.
+    /// The app gives it to the `LinkSupervisor`.
+    @ObservationIgnored var onSessionClosed: (@MainActor () -> Void)?
+    /// Issue #178: true while the supervisor closes a dead link and connects again. The subtitle says "Reconnecting…".
+    private(set) var isRecoveringLink = false
 
     @ObservationIgnored private let keyStore: any DeviceKeyStore
     @ObservationIgnored private let serverStore: any ServerListStore
@@ -327,6 +332,10 @@ final class AppModel {
                 return
             }
             session = result.session
+            // Issue #178: a close that the app did not start goes to the supervisor. A close of an old link does not.
+            result.session.onClose { [weak self] in
+                Task { @MainActor in self?.sessionClosed(attempt: current) }
+            }
             connection = .startingHermes
             if let algorithms = result.algorithms {
                 updateServer(id: serverID) { $0.lastAlgorithms = algorithms }
@@ -544,6 +553,35 @@ final class AppModel {
             await disconnect()
             await connect()
         }
+    }
+
+    // MARK: Link supervisor (issue #178)
+
+    /// True when the supervisor may reconnect: a connected server, no trust sheet, no changed host key,
+    /// and no connect in progress. "Offline" waits for the owner or for #179.
+    var canRecoverLink: Bool {
+        guard isSetUp, pendingTrust == nil, !showsHostKeyError, !isRecoveringLink else { return false }
+        if case .connected = connection { return true }
+        return false
+    }
+
+    /// The supervisor found a dead link while the app is open. Close it, then connect again.
+    /// The token stays, so the gate reuses the running Hermes. Returns true when the connect succeeded.
+    @discardableResult
+    func recoverLink() async -> Bool {
+        guard canRecoverLink else { return false }
+        isRecoveringLink = true
+        defer { isRecoveringLink = false }
+        await disconnect()
+        await connect()
+        if case .connected = connection { return true }
+        return false
+    }
+
+    private func sessionClosed(attempt closed: Int) {
+        // `closeSession` clears `session` before it closes it. A close from this side is not reported.
+        guard closed == attempt, session != nil else { return }
+        onSessionClosed?()
     }
 
     func disconnect() async {

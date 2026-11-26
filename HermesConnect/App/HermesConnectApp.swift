@@ -16,6 +16,8 @@ struct HermesConnectApp: App {
     @State private var notifications: NotificationController
     /// The Release chat link to Hermes. Nil in the DEBUG demo.
     private let link: LiveChatTransport?
+    /// Issue #178: reconnects a dead link while the app is open. Nil in the DEBUG demo.
+    private let supervisor: LinkSupervisor?
     private let usesAppLock: Bool
 
     init() {
@@ -32,6 +34,7 @@ struct HermesConnectApp: App {
             // Issue #102: `HERMES_DEMO_LIVE=on|off` gives the Live status with no server.
             voice = VoiceTabModel(sessions: demoSessions, liveService: LiveModeDemo.service)
             link = nil
+            supervisor = nil
             // The DEBUG demo conversation: no server, no App Lock, so screenshots show the chat.
             // Issue #66: the Servers screenshots use 3 servers.
             let demo = ServersDemo.current.map(ServersDemo.makeModel) ?? AppModel.preview(setUp: true, hostKey: .sample)
@@ -63,6 +66,7 @@ struct HermesConnectApp: App {
         let location = LocationController.live()
         self.location = location
         self.link = link
+        supervisor = ChatLaunch.makeSupervisor(model: live, link: link)
         let sessions = ChatLaunch.makeSessions(link: link, cache: caches.sessions)
         self.sessions = sessions
         let jobs = ChatLaunch.makeJobs(link: link, cache: caches.jobs)
@@ -164,13 +168,13 @@ struct HermesConnectApp: App {
     @ViewBuilder private var scene: some View {
         Group {
             if usesAppLock {
-                RootView(sessions: sessions, jobs: jobs, voice: voice, link: link)
+                RootView(sessions: sessions, jobs: jobs, voice: voice, link: link, supervisor: supervisor)
                     .environment(model)
                     .environment(location)
                     .environment(notifications)
                     .appLock(model)
             } else {
-                RootView(sessions: sessions, jobs: jobs, voice: voice, link: link)
+                RootView(sessions: sessions, jobs: jobs, voice: voice, link: link, supervisor: supervisor)
                     .environment(model)
                     .environment(location)
                     .environment(notifications)
@@ -195,6 +199,8 @@ struct RootView: View {
     var voice = VoiceTabModel(sessions: ChatLaunch.makeOfflineSessions())
     /// The chat link. It follows the #4 endpoint ("Hermes ready").
     var link: LiveChatTransport?
+    /// Issue #178: the link supervisor. It acts only while the scene is not in the background.
+    var supervisor: LinkSupervisor?
     @State private var showSetup = false
     @State private var showSettings = false
     /// The list is the root. A chat is pushed on top of it.
@@ -249,6 +255,12 @@ struct RootView: View {
             if model.isSetUp, !ChatLaunch.isDemo { await model.connect() }
         }
         .onChange(of: scenePhase) { _, phase in foregroundChange(phase) }
+        // Issue #178: the supervisor acts while the app is open. The #176 check handles the return.
+        .onChange(of: scenePhase, initial: true) { _, phase in supervisor?.setForeground(phase != .background) }
+        // Issue #178: VoiceOver says "Reconnecting" one time for each drop.
+        .onChange(of: model.isRecoveringLink) { _, recovering in
+            if recovering { ReconnectAnnouncement.post() }
+        }
         // Issue #15: a tap on a notification opens that session. App Lock stays on top until unlock.
         // Issue #84: a notification of another server switches to it after the unlock, then opens the chat.
         .onChange(of: notifications?.pendingSessionId) { openNotification() }

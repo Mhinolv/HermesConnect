@@ -113,9 +113,19 @@ private final class CitadelSession: SSHSession, @unchecked Sendable {
 
     private let client: SSHClient
     private let forwards = OpenForwards()
+    /// Issue #178: fires when the SSH connection closes, from either side.
+    private let closeSignal = SSHCloseSignal()
 
     init(client: SSHClient) {
         self.client = client
+        let signal = closeSignal
+        client.onDisconnect { signal.fire() }
+        // The connection can close before the hook is set.
+        if !client.isConnected { signal.fire() }
+    }
+
+    func onClose(_ handler: @escaping @Sendable () -> Void) {
+        closeSignal.setHandler(handler)
     }
 
     func execute(_ command: GateCommand, stdin: Data?) async throws -> String {

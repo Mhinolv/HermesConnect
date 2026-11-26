@@ -49,7 +49,7 @@ struct ChatScreen: View {
             .onAppear { model.startEvents() }
             // Issue #145: VoiceOver says "Reconnecting" one time for each drop during a turn.
             .onChange(of: model.isReattaching) { _, reattaching in
-                if reattaching { AccessibilityNotification.Announcement("Reconnecting").post() }
+                if reattaching { ReconnectAnnouncement.post() }
             }
             // Issue #15: ask for notification permission after the first reply, not at first launch.
             .onChange(of: model.completedReplyId) { _, id in
@@ -145,7 +145,7 @@ struct ChatTitleStatus: View {
 
     var body: some View {
         switch ChatLaunch.subtitle(link: link?.status, connection: app.connection, updating: updating,
-                                   reattaching: reattaching) {
+                                   reattaching: reattaching, recovering: app.isRecoveringLink) {
         case .updating:
             HStack(spacing: 4) {
                 ProgressView().controlSize(.mini)
@@ -355,7 +355,8 @@ enum ChatLaunch {
     /// The SSH and serve stages win when they fail (Offline, Not connected). Else the chat link state shows.
     /// Issue #145: `reattaching`, the socket dropped during a turn. "Reconnecting…" shows until the chat reattaches.
     static func subtitle(link: ChatLinkStatus?, connection: AppModel.ConnectionState,
-                         updating: Bool = false, reattaching: Bool = false) -> Subtitle {
+                         updating: Bool = false, reattaching: Bool = false,
+                         recovering: Bool = false) -> Subtitle {
         switch connection {
         case .offline, .notStarted, .hostKeyChanged: return .connection
         case .idle, .connecting, .startingHermes, .connected: break
@@ -366,6 +367,10 @@ enum ChatLaunch {
         default: break
         }
         if reattaching { return .reconnecting }
+        // Issue #178: the supervisor reconnects a dead link (`recovering`), or the link died and the connection
+        // still says "Connected". The subtitle never says "Connected" while the chat link is down.
+        if recovering { return .reconnecting }
+        if link == .notConnected, case .connected = connection { return .reconnecting }
         if updating, case .connected = connection { return .updating }
         return .connection
     }
@@ -375,6 +380,23 @@ enum ChatLaunch {
         let link = LiveChatTransport()
         link.onStaleToken = renew
         return link
+    }
+
+    /// Issue #178: the supervisor of the Release link. A socket drop and an SSH close reconnect at once.
+    /// A network path change tests the link first. It starts in the background state: the root sets the phase.
+    static func makeSupervisor(model: AppModel, link: LiveChatTransport,
+                               monitor: (any NetworkPathMonitoring)? = SystemPathMonitor()) -> LinkSupervisor {
+        let supervisor = LinkSupervisor(
+            hooks: LinkSupervisor.Hooks(
+                canRecover: { [weak model] in model?.canRecoverLink ?? false },
+                linkIsReady: { [weak link] in link?.status == .ready },
+                probe: { [weak link] in await link?.probe() ?? false },
+                reconnect: { [weak model] in await model?.recoverLink() ?? false }),
+            monitor: monitor, foreground: false)
+        link.onDrop = { [weak supervisor] in supervisor?.report(.linkDropped) }
+        model.onSessionClosed = { [weak supervisor] in supervisor?.report(.sessionClosed) }
+        supervisor.start()
+        return supervisor
     }
 
     #if DEBUG
