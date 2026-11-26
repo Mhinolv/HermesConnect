@@ -98,6 +98,30 @@ If the Hermes of a server has no `secrets.command`, give `--hermes <path to its 
 
 To remove a phone key: `sudo ./install.sh --remove '<key line>'`.
 
+## Idle grace
+
+`hermes serve` exits when no client is connected for `dashboard.ssh_isolated_idle_grace_s` seconds. The Hermes default is 900 (15 minutes). The next connect then waits for a full start ("Starting Hermes…").
+
+`install.sh` sets the value to 86400 (24 hours, issue #183). It runs `hermes config get` and `hermes config set` as the `hermes` account, with `HOME` set to the home of that account.
+
+| State before the install | Result |
+|---|---|
+| The key is not set | `hermes config: set dashboard.ssh_isolated_idle_grace_s to 86400` |
+| The key has a value | The value stays. `hermes config: kept dashboard.ssh_isolated_idle_grace_s = <value>` |
+| No `hermes` binary, or `hermes config` fails | A warning. The key install still succeeds. Set the value by hand. |
+
+The script uses `--hermes PATH` if you give it. Else it looks in `/usr/local/bin`, `/usr/bin`, `~/.local/bin` and `~/.hermes/hermes-agent/venv/bin`. `--remove` and `--dry-run` do not change the config.
+
+Cost: one idle `hermes serve` process for each phone key stays alive for up to 24 hours after the last visit. It uses memory, but almost no CPU. A running turn, queued prompt or cron job always keeps the server alive, with any grace.
+
+To change the value, run this command as the `hermes` user, then stop the old server or wait until it exits:
+
+```
+hermes config set dashboard.ssh_isolated_idle_grace_s <seconds>
+```
+
+`hermes serve` reads the value when it starts. A server that runs now keeps its old grace until it exits. To go back to the Hermes default, run `hermes config unset dashboard.ssh_isolated_idle_grace_s`.
+
 ## Verify
 
 Run these commands from a computer that has a test copy of the phone key (`phone_key`). Then remove the test key. `<port>` is the port in the `permitopen` of the key line. Run the Serve test before the forward tests.

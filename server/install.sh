@@ -10,6 +10,8 @@
 # "ecdsa-sha2-nistp256 <base64> [comment]", with no options in front.
 # The script is idempotent: it replaces every older line for the same key.
 # It also upgrades an older line with permitopen="127.0.0.1:*" to the one slot port.
+# It sets the Hermes config dashboard.ssh_isolated_idle_grace_s to 86400 (24 h) when the
+# key is not set. It keeps a value that is already set (issue #183).
 #
 # Options:
 #   --user NAME              Account that runs Hermes (default: hermes).
@@ -36,6 +38,9 @@ REMOVE=0
 DRY_RUN=0
 KEY_ARG=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# hermes serve exits when no client is connected for this many seconds (default 900).
+IDLE_GRACE_KEY=dashboard.ssh_isolated_idle_grace_s
+IDLE_GRACE_S=86400
 GATE_SRC="$SCRIPT_DIR/gate/hermesconnect-gate"
 
 die() { echo "install.sh: $*" >&2; exit 1; }
@@ -51,7 +56,7 @@ while [ $# -gt 0 ]; do
     --remove) REMOVE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --no-location) NO_LOCATION=1; shift ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
     -) [ -z "$KEY_ARG" ] || die "give one key line"; KEY_ARG="-"; shift ;;
     -*) die "unknown option: $1" ;;
     *) [ -z "$KEY_ARG" ] || die "give one key line (quote it)"; KEY_ARG="$1"; shift ;;
@@ -209,18 +214,83 @@ trap 'rm -f "$TMP_KEYS"' EXIT
 awk -v blob="$KEY_BLOB" '{ for (i = 1; i <= NF; i++) if ($i == blob) next; print }' "$AUTH_KEYS" > "$TMP_KEYS"
 [ "$REMOVE" -eq 1 ] || printf '%s\n' "$NEW_LINE" >> "$TMP_KEYS"
 
+# Run hermes as the account that runs it, with its home, so it uses the config.yaml of the gate.
+# Root never runs the hermes binary as root: the account can write that binary.
+run_hermes() {
+  if [ "$IS_ROOT" -eq 1 ]; then
+    if command -v runuser >/dev/null 2>&1; then
+      (cd "$HERMES_USER_HOME" && runuser -u "$USER_NAME" -- env -u HERMES_HOME HOME="$HERMES_USER_HOME" "$HERMES_BIN" "$@")
+    elif command -v sudo >/dev/null 2>&1; then
+      (cd "$HERMES_USER_HOME" && sudo -n -u "$USER_NAME" env -u HERMES_HOME HOME="$HERMES_USER_HOME" "$HERMES_BIN" "$@")
+    else
+      echo "neither runuser nor sudo is available" >&2
+      return 1
+    fi
+  else
+    (cd "$HERMES_USER_HOME" && env -u HERMES_HOME HOME="$HERMES_USER_HOME" "$HERMES_BIN" "$@")
+  fi
+}
+
+# Look for hermes where the gate looks: --hermes, else PATH (sshd default), ~/.local/bin, the venv.
+find_hermes_cli() {
+  local candidate
+  if [ -n "$HERMES_PATH" ]; then
+    set -- "$HERMES_PATH"
+  else
+    set -- /usr/local/bin/hermes /usr/bin/hermes "$HERMES_USER_HOME/.local/bin/hermes" \
+      "$HERMES_USER_HOME/.hermes/hermes-agent/venv/bin/hermes"
+  fi
+  for candidate in "$@"; do
+    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Keep hermes serve alive for IDLE_GRACE_S after the last client goes (issue #183).
+# Set the value only when the key is not set: a value that the owner set stays.
+# A failure here prints a warning only. The key install already succeeded.
+set_idle_grace() {
+  local err out
+  HERMES_USER_HOME="$(dirname "$SSH_DIR")"
+  if ! HERMES_BIN="$(find_hermes_cli)"; then
+    echo "install.sh: warning: no hermes binary found. Set $IDLE_GRACE_KEY by hand (see README.md)" >&2
+    return 0
+  fi
+  err="$(mktemp "${TMPDIR:-/tmp}/hermesconnect-config.XXXXXX")"
+  if out="$(run_hermes config get "$IDLE_GRACE_KEY" 2>"$err" </dev/null)"; then
+    out="$(printf '%s' "$out" | head -n 1 | tr -cd 'A-Za-z0-9._-' | cut -c 1-32)"
+    echo "hermes config: kept $IDLE_GRACE_KEY = $out"
+  elif grep -q "Config key not set" "$err"; then
+    if run_hermes config set "$IDLE_GRACE_KEY" "$IDLE_GRACE_S" >/dev/null 2>"$err" </dev/null; then
+      echo "hermes config: set $IDLE_GRACE_KEY to $IDLE_GRACE_S. It applies at the next start of hermes serve"
+    else
+      echo "install.sh: warning: hermes config set failed. Set $IDLE_GRACE_KEY by hand (see README.md)" >&2
+    fi
+  else
+    echo "install.sh: warning: hermes config get failed. $IDLE_GRACE_KEY is not changed" >&2
+  fi
+  rm -f "$err"
+  return 0
+}
+
 if cmp -s "$TMP_KEYS" "$AUTH_KEYS"; then
+  rm -f "$TMP_KEYS"
+  trap - EXIT
   echo "authorized_keys: unchanged ($AUTH_KEYS)"
-  exit 0
-fi
-chmod 0600 "$TMP_KEYS"
-if [ "$IS_ROOT" -eq 1 ]; then
-  chown "$USER_NAME:" "$TMP_KEYS" 2>/dev/null || chown "$USER_NAME" "$TMP_KEYS"
-fi
-mv -f "$TMP_KEYS" "$AUTH_KEYS"
-trap - EXIT
-if [ "$REMOVE" -eq 1 ]; then
-  echo "authorized_keys: removed the key ($AUTH_KEYS)"
 else
-  echo "authorized_keys: installed the key, slot $SLOT ($AUTH_KEYS)"
+  chmod 0600 "$TMP_KEYS"
+  if [ "$IS_ROOT" -eq 1 ]; then
+    chown "$USER_NAME:" "$TMP_KEYS" 2>/dev/null || chown "$USER_NAME" "$TMP_KEYS"
+  fi
+  mv -f "$TMP_KEYS" "$AUTH_KEYS"
+  trap - EXIT
+  if [ "$REMOVE" -eq 1 ]; then
+    echo "authorized_keys: removed the key ($AUTH_KEYS)"
+  else
+    echo "authorized_keys: installed the key, slot $SLOT ($AUTH_KEYS)"
+  fi
 fi
+[ "$REMOVE" -eq 1 ] || set_idle_grace
