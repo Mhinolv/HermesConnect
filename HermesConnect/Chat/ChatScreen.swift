@@ -384,17 +384,25 @@ enum ChatLaunch {
 
     /// Issue #178: the supervisor of the Release link. A socket drop and an SSH close reconnect at once.
     /// A network path change tests the link first. It starts in the background state: the root sets the phase.
+    /// Issue #179: a failed connect, or a chat socket that does not open, retries with backoff.
     static func makeSupervisor(model: AppModel, link: LiveChatTransport,
-                               monitor: (any NetworkPathMonitoring)? = SystemPathMonitor()) -> LinkSupervisor {
+                               monitor: (any NetworkPathMonitoring)? = SystemPathMonitor(),
+                               clock: any RetryClock = SystemRetryClock()) -> LinkSupervisor {
         let supervisor = LinkSupervisor(
             hooks: LinkSupervisor.Hooks(
                 canRecover: { [weak model] in model?.canRecoverLink ?? false },
                 linkIsReady: { [weak link] in link?.status == .ready },
                 probe: { [weak link] in await link?.probe() ?? false },
-                reconnect: { [weak model] in await model?.recoverLink() ?? false }),
-            monitor: monitor, foreground: false)
+                reconnect: { [weak model] in await model?.recoverLink() ?? false },
+                canRetry: { [weak model] in model?.canRetryConnect ?? false },
+                retry: { [weak model] in await model?.connect() },
+                abandon: { [weak model] in await model?.abandonLink() }),
+            monitor: monitor, foreground: false, clock: clock)
         link.onDrop = { [weak supervisor] in supervisor?.report(.linkDropped) }
+        link.onReady = { [weak supervisor] in supervisor?.linkReady() }
+        link.onConnectFailed = { [weak supervisor] in supervisor?.chatSocketFailed() }
         model.onSessionClosed = { [weak supervisor] in supervisor?.report(.sessionClosed) }
+        model.onConnectFailed = { [weak supervisor] in supervisor?.connectFailed() }
         supervisor.start()
         return supervisor
     }

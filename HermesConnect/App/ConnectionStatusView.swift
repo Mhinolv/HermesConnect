@@ -5,6 +5,8 @@ import SwiftUI
 /// It never shows the host name.
 struct ConnectionStatusView: View {
     @Environment(AppModel.self) private var model
+    /// Issue #179: the retry wait. Nil in previews and the DEBUG demo: a tap then connects directly.
+    @Environment(LinkSupervisor.self) private var supervisor: LinkSupervisor?
     /// "Connected" shows for 2 seconds, then the subtitle hides.
     @State private var hidesConnected = false
     /// "Starting Hermes…" shows only when the stage takes more than 1 second (issue #4).
@@ -62,15 +64,27 @@ struct ConnectionStatusView: View {
                     .accessibilityLabel("Connection status, Connected")
             }
         case .offline:
+            // Issue #179: a tap retries at once and resets the wait to 2 s.
             Button {
-                Task { await model.connect() }
+                if let supervisor {
+                    supervisor.retryNow()
+                } else {
+                    Task { await model.connect() }
+                }
             } label: {
-                Label("Offline", systemImage: "arrow.clockwise")
-                    .labelStyle(TrailingIconLabelStyle())
+                if let retryAt = supervisor?.retryAt {
+                    RetryCountdownLabel(deadline: retryAt)
+                } else {
+                    // No wait: the owner cancelled the trust sheet, or no retry is planned.
+                    Label("Offline", systemImage: "arrow.clockwise")
+                        .labelStyle(TrailingIconLabelStyle())
+                }
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Connection status, Offline")
-            .accessibilityHint("Double-tap to retry.")
+            // The label does not change each second, so VoiceOver does not read the countdown.
+            .accessibilityLabel(supervisor?.retryAt == nil ? "Connection status, Offline"
+                                : "Connection status, Offline. Hermes retries automatically.")
+            .accessibilityHint(supervisor?.retryAt == nil ? "Double-tap to retry." : "Double-tap to retry now.")
         case .hostKeyChanged:
             Button {
                 model.showsHostKeyError = true
@@ -122,6 +136,44 @@ enum ReconnectAnnouncement {
         guard shouldPost(now: now, last: last) else { return }
         last = now
         AccessibilityNotification.Announcement("Reconnecting").post()
+    }
+}
+
+/// Issue #179: "Offline · Retry in 4 s ↻". The number counts down each second, in whole seconds.
+struct RetryCountdownLabel: View {
+    let deadline: ContinuousClock.Instant
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var seconds: Int
+
+    init(deadline: ContinuousClock.Instant) {
+        self.deadline = deadline
+        _seconds = State(initialValue: ConnectBackoff.secondsLeft(until: deadline, now: .now))
+    }
+
+    var body: some View {
+        Label {
+            Text("Offline · Retry in \(seconds) s")
+                .monospacedDigit()
+                .contentTransition(reduceMotion ? .identity : .numericText(countsDown: true))
+        } icon: {
+            Image(systemName: "arrow.clockwise")
+        }
+        .labelStyle(TrailingIconLabelStyle())
+        .task(id: deadline) {
+            while !Task.isCancelled {
+                let now = ContinuousClock.now
+                let left = ConnectBackoff.secondsLeft(until: deadline, now: now)
+                if reduceMotion {
+                    seconds = left
+                } else {
+                    withAnimation { seconds = left }
+                }
+                // Wake at the next whole second before the deadline. At the deadline the try starts.
+                let next = deadline - .seconds(left - 1)
+                guard next > now else { return }
+                try? await Task.sleep(until: next, clock: .continuous)
+            }
+        }
     }
 }
 
@@ -186,6 +238,9 @@ struct ConnectionStatusView_Previews: PreviewProvider {
             ChatTitleView().environment(model(.startingHermes))
             ChatTitleView().environment(model(.connected(gateVersion: "1")))
             ChatTitleView().environment(model(.offline(.unreachable)))
+            // Issue #179: the wait before the next try, at 4 s and at the 30 s limit.
+            RetryCountdownLabel(deadline: .now + .seconds(4)).font(.caption).foregroundStyle(.secondary)
+            RetryCountdownLabel(deadline: .now + .seconds(30)).font(.caption).foregroundStyle(.secondary)
             ChatTitleView().environment(model(.hostKeyChanged(saved: .sample, received: .otherSample)))
             ChatTitleView().environment(model(.notStarted(.gateError("hermes-not-found"))))
         }

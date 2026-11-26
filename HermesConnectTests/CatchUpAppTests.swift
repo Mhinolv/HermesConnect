@@ -261,10 +261,38 @@ final class FakeBackgroundTime: BackgroundTimeGranting {
 /// A path monitor with no `NWPathMonitor` (issue #178).
 @MainActor
 final class FakeAppPathMonitor: NetworkPathMonitoring {
-    private var onChange: (@MainActor () -> Void)?
-    func start(_ onChange: @escaping @MainActor () -> Void) { self.onChange = onChange }
+    private var onChange: (@MainActor (LinkPath) -> Void)?
+    func start(_ onChange: @escaping @MainActor (LinkPath) -> Void) { self.onChange = onChange }
     func stop() { onChange = nil }
-    func change() { onChange?() }
+    func change(_ path: LinkPath = LinkPath(isSatisfied: true, interfaces: ["cellular"])) { onChange?(path) }
+}
+
+/// Issue #179: a chat socket that never opens (the server refuses the TCP connect).
+struct RefusingGatewayConnector: GatewayWebSocketConnecting {
+    func connect(to url: URL) async throws -> any GatewayWebSocket {
+        throw GatewayWebSocketClosed(urlErrorCode: -1004)
+    }
+}
+
+/// Issue #179: a retry clock that the test fires. `fire()` ends every wait at once.
+@MainActor
+final class AppRetryClock: RetryClock {
+    private(set) var now = ContinuousClock.now
+    private var sleepers: [CheckedContinuation<Void, any Error>] = []
+    var sleeperCount: Int { sleepers.count }
+
+    func sleep(until deadline: ContinuousClock.Instant) async throws {
+        try Task.checkCancellation()
+        try await withCheckedThrowingContinuation { sleepers.append($0) }
+    }
+
+    /// End the waits that run now. A cancelled wait ends too: the supervisor then ignores it.
+    func fire() {
+        now = now + .seconds(30)
+        let due = sleepers
+        sleepers.removeAll()
+        due.forEach { $0.resume() }
+    }
 }
 
 /// Issue #178: reconnect when the link dies while the app is open. Fakes only: no network, SSH or `NWPathMonitor`.
@@ -388,6 +416,98 @@ final class FakeAppPathMonitor: NetworkPathMonitoring {
         monitor.change()
         try await waitFor { setup.transport.record.connectAttempts == before + 2 }
         supervisor.stop()
+    }
+
+    /// Regression for #179 (QA #211 risk 2): SSH and serve connected, but the chat socket did not open.
+    /// The subtitle stayed "Reconnecting…" and nothing retried. Now it is a failed try: "Offline", then a retry.
+    @Test func chatSocketFailureAfterAGoodConnectIsAFailedTry() async throws {
+        let setup = await makeModel()
+        let link = LiveChatTransport(makeClient: {
+            GatewayClient(endpoint: $0, connector: RefusingGatewayConnector(),
+                          configuration: .init(heartbeatInterval: nil, readyTimeout: .seconds(1)))
+        })
+        let clock = AppRetryClock()
+        let supervisor = ChatLaunch.makeSupervisor(model: setup.model, link: link, monitor: FakeAppPathMonitor(),
+                                                   clock: clock)
+        supervisor.setForeground(true)
+        await setup.model.connect()
+        #expect(setup.model.connection == .connected(gateVersion: "1"))
+        // The root gives the endpoint to the link (`onChange(of: hermesEndpoint)`).
+        link.setEndpoint(setup.model.hermesEndpoint)
+        try await waitFor { link.status == .notConnected }
+        try await waitFor { setup.model.connection == .offline(.unreachable) }
+        #expect(ChatLaunch.subtitle(link: link.status, connection: setup.model.connection) != .reconnecting)
+        // The link closed ("Offline"), and the next try waits 2 s.
+        #expect(setup.model.hermesEndpoint == nil)
+        #expect(supervisor.retryAt.map { $0 - clock.now } == .seconds(2))
+        try await waitFor { clock.sleeperCount > 0 }
+        clock.fire()
+        try await waitFor { setup.model.connection == .connected(gateVersion: "1") }
+        #expect(setup.transport.record.connectAttempts == 2)
+        supervisor.stop()
+    }
+
+    /// Issue #179, criteria 1 and 3: a network failure retries after the wait. A refused key, a changed
+    /// host key and the trust sheet never start a wait.
+    @Test func onlyNetworkFailuresRetry() async throws {
+        let offline = await makeModel()
+        let clock = AppRetryClock()
+        let supervisor = ChatLaunch.makeSupervisor(model: offline.model, link: LiveChatTransport(),
+                                                   monitor: FakeAppPathMonitor(), clock: clock)
+        supervisor.setForeground(true)
+        offline.transport.connectFailure = .unreachable
+        await offline.model.connect()
+        #expect(offline.model.connection == .offline(.unreachable))
+        #expect(offline.model.canRetryConnect)
+        #expect(supervisor.retryAt.map { $0 - clock.now } == .seconds(2))
+        // The try fails too: the wait doubles.
+        try await waitFor { clock.sleeperCount > 0 }
+        clock.fire()
+        try await waitFor { offline.transport.record.connectAttempts == 2 && supervisor.retryAt != nil }
+        #expect(supervisor.retryAt.map { $0 - clock.now } == .seconds(4))
+        // The server answers: the next try connects.
+        offline.transport.connectFailure = nil
+        try await waitFor { clock.sleeperCount > 0 }
+        clock.fire()
+        try await waitFor { offline.model.connection == .connected(gateVersion: "1") }
+        #expect(supervisor.retryAt == nil)
+        supervisor.stop()
+
+        // A refused key, a changed host key, the trust sheet and its "Cancel".
+        let refused = await makeModel()
+        refused.transport.connectFailure = .authenticationFailed
+        let changed = await makeModel(hostKey: .otherSample)
+        let unknown = await makeModel(hostKey: nil)
+        for setup in [refused, changed, unknown] {
+            var reports = 0
+            setup.model.onConnectFailed = { reports += 1 }
+            await setup.model.connect()
+            #expect(reports == 0)
+            #expect(!setup.model.canRetryConnect)
+        }
+        #expect(refused.model.connection == .notStarted(.authenticationFailed))
+        #expect(changed.model.connection == .hostKeyChanged(saved: .otherSample, received: .sample))
+        #expect(unknown.model.pendingTrust == .sample)
+        unknown.model.cancelTrust()
+        #expect(unknown.model.connection == .offline(nil))
+        #expect(!unknown.model.canRetryConnect)
+    }
+
+    /// Issue #179: "Offline" after a cancelled trust sheet waits for a tap. A connected link is not "Offline".
+    @Test func canRetryConnectNeedsANetworkFailure() async {
+        let setup = await makeModel()
+        #expect(!setup.model.canRetryConnect)
+        await setup.model.connect()
+        #expect(!setup.model.canRetryConnect)
+        await setup.model.abandonLink()
+        #expect(setup.model.connection == .offline(.unreachable))
+        #expect(setup.model.hermesEndpoint == nil)
+        #expect(setup.model.canRetryConnect)
+        setup.model.previewConnection(.offline(nil))
+        #expect(!setup.model.canRetryConnect)
+        // `abandonLink` acts only on a connected link.
+        await setup.model.abandonLink()
+        #expect(setup.model.connection == .offline(nil))
     }
 
     @Test func reconnectIsAnnouncedOneTimeForEachDrop() {
