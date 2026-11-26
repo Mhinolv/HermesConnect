@@ -86,7 +86,7 @@ final class AppModel {
 
     init(keyStore: any DeviceKeyStore, serverStore: any ServerListStore,
          defaults: UserDefaults = .standard, deviceName: String, transport: any SSHTransport,
-         serve: ServeBootstrap = ServeBootstrap(),
+         serve: ServeBootstrap = ServeBootstrap(socketPrewarm: .shared),
          tokenStore: any ServeTokenStore = InMemoryServeTokenStore()) {
         self.keyStore = keyStore
         self.tokenStore = tokenStore
@@ -314,7 +314,8 @@ final class AppModel {
 
     // MARK: Connection
 
-    /// Connect with the pinned host key, run the gate `ping`, then start or reuse Hermes (issue #4).
+    /// Connect with the pinned host key, then start or reuse Hermes (issue #4). Issue #181: the gate `ping` runs
+    /// at the same time as the `serve`.
     /// No pin: show the trust sheet. A changed key: show the error screen. The app never authenticates in those cases.
     func connect() async {
         guard isSetUp, !isConnecting, pendingTrust == nil else { return }
@@ -327,7 +328,7 @@ final class AppModel {
         let timing = ConnectTimeline.shared.begin()  // Issue #180: the time of each connect step.
         connection = .connecting
         do {
-            let result = try await connector.connect(profile: profile, key: deviceKey, timing: timing)
+            let result = try await connector.login(profile: profile, key: deviceKey, timing: timing)
             guard current == attempt else {
                 await result.session.close()
                 return
@@ -341,21 +342,22 @@ final class AppModel {
             if let algorithms = result.algorithms {
                 updateServer(id: serverID) { $0.lastAlgorithms = algorithms }
             }
-            let pinsPort = ServeBootstrap.pinsPort(gateVersion: result.gateVersion)
             let reuse = serveToken ?? storedToken(for: serverID)
-            let running = try await serve.start(on: result.session, reuse: reuse,
-                                                pinnedPort: pinsPort ? profile.servePort : nil, timing: timing)
+            let running = try await serve.start(on: result, reuse: reuse, savedPort: profile.servePort,
+                                                timing: timing)
             guard current == attempt else {
                 await running.forward.close()
                 return
             }
+            let gateVersion = try await result.gateVersion()  // `start` waited for the `ping` already.
+            let pinsPort = ServeBootstrap.pinsPort(gateVersion: gateVersion)
             hermes = running
             serveToken = running.token
             if running.token != reuse { saveStoredToken(running.token, for: serverID) }
             // Issue #29 and #18: the port pin is saved in the profile, so a relaunch keeps it.
             updateServer(id: serverID) { $0.servePort = pinsPort ? running.remotePort : nil }
             hermesEndpoint = running.endpoint
-            connection = .connected(gateVersion: result.gateVersion)
+            connection = .connected(gateVersion: gateVersion)
         } catch {
             guard current == attempt else { return }
             switch error {

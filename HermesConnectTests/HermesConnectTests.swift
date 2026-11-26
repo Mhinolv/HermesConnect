@@ -203,7 +203,8 @@ private struct FailingKeyStore: DeviceKeyStore {
         #expect(try setup.profiles.load().active?.hostKey == .sample)
         #expect(setup.model.connection == .connected(gateVersion: "1"))
         #expect(setup.transport.record.authentications == 1)
-        #expect(setup.transport.record.commands == [.ping, .serve])
+        // Issue #181: the `ping` and the `serve` run at the same time, so their order can change.
+        #expect(setup.transport.record.commands.sorted { $0.rawValue < $1.rawValue } == [.ping, .serve])
     }
 
     @Test func cancelStopsTheConnectAndShowsOffline() async throws {
@@ -263,7 +264,8 @@ private struct FailingKeyStore: DeviceKeyStore {
         let setup = await makeModel(pin: .sample)
         await setup.model.connect()
         #expect(setup.model.connection == .connected(gateVersion: "1"))
-        #expect(setup.transport.record.commands == [.ping, .serve])
+        // Issue #181: the `ping` and the `serve` run at the same time, so their order can change.
+        #expect(setup.transport.record.commands.sorted { $0.rawValue < $1.rawValue } == [.ping, .serve])
         #expect(setup.transport.record.forwardPorts == [41_001])
         let endpoint = try #require(setup.model.hermesEndpoint)
         #expect(endpoint.baseURL.host() == "127.0.0.1")
@@ -273,13 +275,13 @@ private struct FailingKeyStore: DeviceKeyStore {
     @Test func reconnectReusesTheServerWithTheSameToken() async throws {
         let setup = await makeModel(pin: .sample)
         await setup.model.connect()
-        let first = try #require(setup.transport.record.stdins.last ?? nil)
+        let first = try #require(setup.transport.record.serveStdins.last ?? nil)
         await setup.model.disconnect()
         #expect(setup.model.hermesEndpoint == nil)
         #expect(setup.transport.record.closedForwards == 1)
         await setup.model.connect()
         #expect(setup.model.connection == .connected(gateVersion: "1"))
-        #expect(setup.transport.record.stdins.last == first)
+        #expect(setup.transport.record.serveStdins.last == first)
         #expect(setup.transport.record.spawns == 1)
         #expect(setup.transport.record.reuses == 1)
     }
@@ -287,10 +289,10 @@ private struct FailingKeyStore: DeviceKeyStore {
     @Test func renewSendsANewToken() async throws {
         let setup = await makeModel(pin: .sample)
         await setup.model.connect()
-        let first = try #require(setup.transport.record.stdins.last ?? nil)
+        let first = try #require(setup.transport.record.serveStdins.last ?? nil)
         await setup.model.renewHermesSession()
         #expect(setup.model.connection == .connected(gateVersion: "1"))
-        #expect(setup.transport.record.stdins.last != first)
+        #expect(setup.transport.record.serveStdins.last != first)
         #expect(setup.transport.record.spawns == 2)
     }
 
@@ -412,11 +414,11 @@ private struct FailingKeyStore: DeviceKeyStore {
         setup.http.ownershipStatus = 401
         await setup.model.connect()
         #expect(setup.model.connection == .offline(.sessionTokenRejected))
-        let first = try #require(setup.transport.record.stdins.last ?? nil)
+        let first = try #require(setup.transport.record.serveStdins.last ?? nil)
         setup.http.ownershipStatus = 200
         await setup.model.connect()
         #expect(setup.model.connection == .connected(gateVersion: "1"))
-        #expect(setup.transport.record.stdins.last != first)
+        #expect(setup.transport.record.serveStdins.last != first)
     }
 
     // MARK: Issue #173: the stored serve token
@@ -424,7 +426,7 @@ private struct FailingKeyStore: DeviceKeyStore {
     @Test func aRelaunchSendsTheStoredTokenAndTheGateReusesTheServer() async throws {
         let setup = await makeModel(pin: .sample)
         await setup.model.connect()
-        let first = try #require(setup.transport.record.stdins.last ?? nil)
+        let first = try #require(setup.transport.record.serveStdins.last ?? nil)
         let id = try #require(setup.model.profile?.id)
         #expect(try setup.tokens.loadToken(for: id) == SessionToken(storedBytes: first))
         await setup.model.disconnect()
@@ -433,7 +435,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         await relaunched.ensureKey()
         await relaunched.connect()
         #expect(relaunched.connection == .connected(gateVersion: "1"))
-        #expect(setup.transport.record.stdins.last == first, "the first connect sends the stored token")
+        #expect(setup.transport.record.serveStdins.last == first, "the first connect sends the stored token")
         #expect(setup.transport.record.spawns == 1)
         #expect(setup.transport.record.reuses == 1)
     }
@@ -452,7 +454,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         setup.http.ownershipStatus = 200
         await setup.model.connect()
         #expect(setup.model.connection == .connected(gateVersion: "1"))
-        let sent = try #require(setup.transport.record.stdins.last ?? nil)
+        let sent = try #require(setup.transport.record.serveStdins.last ?? nil)
         #expect(SessionToken(storedBytes: sent) != stale)
         #expect(try setup.tokens.loadToken(for: id) == SessionToken(storedBytes: sent), "the new token is saved")
     }
@@ -465,7 +467,7 @@ private struct FailingKeyStore: DeviceKeyStore {
         await setup.model.renewHermesSession()
         let second = try #require(try setup.tokens.loadToken(for: id))
         #expect(second != first)
-        #expect(setup.transport.record.stdins.last?.flatMap(SessionToken.init(storedBytes:)) == second)
+        #expect(setup.transport.record.serveStdins.last?.flatMap(SessionToken.init(storedBytes:)) == second)
     }
 
     @Test func resetDeviceKeyRemovesEveryStoredToken() async throws {
@@ -474,9 +476,9 @@ private struct FailingKeyStore: DeviceKeyStore {
         try setup.tokens.saveToken(SessionToken.mint(), for: UUID())
         await setup.model.resetKey()
         #expect(setup.tokens.servers.isEmpty)
-        let first = try #require(setup.transport.record.stdins.last ?? nil)
+        let first = try #require(setup.transport.record.serveStdins.last ?? nil)
         await setup.model.connect()
-        #expect(setup.transport.record.stdins.last != first, "the next connect mints a new token")
+        #expect(setup.transport.record.serveStdins.last != first, "the next connect mints a new token")
     }
 
     @Test(arguments: ["host", "port", "user"])

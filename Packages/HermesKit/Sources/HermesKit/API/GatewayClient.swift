@@ -63,8 +63,10 @@ public actor GatewayClient {
         var timeout: Task<Void, Never>?
     }
 
+    /// - Parameter connector: Issue #181: the default takes the socket that `ServeBootstrap` opened during the
+    ///   ownership check (`GatewaySocketPrewarm.shared`). Else it opens a new one.
     public init(endpoint: GatewayEndpoint,
-                connector: any GatewayWebSocketConnecting = URLSessionGatewayConnector(),
+                connector: any GatewayWebSocketConnecting = PrewarmedGatewayConnector(),
                 configuration: Configuration = Configuration(),
                 now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         self.endpoint = endpoint
