@@ -41,6 +41,11 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
     /// Issue #178: the socket of a ready link closed for a reason that is not a stale token.
     /// The app gives it to the `LinkSupervisor`, which reconnects.
     @ObservationIgnored public var onDrop: (@MainActor () -> Void)?
+    /// Issue #179: the socket is ready. The `LinkSupervisor` resets its retry wait when the link stays ready.
+    @ObservationIgnored public var onReady: (@MainActor () -> Void)?
+    /// Issue #179: the socket did not open, for a reason that is not a stale token. The SSH link can be up.
+    /// The `LinkSupervisor` counts it as a failed connect try and retries after its wait.
+    @ObservationIgnored public var onConnectFailed: (@MainActor () -> Void)?
 
     /// Issue #97: opens the `speak-stream` sockets on the same forward.
     @ObservationIgnored private let audioConnector: any GatewayWebSocketConnecting
@@ -121,6 +126,7 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
         guard client === self.client else { return }
         renewed = false
         status = .ready
+        onReady?()
     }
 
     private func connectFailed(_ client: GatewayClient, _ error: any Error) {
@@ -128,6 +134,7 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
             return
         }
         status = .notConnected
+        onConnectFailed?()
     }
 
     private func forward(_ item: GatewayClientEvent, from client: GatewayClient) {

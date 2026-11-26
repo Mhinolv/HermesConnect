@@ -172,12 +172,15 @@ struct HermesConnectApp: App {
                     .environment(model)
                     .environment(location)
                     .environment(notifications)
+                    // Issue #179: the subtitle reads the retry wait, and a tap on "Offline" retries through it.
+                    .environment(supervisor)
                     .appLock(model)
             } else {
                 RootView(sessions: sessions, jobs: jobs, voice: voice, link: link, supervisor: supervisor)
                     .environment(model)
                     .environment(location)
                     .environment(notifications)
+                    .environment(supervisor)
             }
         }
     }

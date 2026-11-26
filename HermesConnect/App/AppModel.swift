@@ -60,6 +60,9 @@ final class AppModel {
     @ObservationIgnored var onSessionClosed: (@MainActor () -> Void)?
     /// Issue #178: true while the supervisor closes a dead link and connects again. The subtitle says "Reconnecting…".
     private(set) var isRecoveringLink = false
+    /// Issue #179: a connect failed with a network error or a time limit ("Offline"). The `LinkSupervisor`
+    /// retries after its wait. A refused key, a changed host key and the trust sheet do not call it.
+    @ObservationIgnored var onConnectFailed: (@MainActor () -> Void)?
 
     @ObservationIgnored private let keyStore: any DeviceKeyStore
     @ObservationIgnored private let serverStore: any ServerListStore
@@ -370,6 +373,7 @@ final class AppModel {
                 }
                 await closeSession()
                 connection = Self.failureState(for: error)
+                if case .offline = connection { onConnectFailed?() }
             }
         }
     }
@@ -558,7 +562,7 @@ final class AppModel {
     // MARK: Link supervisor (issue #178)
 
     /// True when the supervisor may reconnect: a connected server, no trust sheet, no changed host key,
-    /// and no connect in progress. "Offline" waits for the owner or for #179.
+    /// and no connect in progress. "Offline" retries through `canRetryConnect` (issue #179).
     var canRecoverLink: Bool {
         guard isSetUp, pendingTrust == nil, !showsHostKeyError, !isRecoveringLink else { return false }
         if case .connected = connection { return true }
@@ -576,6 +580,25 @@ final class AppModel {
         await connect()
         if case .connected = connection { return true }
         return false
+    }
+
+    // MARK: Retry with backoff (issue #179)
+
+    /// True when the supervisor may retry: "Offline" after a network error, and nothing waits for the owner.
+    /// "Offline" with no error (the owner cancelled the trust sheet) waits for a tap.
+    var canRetryConnect: Bool {
+        guard isSetUp, pendingTrust == nil, !showsHostKeyError, !isRecoveringLink else { return false }
+        if case .offline(.some) = connection { return true }
+        return false
+    }
+
+    /// The chat socket did not open after a good connect, or the link dropped again soon after a reconnect.
+    /// Close the link and show "Offline", so the subtitle shows the wait, not "Reconnecting…".
+    func abandonLink() async {
+        guard case .connected = connection else { return }
+        attempt += 1
+        connection = .offline(.unreachable)
+        await closeSession()
     }
 
     private func sessionClosed(attempt closed: Int) {
