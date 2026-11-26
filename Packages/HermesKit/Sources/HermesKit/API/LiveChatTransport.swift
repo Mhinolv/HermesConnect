@@ -38,6 +38,9 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
     @ObservationIgnored private var renewed = false
     /// The app asks the #4 bootstrap for a new Hermes session (`AppModel.renewHermesSession`).
     @ObservationIgnored public var onStaleToken: (@MainActor () async -> Void)?
+    /// Issue #178: the socket of a ready link closed for a reason that is not a stale token.
+    /// The app gives it to the `LinkSupervisor`, which reconnects.
+    @ObservationIgnored public var onDrop: (@MainActor () -> Void)?
 
     /// Issue #97: opens the `speak-stream` sockets on the same forward.
     @ObservationIgnored private let audioConnector: any GatewayWebSocketConnecting
@@ -135,6 +138,8 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
             staleToken()
         } else if status == .ready {
             status = .notConnected
+            // Issue #178: a ready link died while the app is open. Before, nothing reconnected.
+            onDrop?()
         }
     }
 

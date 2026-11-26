@@ -4,6 +4,7 @@ import Foundation
 import NIOCore
 import NIOPosix
 import NIOSSH
+import Synchronization
 import Testing
 @testable import HermesKit
 
@@ -16,6 +17,7 @@ import Testing
         private var _commands: [String] = []
         private var _stdin: [Data] = []
         private var _targets: [String] = []
+        private var _clients: [any Channel] = []
 
         var commands: [String] { lock.withLock { _commands } }
         var stdin: [Data] { lock.withLock { _stdin } }
@@ -25,6 +27,9 @@ import Testing
         func command(_ text: String) { lock.withLock { _commands.append(text) } }
         func input(_ data: Data) { lock.withLock { _stdin.append(data) } }
         func target(_ text: String) { lock.withLock { _targets.append(text) } }
+        /// Issue #178: the TCP connections of the clients, so a test can drop them.
+        var clients: [any Channel] { lock.withLock { _clients } }
+        func accepted(_ channel: any Channel) { lock.withLock { _clients.append(channel) } }
     }
 
     enum GateReply: Sendable {
@@ -117,7 +122,8 @@ import Testing
         let auth = AcceptAll()
         let channel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .childChannelInitializer { child in
-                child.eventLoop.makeCompletedFuture {
+                log.accepted(child)
+                return child.eventLoop.makeCompletedFuture {
                     let handler = NIOSSHHandler(
                         role: .server(.init(hostKeys: [serverKey], userAuthDelegate: auth)),
                         allocator: child.allocator,
@@ -161,6 +167,25 @@ import Testing
         #expect(server.log.stdin == [Data(token.value.utf8)])
         #expect(!server.log.commands.joined().contains(token.value))
         await session.close()
+        try await server.channel.close()
+    }
+
+    /// Issue #178: the server drops the TCP connection. The Citadel `onDisconnect` hook runs the close handler.
+    @Test func serverDropRunsTheCloseHandler() async throws {
+        let server = try await startServer(reply: .stdout("PONG 1\n"))
+        let session = try await connect(server)
+        let closes = Mutex(0)
+        session.onClose { closes.withLock { $0 += 1 } }
+        #expect(closes.withLock { $0 } == 0)
+        for client in server.log.clients { try? await client.close() }
+        for _ in 0..<500 where closes.withLock({ $0 }) == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(closes.withLock { $0 } == 1)
+        // A handler set after the close runs at once.
+        let late = Mutex(false)
+        session.onClose { late.withLock { $0 = true } }
+        #expect(late.withLock { $0 })
+        await session.close()
+        #expect(closes.withLock { $0 } == 1)
         try await server.channel.close()
     }
 

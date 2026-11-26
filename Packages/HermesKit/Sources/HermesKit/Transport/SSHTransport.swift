@@ -37,6 +37,9 @@ public protocol SSHSession: Sendable {
     func openLoopbackForward(remotePort: Int) async throws -> any LoopbackForward
     /// The cipher and key exchange that this connection uses (issue #18). Nil when the transport cannot tell.
     func negotiatedAlgorithms() async -> SSHNegotiatedAlgorithms?
+    /// Issue #178: `handler` runs one time when the connection closes, from either side.
+    /// A connection that is closed already runs it at once. Citadel: `SSHClient.onDisconnect`.
+    func onClose(_ handler: @escaping @Sendable () -> Void)
     func close() async
 }
 
@@ -46,6 +49,37 @@ extension SSHSession {
     }
 
     public func negotiatedAlgorithms() async -> SSHNegotiatedAlgorithms? { nil }
+
+    public func onClose(_ handler: @escaping @Sendable () -> Void) {}
+}
+
+/// Issue #178: runs the close handler of one SSH connection one time. A close before the handler is set
+/// runs the handler when it is set.
+public final class SSHCloseSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable () -> Void)?
+    private var closed = false
+
+    public init() {}
+
+    public func setHandler(_ handler: @escaping @Sendable () -> Void) {
+        let runNow: Bool = lock.withLock {
+            if closed { return true }
+            self.handler = handler
+            return false
+        }
+        if runNow { handler() }
+    }
+
+    public func fire() {
+        let waiting: (@Sendable () -> Void)? = lock.withLock {
+            guard !closed else { return nil }
+            closed = true
+            defer { handler = nil }
+            return handler
+        }
+        waiting?()
+    }
 }
 
 /// A local listener on this device that forwards to the server loopback.
@@ -226,6 +260,8 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
     private var livePort = 0
     private var nextLocalPort = 50_000
     private var _record = Record()
+    /// Issue #178: the close signals of the open sessions.
+    private var openSignals: [SSHCloseSignal] = []
 
     public init(hostKey: HostKey, pingReply: Result<String, SSHConnectionError> = .success("PONG 1\n"),
                 connectFailure: SSHConnectionError? = nil) {
@@ -299,7 +335,18 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
         try checkHostKey(hostKey)
         lock.withLock { _record.authentications += 1 }
         if let failure = connectFailure { throw failure }
-        return Session(transport: self)
+        let signal = SSHCloseSignal()
+        lock.withLock { openSignals.append(signal) }
+        return Session(transport: self, signal: signal)
+    }
+
+    /// Issue #178: the server or the network closes every open session. Their close handlers run.
+    public func dropSessions() {
+        let signals = lock.withLock { () -> [SSHCloseSignal] in
+            defer { openSignals.removeAll() }
+            return openSignals
+        }
+        for signal in signals { signal.fire() }
     }
 
     fileprivate func run(_ command: GateCommand, stdin: Data?) throws -> String {
@@ -355,6 +402,7 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
 
     private struct Session: SSHSession {
         let transport: ScriptedSSHTransport
+        let signal: SSHCloseSignal
 
         func execute(_ command: GateCommand, stdin: Data?) async throws -> String {
             try transport.run(command, stdin: stdin)
@@ -368,8 +416,13 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
             transport.algorithms
         }
 
+        func onClose(_ handler: @escaping @Sendable () -> Void) {
+            signal.setHandler(handler)
+        }
+
         func close() async {
             transport.didClose()
+            signal.fire()
         }
     }
 

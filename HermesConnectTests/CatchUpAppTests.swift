@@ -257,3 +257,143 @@ final class FakeBackgroundTime: BackgroundTimeGranting {
 
     func expire() { handler?() }
 }
+
+/// A path monitor with no `NWPathMonitor` (issue #178).
+@MainActor
+final class FakeAppPathMonitor: NetworkPathMonitoring {
+    private var onChange: (@MainActor () -> Void)?
+    func start(_ onChange: @escaping @MainActor () -> Void) { self.onChange = onChange }
+    func stop() { onChange = nil }
+    func change() { onChange?() }
+}
+
+/// Issue #178: reconnect when the link dies while the app is open. Fakes only: no network, SSH or `NWPathMonitor`.
+@MainActor
+@Suite(.timeLimit(.minutes(1))) struct LinkSupervisorAppTests {
+    private struct Setup {
+        let model: AppModel
+        let transport: ScriptedSSHTransport
+    }
+
+    private func makeModel(hostKey: HostKey? = .sample) async -> Setup {
+        let keyStore = KeychainDeviceKeyStore(secrets: InMemorySecretStore(), factory: SoftwareKeyFactory())
+        let store = InMemoryServerListStore(profile: ServerProfile(host: "vps.example.com", hostKey: hostKey))
+        let transport = ScriptedSSHTransport(hostKey: .sample)
+        let serve = ServeBootstrap(loader: ScriptedHermesHTTP(),
+                                   configuration: .init(serveTimeout: .seconds(5), healthAttempts: 1,
+                                                        healthRetryDelay: .milliseconds(1)))
+        let model = AppModel(keyStore: keyStore, serverStore: store,
+                             defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!,
+                             deviceName: "Test iPhone", transport: transport, serve: serve)
+        await model.ensureKey()
+        return Setup(model: model, transport: transport)
+    }
+
+    private func waitFor(_ condition: @MainActor () -> Bool) async throws {
+        for _ in 0..<1000 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        Issue.record("condition not met")
+    }
+
+    /// Regression for #178: a dead chat link showed "Connected". Now it shows "Reconnecting…".
+    @Test func deadLinkNeverShowsConnected() {
+        let connected = AppModel.ConnectionState.connected(gateVersion: "1")
+        #expect(ChatLaunch.subtitle(link: .notConnected, connection: connected) == .reconnecting)
+        #expect(ChatLaunch.subtitle(link: .ready, connection: connected) == .connection)
+        // During the reconnect the connection goes idle, then connecting. The subtitle stays "Reconnecting…".
+        for stage in [AppModel.ConnectionState.idle, .connecting, .startingHermes, connected] {
+            #expect(ChatLaunch.subtitle(link: .notConnected, connection: stage, recovering: true) == .reconnecting)
+        }
+        // A failed reconnect is "Offline ↻". The owner states win too.
+        #expect(ChatLaunch.subtitle(link: .notConnected, connection: .offline(.unreachable), recovering: true)
+            == .connection)
+        #expect(ChatLaunch.subtitle(link: .notConnected, connection: .hostKeyChanged(saved: .sample, received: .otherSample))
+            == .connection)
+        // No link yet (launch) is not a drop.
+        #expect(ChatLaunch.subtitle(link: .notConnected, connection: .connecting) == .connection)
+    }
+
+    /// The server closes the SSH connection: the app reports it. A close from the app does not count.
+    @Test func sshCloseOfTheActiveLinkIsReported() async throws {
+        let setup = await makeModel()
+        var closes = 0
+        setup.model.onSessionClosed = { closes += 1 }
+        await setup.model.connect()
+        #expect(setup.model.connection == .connected(gateVersion: "1"))
+
+        await setup.model.disconnect()
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(closes == 0)
+
+        await setup.model.connect()
+        setup.transport.dropSessions()
+        try await waitFor { closes == 1 }
+    }
+
+    /// The token stays, so the gate reuses the running Hermes. No new spawn.
+    @Test func recoverLinkReconnectsAndKeepsTheToken() async {
+        let setup = await makeModel()
+        await setup.model.connect()
+        #expect(setup.model.canRecoverLink)
+        #expect(await setup.model.recoverLink())
+        #expect(setup.model.connection == .connected(gateVersion: "1"))
+        #expect(!setup.model.isRecoveringLink)
+        #expect(setup.transport.record.connectAttempts == 2)
+        #expect(setup.transport.record.spawns == 1)
+        #expect(setup.transport.record.reuses == 1)
+    }
+
+    /// The trust sheet and a changed host key wait for the owner. "Offline" waits for #179.
+    @Test func statesThatWaitForTheOwnerDoNotRecover() async {
+        let unknown = await makeModel(hostKey: nil)
+        await unknown.model.connect()
+        #expect(unknown.model.pendingTrust == .sample)
+        #expect(!unknown.model.canRecoverLink)
+        #expect(await unknown.model.recoverLink() == false)
+        #expect(unknown.transport.record.connectAttempts == 1)
+
+        let changed = await makeModel(hostKey: .otherSample)
+        await changed.model.connect()
+        #expect(!changed.model.canRecoverLink)
+
+        let offline = await makeModel()
+        offline.transport.connectFailure = .unreachable
+        await offline.model.connect()
+        #expect(!offline.model.canRecoverLink)
+    }
+
+    /// End to end: an SSH drop in the foreground reconnects with no action from the owner.
+    @Test func sshDropInTheForegroundReconnects() async throws {
+        let setup = await makeModel()
+        let link = LiveChatTransport()
+        let monitor = FakeAppPathMonitor()
+        let supervisor = ChatLaunch.makeSupervisor(model: setup.model, link: link, monitor: monitor)
+        await setup.model.connect()
+        // Background: nothing happens. The #176 check handles the return.
+        setup.transport.dropSessions()
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(setup.transport.record.connectAttempts == 1)
+
+        supervisor.setForeground(true)
+        await setup.model.connect()
+        let before = setup.transport.record.connectAttempts
+        setup.transport.dropSessions()
+        try await waitFor { setup.transport.record.connectAttempts == before + 1 }
+        try await waitFor { setup.model.connection == .connected(gateVersion: "1") && !setup.model.isRecoveringLink }
+        #expect(supervisor.lastOutcome == .reconnected(succeeded: true))
+
+        // A path change on a link that is not ready reconnects too (the probe needs a ready link).
+        monitor.change()
+        try await waitFor { setup.transport.record.connectAttempts == before + 2 }
+        supervisor.stop()
+    }
+
+    @Test func reconnectIsAnnouncedOneTimeForEachDrop() {
+        let start = ContinuousClock.now
+        #expect(ReconnectAnnouncement.shouldPost(now: start, last: nil))
+        #expect(!ReconnectAnnouncement.shouldPost(now: start + .seconds(1), last: start))
+        #expect(ReconnectAnnouncement.shouldPost(now: start + .seconds(6), last: start))
+    }
+}

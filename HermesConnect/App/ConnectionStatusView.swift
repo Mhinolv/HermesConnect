@@ -106,6 +106,25 @@ struct ConnectionStatusView: View {
     }
 }
 
+/// Issue #145 and #178: VoiceOver says "Reconnecting" one time for each drop. A chat reattach (#145) and a
+/// link reconnect (#178) of the same drop come close together, so a repeat in `window` is not posted.
+@MainActor
+enum ReconnectAnnouncement {
+    static let window: Duration = .seconds(5)
+    private static var last: ContinuousClock.Instant?
+
+    static func shouldPost(now: ContinuousClock.Instant, last: ContinuousClock.Instant?) -> Bool {
+        guard let last else { return true }
+        return now - last >= window
+    }
+
+    static func post(now: ContinuousClock.Instant = .now) {
+        guard shouldPost(now: now, last: last) else { return }
+        last = now
+        AccessibilityNotification.Announcement("Reconnecting").post()
+    }
+}
+
 /// The text, then the symbol: "Offline ↻".
 private struct TrailingIconLabelStyle: LabelStyle {
     func makeBody(configuration: Configuration) -> some View {
