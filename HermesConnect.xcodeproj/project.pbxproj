@@ -21,6 +21,7 @@
 		112074308449AED528F9D35E /* Authenticator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C7D787891FBA8D58A12CDFC /* Authenticator.swift */; };
 		117A8219415F89525F20D235 /* ChatViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71BE1F0BBF1E0DC6C9086E97 /* ChatViewController.swift */; };
 		12E797B0E2AAB67E3822FD4A /* LiveModeSessionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA1D75EE05A7A170D89E6213 /* LiveModeSessionModel.swift */; };
+		14045C08761EF514DF969C1E /* LinkKeeper.swift in Sources */ = {isa = PBXBuildFile; fileRef = F27B0F8443E3CDEBF0938E48 /* LinkKeeper.swift */; };
 		15447B7300590146E9C01520 /* CatchUpAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8A48996F2DE819FC34FF0CA /* CatchUpAppTests.swift */; };
 		173CEA1C519578E124650A2A /* VoiceReplyUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EBCCF57F6F99D73BDA35CD1 /* VoiceReplyUITests.swift */; };
 		17E1339897DD2126DA36CB6A /* ChatCommandCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23D8BC56827006B8AA57FFA8 /* ChatCommandCell.swift */; };
@@ -253,6 +254,7 @@
 		EF95280C48F95F742B500A77 /* SlashSuggestionPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashSuggestionPanel.swift; sourceTree = "<group>"; };
 		F09944D2D09BA416ACF4B7B3 /* VoiceModeSessionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceModeSessionModel.swift; sourceTree = "<group>"; };
 		F0EA96A6753C403E6A93EDFD /* SessionListScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListScreen.swift; sourceTree = "<group>"; };
+		F27B0F8443E3CDEBF0938E48 /* LinkKeeper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkKeeper.swift; sourceTree = "<group>"; };
 		F298C712011FEAA64AF716E8 /* SessionActionsUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionActionsUI.swift; sourceTree = "<group>"; };
 		F3C4E1EC060A41E57D2B774C /* DemoChatTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoChatTransport.swift; sourceTree = "<group>"; };
 		F644A53392C0F24B494772BD /* ServerViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerViews.swift; sourceTree = "<group>"; };
@@ -440,6 +442,7 @@
 				76E748D4ED9CB565A2F48120 /* ConnectionStatusView.swift */,
 				C2D0E4917A4E786D312A42A3 /* HandsFreeIntent.swift */,
 				A1663E6E147C124EEADC03F1 /* HermesConnectApp.swift */,
+				F27B0F8443E3CDEBF0938E48 /* LinkKeeper.swift */,
 				446EDEE4C7998A61822DEA32 /* LocalNotifications.swift */,
 				FE4A7EA7ED45FD7D0E2CEF70 /* ServerSwitcher.swift */,
 				80CEC9955EB224CEF5BA7E56 /* SiriService.swift */,
@@ -728,6 +731,7 @@
 				8A60629016D1FCF8D20E0455 /* InstallStepsView.swift in Sources */,
 				2FDD94501C0F2A6FB5569A16 /* JobsDemo.swift in Sources */,
 				85A9EB010A1CF8A85520015D /* JobsScreens.swift in Sources */,
+				14045C08761EF514DF969C1E /* LinkKeeper.swift in Sources */,
 				831663E8A5DD5D97CE6B2459 /* LiveModeDemo.swift in Sources */,
 				12E797B0E2AAB67E3822FD4A /* LiveModeSessionModel.swift in Sources */,
 				B433DA87A9B0ABD221346C7A /* LocalNotifications.swift in Sources */,

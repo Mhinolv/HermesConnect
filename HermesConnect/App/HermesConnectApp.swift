@@ -185,6 +185,8 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     /// Issue #15: when the app went to the background. Nil while it is active.
     @State private var backgroundedAt: Date?
+    /// Issue #176: background time after the owner leaves, so the link stays alive for a quick switch.
+    @State private var linkKeeper = LinkKeeper()
     /// The session list and the chats of this window (issue #7). The app owns it, so it lives across view updates.
     var sessions = ChatLaunch.makeOfflineSessions()
     /// Issue #73: the job list of the Jobs tab.
@@ -460,14 +462,19 @@ extension RootView {
             sessions.flushCache()
             if backgroundedAt == nil { backgroundedAt = .now }
             BackgroundRefresh.schedule()
+            linkKeeper.hold()
         case .active:
+            linkKeeper.release()
             guard let since = backgroundedAt else { return }
             backgroundedAt = nil
             // Issue #138: a voice session kept the app and the link alive. Only the time after it ended counts.
             let away = voice.awakeAway(backgroundedAt: since)
             Task {
                 await notifications?.refreshStatus()
-                await model.reconnectOnForeground(link: link?.status, away: away)
+                // Issue #176: a link that answers one ping stays. Only a dead link reconnects.
+                let link = self.link
+                await model.reconnectOnForeground(link: link?.status, away: away,
+                                                  probe: { await link?.probe() ?? false })
                 await sessions.refresh()
             }
         default:

@@ -149,6 +149,33 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
         Task { await renew?() }
     }
 
+    // MARK: Link probe (issue #176)
+
+    /// Issue #176: after a time in the background, test the link with one heartbeat call.
+    /// Returns `true` only when the server answers in `timeout`. A dead SSH session can hang
+    /// the call, so the time limit does not wait for the call to end.
+    public func probe(timeout: Duration = .seconds(3)) async -> Bool {
+        guard status == .ready, client != nil else { return false }
+        let gate = ProbeGate()
+        return await withCheckedContinuation { continuation in
+            gate.start(continuation)
+            Task { [weak self] in
+                guard let self else { return gate.finish(false) }
+                let answered: Bool
+                do {
+                    answered = try await self.readyClient().ping()
+                } catch {
+                    answered = false
+                }
+                gate.finish(answered)
+            }
+            Task {
+                try? await Task.sleep(for: timeout)
+                gate.finish(false)
+            }
+        }
+    }
+
     // MARK: ChatTransport
 
     /// The current client, connected. A dropped socket reconnects once if the reason allows it.
@@ -348,5 +375,31 @@ public final class LiveChatTransport: ChatTransport, SessionsTransport, Received
             if Self.isStaleToken(error), endpoint == self.endpoint, status == .ready { staleToken() }
             throw error
         }
+    }
+}
+
+/// Issue #176: resumes the probe once, with the first result (the answer or the time limit).
+private final class ProbeGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var result: Bool?
+
+    func start(_ continuation: CheckedContinuation<Bool, Never>) {
+        let early: Bool? = lock.withLock {
+            if let result { return result }
+            self.continuation = continuation
+            return nil
+        }
+        if let early { continuation.resume(returning: early) }
+    }
+
+    func finish(_ value: Bool) {
+        let waiting: CheckedContinuation<Bool, Never>? = lock.withLock {
+            guard result == nil else { return nil }
+            result = value
+            defer { continuation = nil }
+            return continuation
+        }
+        waiting?.resume(returning: value)
     }
 }

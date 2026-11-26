@@ -73,6 +73,35 @@ private func waitFor(_ condition: @MainActor () -> Bool) async throws {
         #expect(factory.sockets.count == 1)
     }
 
+    /// Issue #176: a link that answers the heartbeat is kept after a time in the background.
+    @Test func probeIsTrueWhenTheServerAnswers() async throws {
+        let factory = ClientFactory()
+        let transport = LiveChatTransport(makeClient: factory.make)
+        transport.setEndpoint(try endpoint(8123))
+        let socket = try await factory.handshake(0)
+        try await waitFor { transport.status == .ready }
+        async let alive = transport.probe(timeout: .seconds(5))
+        socket.reply(to: try await socket.waitForRequest("gateway.ping"), result: #"{"ok":true}"#)
+        #expect(await alive)
+    }
+
+    /// Issue #176: no answer in the time limit means a dead link. The probe does not wait for the call.
+    @Test func probeIsFalseWhenTheServerDoesNotAnswer() async throws {
+        let factory = ClientFactory()
+        let transport = LiveChatTransport(makeClient: factory.make)
+        transport.setEndpoint(try endpoint(8123))
+        _ = try await factory.handshake(0)
+        try await waitFor { transport.status == .ready }
+        let start = ContinuousClock.now
+        #expect(await transport.probe(timeout: .milliseconds(100)) == false)
+        #expect(ContinuousClock.now - start < .seconds(2))
+    }
+
+    @Test func probeIsFalseWithNoLink() async {
+        let transport = LiveChatTransport()
+        #expect(await transport.probe(timeout: .seconds(5)) == false)
+    }
+
     @Test func eventsOfTheCurrentClientAreForwarded() async throws {
         let factory = ClientFactory()
         let transport = LiveChatTransport(makeClient: factory.make)
