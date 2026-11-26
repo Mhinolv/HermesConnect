@@ -97,13 +97,21 @@ public struct ServeBootstrap: Sendable {
     /// - Parameters:
     ///   - reuse: The token of the last connect, or nil. With a token, the gate reuses its live server.
     ///   - pinnedPort: The server port of the last connect to a fixed-port gate, or nil. Another port is refused.
+    ///   - timing: Issue #180: the run that records the `serve`, `health` and `ownership` steps, or nil.
+    ///     A failure ends the run with the step that failed. A retry with a new token records the steps again.
     /// - Throws: `SSHConnectionError`. `gateError` holds only the gate code.
-    public func start(on session: any SSHSession, reuse: SessionToken?,
-                      pinnedPort: Int? = nil) async throws(SSHConnectionError) -> HermesServe {
-        do {
-            return try await attempt(on: session, token: reuse ?? mintToken(), pinnedPort: pinnedPort)
-        } catch .sessionTokenRejected where reuse != nil {
-            return try await attempt(on: session, token: mintToken(), pinnedPort: pinnedPort)
+    public func start(on session: any SSHSession, reuse: SessionToken?, pinnedPort: Int? = nil,
+                      timing: ConnectRun? = nil) async throws(SSHConnectionError) -> HermesServe {
+        do throws(SSHConnectionError) {
+            do {
+                return try await attempt(on: session, token: reuse ?? mintToken(), pinnedPort: pinnedPort,
+                                         timing: timing)
+            } catch .sessionTokenRejected where reuse != nil {
+                return try await attempt(on: session, token: mintToken(), pinnedPort: pinnedPort, timing: timing)
+            }
+        } catch {
+            timing?.fail()
+            throw error
         }
     }
 
@@ -117,8 +125,33 @@ public struct ServeBootstrap: Sendable {
         return port
     }
 
-    private func attempt(on session: any SSHSession, token: SessionToken,
-                         pinnedPort: Int?) async throws(SSHConnectionError) -> HermesServe {
+    private func attempt(on session: any SSHSession, token: SessionToken, pinnedPort: Int?,
+                         timing: ConnectRun?) async throws(SSHConnectionError) -> HermesServe {
+        let (remotePort, forward): (Int, any LoopbackForward)
+        do {
+            (remotePort, forward) = try await timing.measure(.serve) {
+                try await serve(on: session, token: token, pinnedPort: pinnedPort)
+            }
+        } catch {
+            throw (error as? SSHConnectionError) ?? .unreachable
+        }
+        do {
+            guard let endpoint = try? GatewayEndpoint(port: forward.localPort, token: token.value) else {
+                throw SSHConnectionError.forwardFailed
+            }
+            let client = HermesRESTClient(endpoint: endpoint, loader: loader)
+            try await timing.measure(.health) { try await waitForHealth(client) }
+            try await timing.measure(.ownership) { try await checkOwnership(client) }
+            return HermesServe(endpoint: endpoint, forward: forward, remotePort: remotePort, token: token)
+        } catch {
+            await forward.close()
+            throw (error as? SSHConnectionError) ?? .hermesNotReady
+        }
+    }
+
+    /// The gate `serve`, then the forward to the port that it printed.
+    private func serve(on session: any SSHSession, token: SessionToken,
+                       pinnedPort: Int?) async throws(SSHConnectionError) -> (Int, any LoopbackForward) {
         let reply: String
         do {
             reply = try await withDeadline(configuration.serveTimeout) {
@@ -129,24 +162,10 @@ public struct ServeBootstrap: Sendable {
         }
         guard let remotePort = Self.parsePort(reply) else { throw .unexpectedReply }
         if let pinnedPort, remotePort != pinnedPort { throw .gateError(Self.portChangedCode) }
-
-        let forward: any LoopbackForward
         do {
-            forward = try await session.openLoopbackForward(remotePort: remotePort)
+            return (remotePort, try await session.openLoopbackForward(remotePort: remotePort))
         } catch {
             throw (error as? SSHConnectionError) ?? .forwardFailed
-        }
-        do {
-            guard let endpoint = try? GatewayEndpoint(port: forward.localPort, token: token.value) else {
-                throw SSHConnectionError.forwardFailed
-            }
-            let client = HermesRESTClient(endpoint: endpoint, loader: loader)
-            try await waitForHealth(client)
-            try await checkOwnership(client)
-            return HermesServe(endpoint: endpoint, forward: forward, remotePort: remotePort, token: token)
-        } catch {
-            await forward.close()
-            throw (error as? SSHConnectionError) ?? .hermesNotReady
         }
     }
 

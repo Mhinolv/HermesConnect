@@ -52,10 +52,14 @@ public final class SessionListModel {
     /// They go on the next connect. A switch drops them: they belong to the old server.
     @ObservationIgnored private var pendingReadSync: [String] = []
     @ObservationIgnored private var readSyncTask: Task<Void, Never>?
+    /// Issue #180: the list load after a socket connect is the `first-list-refresh` step of the current connect.
+    @ObservationIgnored private let timeline: ConnectTimeline
+    @ObservationIgnored private var listTiming: ConnectRun?
 
     /// `transport` and `chatTransport` are the same `LiveChatTransport` in the app. Tests give fakes.
     public init(transport: any SessionsTransport, chatTransport: any ChatTransport, cache: any SessionCacheStore,
-                transcription: VoiceTranscription = .server) {
+                transcription: VoiceTranscription = .server, timeline: ConnectTimeline = .shared) {
+        self.timeline = timeline
         self.transport = transport
         self.transcription = transcription
         self.chatTransport = chatTransport
@@ -117,7 +121,10 @@ public final class SessionListModel {
         isRefreshing = true
         defer { isRefreshing = false }
         let current = generation
-        guard var rows = try? await transport.fetchSessions(), current == generation else { return }
+        guard var rows = try? await transport.fetchSessions(), current == generation else {
+            finishListTiming(ok: false)
+            return
+        }
         rows.removeAll { pendingRemovals.contains($0.id) }
         let unread = Set(sessions.filter(\.isUnread).map(\.id)).union(carriedUnread)
         carriedUnread = []
@@ -129,8 +136,15 @@ public final class SessionListModel {
             sessions = merged
             cache.saveSessions(merged)
         }
+        finishListTiming(ok: true)
         // Issue #64: after the list, so the list never waits for it.
         await loadArchivedCount()
+    }
+
+    /// Issue #180: the rows are in place, or the load failed. The step ends one time.
+    private func finishListTiming(ok: Bool) {
+        listTiming?.finish(.firstListRefresh, ok: ok)
+        listTiming = nil
     }
 
     /// The chat screen of `chat` appeared. Its session loses the blue dot and gets no new one.
@@ -326,6 +340,10 @@ public final class SessionListModel {
     public func receive(_ item: GatewayClientEvent) {
         switch item {
         case .state(.connected):
+            if let timing = timeline.current {
+                timing.start(.firstListRefresh)
+                listTiming = timing
+            }
             Task { await refresh() }
             sendOutboxes()
             // Issue #94: the read state that "Mark All as Read" could not send offline.

@@ -324,9 +324,10 @@ final class AppModel {
         let serverID = profile.id
         attempt += 1
         let current = attempt
+        let timing = ConnectTimeline.shared.begin()  // Issue #180: the time of each connect step.
         connection = .connecting
         do {
-            let result = try await connector.connect(profile: profile, key: deviceKey)
+            let result = try await connector.connect(profile: profile, key: deviceKey, timing: timing)
             guard current == attempt else {
                 await result.session.close()
                 return
@@ -343,7 +344,7 @@ final class AppModel {
             let pinsPort = ServeBootstrap.pinsPort(gateVersion: result.gateVersion)
             let reuse = serveToken ?? storedToken(for: serverID)
             let running = try await serve.start(on: result.session, reuse: reuse,
-                                                pinnedPort: pinsPort ? profile.servePort : nil)
+                                                pinnedPort: pinsPort ? profile.servePort : nil, timing: timing)
             guard current == attempt else {
                 await running.forward.close()
                 return
