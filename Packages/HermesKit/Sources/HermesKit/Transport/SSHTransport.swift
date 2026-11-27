@@ -161,6 +161,28 @@ public struct GateConnection: Sendable {
     public var algorithms: SSHNegotiatedAlgorithms? = nil
 }
 
+/// Issue #181: a connection that passed the host key check and authentication. The gate `ping` runs on its own
+/// exec channel at the same time, so the `serve` step does not wait for it (`ServeBootstrap.start(on:)`).
+public struct GateLogin: Sendable {
+    public let session: any SSHSession
+    /// The cipher and key exchange of this connection (issue #18). Nil when the transport cannot tell.
+    public let algorithms: SSHNegotiatedAlgorithms?
+    private let ping: Task<Result<String, SSHConnectionError>, Never>
+
+    init(session: any SSHSession, algorithms: SSHNegotiatedAlgorithms?,
+         ping: Task<Result<String, SSHConnectionError>, Never>) {
+        self.session = session
+        self.algorithms = algorithms
+        self.ping = ping
+    }
+
+    /// The gate version from `PONG <version>`. It waits for the `ping`. Each call gives the same result.
+    /// - Throws: The error of the `ping`: `unexpectedReply` for a bad reply, `gateError` for a refusal.
+    public func gateVersion() async throws(SSHConnectionError) -> String {
+        try await ping.value.get()
+    }
+}
+
 /// Connects to the one server of the owner with the pinned host key (issue #3).
 public struct HostConnector: Sendable {
     public let transport: any SSHTransport
@@ -177,15 +199,37 @@ public struct HostConnector: Sendable {
     public func connect(profile: ServerProfile, key: DeviceKey,
                         timing: ConnectRun? = nil) async throws(SSHConnectionError) -> GateConnection {
         do throws(SSHConnectionError) {
-            return try await connectSteps(profile: profile, key: key, timing: timing)
+            let login = try await loginSteps(profile: profile, key: key, timing: timing)
+            do throws(SSHConnectionError) {
+                let version = try await login.gateVersion()
+                return GateConnection(session: login.session, gateVersion: version, algorithms: login.algorithms)
+            } catch {
+                await login.session.close()
+                throw error
+            }
         } catch {
             timing?.fail()
             throw error
         }
     }
 
-    private func connectSteps(profile: ServerProfile, key: DeviceKey,
-                              timing: ConnectRun?) async throws(SSHConnectionError) -> GateConnection {
+    /// Issue #181: connect, check the host key against `profile.hostKey` and authenticate. Then start the gate
+    /// `ping` and return at once. `ServeBootstrap.start(on:)` runs `serve` while the `ping` runs.
+    /// - Parameter timing: The run that records the `ssh-login` and `ping` steps, or nil.
+    ///   A failed login ends the run. `ServeBootstrap.start(on:)` ends it when the `ping` fails.
+    /// - Throws: `SSHConnectionError`. `hostKeyUnknown` and `hostKeyChanged` come before authentication.
+    public func login(profile: ServerProfile, key: DeviceKey,
+                      timing: ConnectRun? = nil) async throws(SSHConnectionError) -> GateLogin {
+        do throws(SSHConnectionError) {
+            return try await loginSteps(profile: profile, key: key, timing: timing)
+        } catch {
+            timing?.fail()
+            throw error
+        }
+    }
+
+    private func loginSteps(profile: ServerProfile, key: DeviceKey,
+                            timing: ConnectRun?) async throws(SSHConnectionError) -> GateLogin {
         let pinned = profile.hostKey
         let session: any SSHSession
         do {
@@ -204,19 +248,23 @@ public struct HostConnector: Sendable {
         } catch {
             throw .unreachable
         }
-        do {
-            let version = try await timing.measure(.ping) {
-                let reply = try await session.execute(.ping)
-                guard let version = Self.parsePong(reply) else { throw SSHConnectionError.unexpectedReply }
-                return version
+        let algorithms = await session.negotiatedAlgorithms()
+        // The `ping` starts before this method returns, so it runs at the same time as the `serve`.
+        let log = log
+        let ping = Task { () -> Result<String, SSHConnectionError> in
+            do {
+                let version = try await timing.measure(.ping) {
+                    let reply = try await session.execute(.ping)
+                    guard let version = Self.parsePong(reply) else { throw SSHConnectionError.unexpectedReply }
+                    return version
+                }
+                log.info("SSH connected: gate \(version), \(algorithms?.displayText ?? "algorithms unknown")")
+                return .success(version)
+            } catch {
+                return .failure((error as? SSHConnectionError) ?? .unreachable)
             }
-            let algorithms = await session.negotiatedAlgorithms()
-            log.info("SSH connected: gate \(version), \(algorithms?.displayText ?? "algorithms unknown")")
-            return GateConnection(session: session, gateVersion: version, algorithms: algorithms)
-        } catch {
-            await session.close()
-            throw (error as? SSHConnectionError) ?? .unreachable
         }
+        return GateLogin(session: session, algorithms: algorithms, ping: ping)
     }
 
     /// `PONG <version>` (one line) gives `<version>`. Other text gives nil.
@@ -252,6 +300,10 @@ public final class ScriptedSSHTransport: SSHTransport, @unchecked Sendable {
         public var commands: [GateCommand] = []
         /// The stdin bytes of each command, in the order of `commands`.
         public var stdins: [Data?] = []
+        /// Issue #181: the stdin bytes of the `serve` commands only. The `ping` can run before or after a `serve`.
+        public var serveStdins: [Data?] {
+            zip(commands, stdins).filter { $0.0 == .serve }.map(\.1)
+        }
         public var closedSessions = 0
         /// The server port of each forward that opened.
         public var forwardPorts: [Int] = []

@@ -145,6 +145,7 @@ private let token = String(repeating: "0f", count: 32)
     }
 
     /// A stale reuse token gets a new token. The second try records its steps again, and the connect goes on.
+    /// Issue #181: the reuse try has no health step. The new token gets one.
     @Test func aTokenRetryRecordsTheServeStepsAgain() async throws {
         let capture = LineCapture()
         defer { capture.stop() }
@@ -159,7 +160,7 @@ private let token = String(repeating: "0f", count: 32)
         run.finish(.socketReady, ok: true)
         run.start(.firstListRefresh)
         run.finish(.firstListRefresh, ok: true)
-        #expect(capture.summary == "connect done in 200 ms: ssh-login 10 ms, ping 10 ms, serve 10 ms, health 10 ms, "
+        #expect(capture.summary == "connect done in 180 ms: ssh-login 10 ms, ping 10 ms, serve 10 ms, "
             + "ownership 10 ms failed, serve 10 ms, health 10 ms, ownership 10 ms, socket-ready 10 ms, "
             + "first-list-refresh 10 ms")
     }

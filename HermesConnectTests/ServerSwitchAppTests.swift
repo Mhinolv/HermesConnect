@@ -437,7 +437,7 @@ import UserNotifications
         #expect(try setup.tokens.loadToken(for: home.id) == homeToken)
         #expect(try setup.tokens.loadToken(for: lab.id) != nil)
         await setup.model.switchServer(to: home.id)
-        #expect(setup.transport.record.stdins.last?.flatMap(SessionToken.init(storedBytes:)) == homeToken)
+        #expect(setup.transport.record.serveStdins.last?.flatMap(SessionToken.init(storedBytes:)) == homeToken)
     }
 
     /// Issue #173: the background link sends the stored token of that server, so its live turn continues.
@@ -447,12 +447,12 @@ import UserNotifications
         let stored = SessionToken.mint()
         try setup.tokens.saveToken(stored, for: lab.id)
         #expect(await setup.model.withBackgroundLink(to: lab.id) { _ in true })
-        #expect(setup.transport.record.stdins.last?.flatMap(SessionToken.init(storedBytes:)) == stored)
+        #expect(setup.transport.record.serveStdins.last?.flatMap(SessionToken.init(storedBytes:)) == stored)
         #expect(try setup.tokens.loadToken(for: lab.id) == stored)
 
         try setup.tokens.deleteToken(for: lab.id)
         #expect(await setup.model.withBackgroundLink(to: lab.id) { _ in true })
-        let sent = try #require(setup.transport.record.stdins.last ?? nil)
+        let sent = try #require(setup.transport.record.serveStdins.last ?? nil)
         #expect(try setup.tokens.loadToken(for: lab.id) == SessionToken(storedBytes: sent))
         #expect(try setup.tokens.loadToken(for: home.id) == nil, "the active server token does not change")
     }

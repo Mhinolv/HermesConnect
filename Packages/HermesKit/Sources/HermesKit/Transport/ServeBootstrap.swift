@@ -49,11 +49,17 @@ public struct HermesServe: Sendable {
 ///
 /// 1. Send the token on the gate `serve` stdin. The gate starts or reuses the server and prints `PORT <n>`.
 /// 2. Open a local forward to `127.0.0.1:<n>` on the server.
-/// 3. `GET /api/health` (fallback `GET /api/status`) until it answers.
+/// 3. `GET /api/health` (fallback `GET /api/status`) until it answers. Issue #181: a reuse token skips this step.
+///    The gate prints `PORT <n>` only for a live server or after `HERMES_BACKEND_READY`, and step 4 calls the
+///    same server (docs/hermes-protocol.md 7.1 step 6). If step 4 cannot reach Hermes, step 3 runs, then step 4 again.
 /// 4. `GET /api/ssh/ownership` with the token. 401, 403 or 404 means that the token is stale.
 ///    A stale reuse token gets one more try with a new token. The gate then replaces the server.
+///    Issue #181: with `socketPrewarm`, the gateway socket opens while this check runs. Nothing goes on that
+///    socket before the check passes. A failed check closes it.
 ///
 /// With a pinned port, a `PORT <n>` with another port fails with `gateError("port-changed")` before step 2 (issue #29).
+/// Issue #181: `start(on: GateLogin, …)` runs step 1 while the gate `ping` runs. Before step 2 it waits for the
+/// `ping`. A failed `ping` gives its own error, as when the `ping` ran first.
 public struct ServeBootstrap: Sendable {
     public struct Configuration: Sendable {
         /// The gate waits up to 120 s for the ready line. This deadline covers that wait and the SSH round trip.
@@ -86,11 +92,16 @@ public struct ServeBootstrap: Sendable {
     private let loader: any HTTPDataLoading
     private let configuration: Configuration
     private let mintToken: @Sendable () -> SessionToken
+    private let socketPrewarm: GatewaySocketPrewarm?
 
+    /// - Parameter socketPrewarm: Issue #181: opens the gateway socket while the ownership check runs, or nil.
+    ///   The app gives `.shared`, which `PrewarmedGatewayConnector` reads.
     public init(loader: any HTTPDataLoading = URLSessionHTTPLoader(), configuration: Configuration = Configuration(),
+                socketPrewarm: GatewaySocketPrewarm? = nil,
                 mintToken: @escaping @Sendable () -> SessionToken = { SessionToken.mint() }) {
         self.loader = loader
         self.configuration = configuration
+        self.socketPrewarm = socketPrewarm
         self.mintToken = mintToken
     }
 
@@ -102,16 +113,48 @@ public struct ServeBootstrap: Sendable {
     /// - Throws: `SSHConnectionError`. `gateError` holds only the gate code.
     public func start(on session: any SSHSession, reuse: SessionToken?, pinnedPort: Int? = nil,
                       timing: ConnectRun? = nil) async throws(SSHConnectionError) -> HermesServe {
+        try await start(on: session, reuse: reuse, pin: .fixed(pinnedPort), timing: timing)
+    }
+
+    /// Issue #181: the same steps on a `GateLogin`. The gate `serve` runs while the gate `ping` runs.
+    /// - Parameters:
+    ///   - savedPort: The saved server port of the profile (`ServerProfile.servePort`), or nil.
+    ///     It becomes the pin only when the `ping` gives a fixed-port gate (`pinsPort(gateVersion:)`).
+    /// - Throws: `SSHConnectionError`. A failed `ping` gives the error of the `ping`, also when the `serve` failed.
+    public func start(on login: GateLogin, reuse: SessionToken?, savedPort: Int?,
+                      timing: ConnectRun? = nil) async throws(SSHConnectionError) -> HermesServe {
+        try await start(on: login.session, reuse: reuse, pin: .fromGate(login, savedPort: savedPort), timing: timing)
+    }
+
+    private func start(on session: any SSHSession, reuse: SessionToken?, pin: PortPin,
+                       timing: ConnectRun?) async throws(SSHConnectionError) -> HermesServe {
         do throws(SSHConnectionError) {
             do {
-                return try await attempt(on: session, token: reuse ?? mintToken(), pinnedPort: pinnedPort,
+                return try await attempt(on: session, token: reuse ?? mintToken(), reused: reuse != nil, pin: pin,
                                          timing: timing)
             } catch .sessionTokenRejected where reuse != nil {
-                return try await attempt(on: session, token: mintToken(), pinnedPort: pinnedPort, timing: timing)
+                return try await attempt(on: session, token: mintToken(), reused: false, pin: pin, timing: timing)
             }
         } catch {
             timing?.fail()
             throw error
+        }
+    }
+
+    /// Where the port pin comes from.
+    private enum PortPin: Sendable {
+        /// The caller ran the `ping` already.
+        case fixed(Int?)
+        /// The `ping` runs at the same time as the `serve`.
+        case fromGate(GateLogin, savedPort: Int?)
+
+        /// The pin. It waits for the `ping` and throws its error.
+        func port() async throws(SSHConnectionError) -> Int? {
+            switch self {
+            case .fixed(let port): return port
+            case .fromGate(let login, let savedPort):
+                return ServeBootstrap.pinsPort(gateVersion: try await login.gateVersion()) ? savedPort : nil
+            }
         }
     }
 
@@ -125,41 +168,59 @@ public struct ServeBootstrap: Sendable {
         return port
     }
 
-    private func attempt(on session: any SSHSession, token: SessionToken, pinnedPort: Int?,
+    /// - Parameter reused: `token` is the token of the last connect. Then the health check runs only as a fallback.
+    private func attempt(on session: any SSHSession, token: SessionToken, reused: Bool, pin: PortPin,
                          timing: ConnectRun?) async throws(SSHConnectionError) -> HermesServe {
         let (remotePort, forward): (Int, any LoopbackForward)
         do {
             (remotePort, forward) = try await timing.measure(.serve) {
-                try await serve(on: session, token: token, pinnedPort: pinnedPort)
+                try await serve(on: session, token: token, pin: pin)
             }
         } catch {
             throw (error as? SSHConnectionError) ?? .unreachable
         }
+        var socketURL: URL?
         do {
             guard let endpoint = try? GatewayEndpoint(port: forward.localPort, token: token.value) else {
                 throw SSHConnectionError.forwardFailed
             }
             let client = HermesRESTClient(endpoint: endpoint, loader: loader)
-            try await timing.measure(.health) { try await waitForHealth(client) }
-            try await timing.measure(.ownership) { try await checkOwnership(client) }
+            if !reused {
+                try await timing.measure(.health) { try await waitForHealth(client) }
+            }
+            if let socketPrewarm {
+                socketURL = endpoint.webSocketURL
+                socketPrewarm.open(endpoint.webSocketURL)
+            }
+            do {
+                try await timing.measure(.ownership) { try await checkOwnership(client) }
+            } catch SSHConnectionError.hermesNotReady where reused {
+                // Hermes did not answer. Wait for it as a new spawn does, then check again.
+                try await timing.measure(.health) { try await waitForHealth(client) }
+                try await timing.measure(.ownership) { try await checkOwnership(client) }
+            }
             return HermesServe(endpoint: endpoint, forward: forward, remotePort: remotePort, token: token)
         } catch {
+            if let socketURL { socketPrewarm?.discard(socketURL) }
             await forward.close()
             throw (error as? SSHConnectionError) ?? .hermesNotReady
         }
     }
 
     /// The gate `serve`, then the forward to the port that it printed.
+    /// With `PortPin.fromGate`, it waits for the `ping` before it reads the reply. A `ping` error comes first.
     private func serve(on session: any SSHSession, token: SessionToken,
-                       pinnedPort: Int?) async throws(SSHConnectionError) -> (Int, any LoopbackForward) {
+                       pin: PortPin) async throws(SSHConnectionError) -> (Int, any LoopbackForward) {
         let reply: String
         do {
             reply = try await withDeadline(configuration.serveTimeout) {
                 try await session.execute(.serve, stdin: token.stdinBytes)
             }
         } catch {
+            _ = try await pin.port()
             throw (error as? SSHConnectionError) ?? (error is DeadlineExceeded ? .hermesNotReady : .unreachable)
         }
+        let pinnedPort = try await pin.port()
         guard let remotePort = Self.parsePort(reply) else { throw .unexpectedReply }
         if let pinnedPort, remotePort != pinnedPort { throw .gateError(Self.portChangedCode) }
         do {
