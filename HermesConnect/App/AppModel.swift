@@ -82,6 +82,11 @@ final class AppModel {
     @ObservationIgnored private var pendingClose: Task<Void, Never>?
     /// Issue #83: counts switches. Only the last of fast switches connects.
     @ObservationIgnored private var switchCount = 0
+    /// Issue #182: the clock of the connect time limits. Tests move a fake clock.
+    @ObservationIgnored private let clock: any RetryClock
+    /// Issue #182: the connect that runs now: its attempt, its task, the wait for it, and when it started.
+    @ObservationIgnored private var activeConnect: (attempt: Int, work: Task<Void, Never>, watch: ConnectWatch,
+                                                    startedAt: ContinuousClock.Instant)?
     @ObservationIgnored let deviceName: String
 
     static let appLockDefaultsKey = "appLockEnabled"
@@ -90,12 +95,14 @@ final class AppModel {
     init(keyStore: any DeviceKeyStore, serverStore: any ServerListStore,
          defaults: UserDefaults = .standard, deviceName: String, transport: any SSHTransport,
          serve: ServeBootstrap = ServeBootstrap(socketPrewarm: .shared),
-         tokenStore: any ServeTokenStore = InMemoryServeTokenStore()) {
+         tokenStore: any ServeTokenStore = InMemoryServeTokenStore(),
+         clock: any RetryClock = SystemRetryClock()) {
         self.keyStore = keyStore
         self.tokenStore = tokenStore
         self.serverStore = serverStore
         self.defaults = defaults
-        self.connector = HostConnector(transport: transport)
+        self.clock = clock
+        self.connector = HostConnector(transport: transport, sleep: clock.limitSleep)
         self.serve = serve
         self.deviceName = deviceName
         let enabled = defaults.object(forKey: Self.appLockDefaultsKey) as? Bool ?? true
@@ -325,11 +332,40 @@ final class AppModel {
         await closeSession()
         // Issue #83: the active server can change while the old link closes. Read it after the close.
         guard let profile, let deviceKey, !isConnecting, pendingTrust == nil else { return }
-        let serverID = profile.id
         attempt += 1
-        let current = attempt
-        let timing = ConnectTimeline.shared.begin()  // Issue #180: the time of each connect step.
+        await connectWithTimeLimit(attempt: attempt, profile: profile, deviceKey: deviceKey)
+    }
+
+    /// Issue #182: the connect steps run in their own task. If they do not end in `ConnectTimeLimit.total`,
+    /// the connect stops with "Offline", and the #179 backoff retries. A step that ignores the cancel cannot block it.
+    private func connectWithTimeLimit(attempt current: Int, profile: ServerProfile, deviceKey: DeviceKey) async {
+        // Set at once, so a second `connect()` does nothing while the task starts.
         connection = .connecting
+        let watch = ConnectWatch()
+        let work = Task { @MainActor [weak self] in
+            await self?.connectSteps(attempt: current, profile: profile, deviceKey: deviceKey)
+            watch.finish()
+        }
+        activeConnect = (current, work, watch, clock.now)
+        let outcome = await withTaskCancellationHandler {
+            await watch.wait(limit: ConnectTimeLimit.total, clock: clock)
+        } onCancel: {
+            work.cancel()
+        }
+        if activeConnect?.attempt == current { activeConnect = nil }
+        guard outcome == .expired, current == attempt, isConnecting else { return }
+        attempt += 1  // The results of the stalled steps are dropped. They never show "Connected".
+        work.cancel()
+        connection = .offline(.unreachable)
+        onConnectFailed?()
+        await closeSession()
+    }
+
+    private func connectSteps(attempt current: Int, profile: ServerProfile, deviceKey: DeviceKey) async {
+        // A disconnect, a server change or a restart before the task started wins.
+        guard current == attempt else { return }
+        let serverID = profile.id
+        let timing = ConnectTimeline.shared.begin()  // Issue #180: the time of each connect step.
         do {
             let result = try await connector.login(profile: profile, key: deviceKey, timing: timing)
             guard current == attempt else {
@@ -375,6 +411,7 @@ final class AppModel {
                     deleteStoredToken(for: serverID)
                 }
                 await closeSession()
+                guard current == attempt else { return }  // Issue #182: the time limit ended it during the close.
                 connection = Self.failureState(for: error)
                 if case .offline = connection { onConnectFailed?() }
             }
@@ -519,6 +556,9 @@ final class AppModel {
         /// Issue #176: the link looks ready after a long time away. Test it with one ping first.
         /// Reconnect only when the ping fails.
         case probe
+        /// Issue #182: a connect runs since `ConnectTimeLimit.restartAfter` or more. The suspend can have stalled it.
+        /// Cancel it and connect again. "Connecting…" stays.
+        case restart
     }
 
     /// The server reaps an idle live session 20 s after its socket drops. After a longer time away, the
@@ -527,13 +567,17 @@ final class AppModel {
 
     /// What to do when the app comes back to the foreground. A state that waits for the owner
     /// (trust sheet, changed host key, "Hermes Did Not Start") does nothing.
+    /// - Parameter connectAge: Issue #182: the time since the running connect started, or nil.
     static func foregroundAction(connection: ConnectionState, link: ChatLinkStatus?,
-                                 away: TimeInterval) -> ForegroundAction {
+                                 away: TimeInterval, connectAge: Duration? = nil) -> ForegroundAction {
         switch connection {
         // The owner tapped "Cancel" on the trust sheet (`.offline(nil)`): wait for a tap on "Offline".
         case .offline(nil): return .none
         case .idle, .offline: return .connect
-        case .connecting, .startingHermes, .notStarted, .hostKeyChanged: return .none
+        case .connecting, .startingHermes:
+            guard let connectAge, connectAge >= ConnectTimeLimit.restartAfter else { return .none }
+            return .restart
+        case .notStarted, .hostKeyChanged: return .none
         case .connected:
             if link == .notConnected { return .reconnect }
             if away >= staleAfter { return link == .ready ? .probe : .reconnect }
@@ -546,9 +590,11 @@ final class AppModel {
     func reconnectOnForeground(link: ChatLinkStatus?, away: TimeInterval,
                                probe: @MainActor () async -> Bool = { false }) async {
         guard isSetUp, pendingTrust == nil else { return }
-        switch Self.foregroundAction(connection: connection, link: link, away: away) {
+        let connectAge = activeConnect.map { clock.now - $0.startedAt }
+        switch Self.foregroundAction(connection: connection, link: link, away: away, connectAge: connectAge) {
         case .none: return
         case .connect: await connect()
+        case .restart: await restartConnect()
         case .probe:
             let current = attempt
             if await probe() { return }
@@ -560,6 +606,23 @@ final class AppModel {
             await disconnect()
             await connect()
         }
+    }
+
+    /// Issue #182: cancel the running connect and start a new one. The state stays "Connecting…", with no "Offline".
+    /// The old steps can still end later. Their results are dropped.
+    func restartConnect() async {
+        guard isConnecting, let old = activeConnect else { return }
+        attempt += 1
+        let mine = attempt
+        activeConnect = nil
+        old.work.cancel()
+        old.watch.finish()
+        await closeSession()
+        // A disconnect or a server change during the close wins.
+        guard mine == attempt, isConnecting, isSetUp, pendingTrust == nil,
+              let profile, let deviceKey else { return }
+        attempt += 1
+        await connectWithTimeLimit(attempt: attempt, profile: profile, deviceKey: deviceKey)
     }
 
     // MARK: Link supervisor (issue #178)

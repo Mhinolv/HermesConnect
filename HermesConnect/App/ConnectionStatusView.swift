@@ -238,6 +238,8 @@ struct ConnectionStatusView_Previews: PreviewProvider {
             ChatTitleView().environment(model(.startingHermes))
             ChatTitleView().environment(model(.connected(gateVersion: "1")))
             ChatTitleView().environment(model(.offline(.unreachable)))
+            // Issue #182: the first wait after a connect that timed out.
+            RetryCountdownLabel(deadline: .now + .seconds(2)).font(.caption).foregroundStyle(.secondary)
             // Issue #179: the wait before the next try, at 4 s and at the 30 s limit.
             RetryCountdownLabel(deadline: .now + .seconds(4)).font(.caption).foregroundStyle(.secondary)
             RetryCountdownLabel(deadline: .now + .seconds(30)).font(.caption).foregroundStyle(.secondary)

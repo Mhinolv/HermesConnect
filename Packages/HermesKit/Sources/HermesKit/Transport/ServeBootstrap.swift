@@ -148,6 +148,14 @@ public struct ServeBootstrap: Sendable {
         /// The `ping` runs at the same time as the `serve`.
         case fromGate(GateLogin, savedPort: Int?)
 
+        /// Issue #182: ends when the `ping` ends, and throws its error. `fixed` ends at once.
+        var failure: @Sendable () async throws -> Void {
+            switch self {
+            case .fixed: return {}
+            case .fromGate(let login, _): return { _ = try await login.gateVersion() }
+            }
+        }
+
         /// The pin. It waits for the `ping` and throws its error.
         func port() async throws(SSHConnectionError) -> Int? {
             switch self {
@@ -213,8 +221,9 @@ public struct ServeBootstrap: Sendable {
                        pin: PortPin) async throws(SSHConnectionError) -> (Int, any LoopbackForward) {
         let reply: String
         do {
-            reply = try await withDeadline(configuration.serveTimeout) {
-                try await session.execute(.serve, stdin: token.stdinBytes)
+            // Issue #182: a failed `ping` ends a `serve` with no reply at once. It does not wait for the `serve` limit.
+            reply = try await withDeadline(configuration.serveTimeout) { [pin] in
+                try await untilFailure(pin.failure) { try await session.execute(.serve, stdin: token.stdinBytes) }
             }
         } catch {
             _ = try await pin.port()
@@ -249,21 +258,5 @@ public struct ServeBootstrap: Sendable {
             throw SSHConnectionError.hermesNotReady
         }
         guard proof.isValid else { throw SSHConnectionError.sessionTokenRejected }
-    }
-}
-
-struct DeadlineExceeded: Error {}
-
-/// Runs `operation`. If it takes longer than `limit`, cancels it and throws `DeadlineExceeded`.
-func withDeadline<T: Sendable>(_ limit: Duration,
-                               _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { try await operation() }
-        group.addTask {
-            try await Task.sleep(for: limit)
-            throw DeadlineExceeded()
-        }
-        defer { group.cancelAll() }
-        return try await group.next()!
     }
 }

@@ -186,10 +186,16 @@ public struct GateLogin: Sendable {
 /// Connects to the one server of the owner with the pinned host key (issue #3).
 public struct HostConnector: Sendable {
     public let transport: any SSHTransport
+    /// Issue #182: the time limit of the gate `ping`. A `ping` with no reply in this time fails with `unreachable`.
+    public let pingTimeout: Duration
+    private let sleep: LimitSleep
     private let log = HermesLog(category: "ssh")
 
-    public init(transport: any SSHTransport) {
+    public init(transport: any SSHTransport, pingTimeout: Duration = ConnectTimeLimit.ping,
+                sleep: @escaping LimitSleep = systemLimitSleep) {
         self.transport = transport
+        self.pingTimeout = pingTimeout
+        self.sleep = sleep
     }
 
     /// Connect, check the host key against `profile.hostKey`, authenticate, then run the gate `ping`.
@@ -254,7 +260,7 @@ public struct HostConnector: Sendable {
         let ping = Task { () -> Result<String, SSHConnectionError> in
             do {
                 let version = try await timing.measure(.ping) {
-                    let reply = try await session.execute(.ping)
+                    let reply = try await withDeadline(pingTimeout, sleep: sleep) { try await session.execute(.ping) }
                     guard let version = Self.parsePong(reply) else { throw SSHConnectionError.unexpectedReply }
                     return version
                 }
