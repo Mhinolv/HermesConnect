@@ -457,10 +457,147 @@ import UserNotifications
         #expect(try setup.tokens.loadToken(for: home.id) == nil, "the active server token does not change")
     }
 
+    // MARK: Foreground connect first (issue #184)
+
+    /// Issue #184: the owner opens the app while the background link of another server runs a catch-up.
+    /// The foreground connect starts when the old link closes, not when the background job ends.
+    @Test func aForegroundConnectDoesNotWaitForTheBackgroundJobOfAnotherServer() async throws {
+        let setup = await makeModel([home, lab])
+        let model = setup.model
+        let job = StalledJob()
+        let background = Task { await model.withBackgroundLink(to: lab.id) { _ in await job.run() } }
+        #expect(await poll { job.started }, "the link to the other server is open, and its job runs")
+        let opened = setup.transport.record
+        #expect(opened.connectAttempts == 1 && opened.closedSessions == 0)
+
+        let foreground = Task { await model.reconnectOnForeground(link: nil, away: 60) }
+        let connected = await poll { model.connection == .connected(gateVersion: "1") }
+        job.release()  // A job that ignores the cancel ends only now.
+        await foreground.value
+        _ = await background.value
+
+        #expect(connected, "the foreground connect waited for the background job of the other server")
+        #expect(model.profile?.id == home.id, "the active server does not change")
+        let record = setup.transport.record
+        #expect(record.connectAttempts == 2)
+        #expect(record.closedSessions == 1, "the other server link closed one time, the active link stays open")
+        #expect(record.closedForwards == 1)
+        let steps = Array(record.steps.drop { $0 != "close forward" })
+        #expect(steps.prefix(3) == ["close forward", "close session", "connect"],
+                "the link to the other server closes before the foreground connect")
+    }
+
+    /// Issue #184: the scene becomes active during the background catch-up of the other server. The app cancels
+    /// it, and the rotation gives that server the next turn again. Its unread state does not change.
+    @Test func aCancelledBackgroundCatchUpKeepsTheTurnOfTheOtherServer() async throws {
+        let setup = await makeModel([home, lab, vps])
+        let lists = attachLists(setup.model)
+        let defaults = UserDefaults(suiteName: "test-\(UUID().uuidString)")!
+        let notifications = NotificationController(center: FakeNotificationCenter(), defaults: defaults)
+        let model = setup.model
+        await model.connect()
+        let entry = ServerStateBook.Entry(cachedRows: [SessionListItem(id: "20261127_080000_lab001", title: "Lab",
+                                                                       isUnread: true)], outbox: [])
+        model.recordServerState(entry, for: lab.id)
+        defaults.set(vps.id.uuidString, forKey: BackgroundRotation.lastServerKey)
+        let menuBefore = model.serverMenu(activeChats: 0)
+        let other = try #require(BackgroundRefresh.nextServer(model: model, defaults: defaults))
+        #expect(other == lab.id)
+        // The chat socket of the other server never opens, so its catch-up waits for the socket.
+        let run = Task {
+            await BackgroundRefresh.catchUpInTurn(other, model: model, sessions: lists.sessions,
+                                                  notifications: notifications, caches: lists.caches,
+                                                  defaults: defaults, linkTimeout: .seconds(30),
+                                                  makeLink: { LiveChatTransport(makeClient: {
+                                                      GatewayClient(endpoint: $0, connector: RefusingGatewayConnector(),
+                                                                    configuration: .init(heartbeatInterval: nil))
+                                                  }) })
+        }
+        // The link to the other server is open: its forward is the second forward.
+        #expect(await poll { setup.transport.record.forwardPorts.count == 2 })
+        #expect(defaults.string(forKey: BackgroundRotation.lastServerKey) == lab.id.uuidString)
+
+        let foreground = Task { await model.reconnectOnForeground(link: nil, away: 60) }
+        let connected = await poll { model.connection == .connected(gateVersion: "1") }
+        await foreground.value
+        let outcome = await run.value
+
+        #expect(connected, "the foreground connect waited for the background job of the other server")
+        #expect(outcome == .cancelled)
+        #expect(defaults.string(forKey: BackgroundRotation.lastServerKey) == vps.id.uuidString,
+                "the cancelled server gets the next turn again")
+        #expect(BackgroundRefresh.nextServer(model: model, defaults: defaults) == lab.id)
+        #expect(model.serverMenu(activeChats: 0) == menuBefore, "the unread state of the other server stays")
+        #expect(lists.caches.activeServer == home.id)
+        let record = setup.transport.record
+        #expect(record.closedSessions == record.connectAttempts - 1, "only the active link stays open")
+    }
+
+    /// Issue #184: a switch during the background link of another server does not wait for its job either.
+    @Test func aSwitchDoesNotWaitForTheBackgroundJobOfAnotherServer() async throws {
+        let setup = await makeModel([home, lab, vps])
+        let model = setup.model
+        let job = StalledJob()
+        let background = Task { await model.backgroundLink(to: lab.id) { _ in await job.run() } }
+        #expect(await poll { job.started })
+        let switched = Task { await model.switchServer(to: vps.id) }
+        let connected = await poll { model.connection == .connected(gateVersion: "1") }
+        job.release()
+        await switched.value
+        let outcome = await background.value
+        #expect(connected, "the switch waited for the background job of the other server")
+        #expect(outcome == .cancelled)
+        #expect(model.profile?.id == vps.id)
+        let record = setup.transport.record
+        #expect(record.closedSessions == record.connectAttempts - 1, "only the link of the new server stays open")
+    }
+
+    /// Issue #184: a background job that ends by itself is not a cancel, and the next connect does not cancel it.
+    @Test func aBackgroundLinkThatEndsIsNotACancel() async throws {
+        let setup = await makeModel([home, lab])
+        #expect(await setup.model.backgroundLink(to: lab.id) { _ in true } == .finished(true))
+        #expect(await setup.model.backgroundLink(to: lab.id) { _ in false } == .finished(false))
+        #expect(!setup.model.cancelBackgroundLink(), "no background link runs")
+        await setup.model.connect()
+        #expect(setup.model.connection == .connected(gateVersion: "1"))
+        let record = setup.transport.record
+        #expect(record.closedSessions == 2 && record.closedForwards == 2, "each background link closed one time")
+    }
+
+    /// Polls `condition` on the main actor for up to `seconds`. True when it became true.
+    private func poll(seconds: Double = 3, _ condition: @MainActor () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int(seconds * 1000)))
+        while ContinuousClock.now < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return condition()
+    }
+
     @Test func oneServerKeepsTheHermesTitle() async throws {
         let setup = await makeModel([home])
         #expect(!setup.model.serverMenu(activeChats: 3).showsMenu)
         #expect(setup.model.serverMenu(activeChats: 3).title() == "Hermes")
+    }
+}
+
+/// Issue #184: a background job that ignores the cancel, like a stalled HTTP call. Only `release()` ends it.
+@MainActor
+private final class StalledJob {
+    private(set) var started = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    func run() async -> Bool {
+        started = true
+        if !released { await withCheckedContinuation { waiter = $0 } }
+        return true
+    }
+
+    func release() {
+        released = true
+        waiter?.resume()
+        waiter = nil
     }
 }
 

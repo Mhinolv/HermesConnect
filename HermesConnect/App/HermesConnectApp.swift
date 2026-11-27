@@ -480,6 +480,8 @@ extension RootView {
             linkKeeper.hold()
         case .active:
             linkKeeper.release()
+            // Issue #184: the active server comes first. A background link to another server closes now.
+            model.cancelBackgroundLink()
             guard let since = backgroundedAt else { return }
             backgroundedAt = nil
             // Issue #138: a voice session kept the app and the link alive. Only the time after it ended counts.

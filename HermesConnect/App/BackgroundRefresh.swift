@@ -68,13 +68,11 @@ enum BackgroundRefresh {
         let activeOK = await catchUpActive(model: model, link: link, sessions: sessions, notifications: notifications,
                                            linkTimeout: linkTimeout, madeConnection: &madeConnection)
         guard !isActive() else { return activeOK }
-        let last = defaults.string(forKey: BackgroundRotation.lastServerKey).flatMap(UUID.init(uuidString:))
         if let caches, !Task.isCancelled, clock.now - started < otherServerStartLimit,
-           let other = BackgroundRotation.next(servers: model.servers.map(\.id), active: model.profile?.id, last: last) {
-            defaults.set(other.uuidString, forKey: BackgroundRotation.lastServerKey)
+           let other = nextServer(model: model, defaults: defaults) {
             link.setEndpoint(nil)
-            _ = await catchUpOther(other, model: model, sessions: sessions, notifications: notifications,
-                                   caches: caches, linkTimeout: linkTimeout, makeLink: makeLink)
+            _ = await catchUpInTurn(other, model: model, sessions: sessions, notifications: notifications,
+                                    caches: caches, defaults: defaults, linkTimeout: linkTimeout, makeLink: makeLink)
         } else if madeConnection {
             await model.disconnect()
         }
@@ -100,21 +98,47 @@ enum BackgroundRefresh {
         return result != nil
     }
 
+    /// Issue #84: the server that is not active and has the next turn, or nil.
+    static func nextServer(model: AppModel, defaults: UserDefaults) -> UUID? {
+        let last = defaults.string(forKey: BackgroundRotation.lastServerKey).flatMap(UUID.init(uuidString:))
+        return BackgroundRotation.next(servers: model.servers.map(\.id), active: model.profile?.id, last: last)
+    }
+
+    /// Issue #84: the catch-up of `id`, the server with the next turn. The turn moves on before the connect, so a
+    /// server that stalls until the expiration does not block the other servers.
+    /// Issue #184: the app cancelled the link for the active server. That server did not catch up, so it gets
+    /// the next turn again. Its cache and its counts stay as they were.
+    static func catchUpInTurn(_ id: UUID, model: AppModel, sessions: SessionListModel,
+                              notifications: NotificationController, caches: ServerCaches, defaults: UserDefaults,
+                              linkTimeout: Duration = BackgroundRefresh.linkTimeout,
+                              makeLink: @MainActor () -> LiveChatTransport) async -> AppModel.BackgroundLinkOutcome {
+        let last = defaults.string(forKey: BackgroundRotation.lastServerKey)
+        defaults.set(id.uuidString, forKey: BackgroundRotation.lastServerKey)
+        let outcome = await catchUpOther(id, model: model, sessions: sessions, notifications: notifications,
+                                         caches: caches, linkTimeout: linkTimeout, makeLink: makeLink)
+        if outcome == .cancelled, defaults.string(forKey: BackgroundRotation.lastServerKey) == id.uuidString {
+            defaults.set(last, forKey: BackgroundRotation.lastServerKey)
+        }
+        return outcome
+    }
+
     /// Issue #84: one catch-up of a server that is not active, with its own link and its own cache folder.
     static func catchUpOther(_ id: UUID, model: AppModel, sessions: SessionListModel,
                              notifications: NotificationController, caches: ServerCaches,
                              linkTimeout: Duration = BackgroundRefresh.linkTimeout,
-                             makeLink: @MainActor () -> LiveChatTransport) async -> Bool {
-        guard let profile = model.serverList.server(id: id) else { return false }
+                             makeLink: @MainActor () -> LiveChatTransport) async -> AppModel.BackgroundLinkOutcome {
+        guard let profile = model.serverList.server(id: id) else { return .finished(false) }
         let server = NotificationServer(profile, serverCount: model.servers.count)
         let cache = caches.sessionStore(for: id)
         let link = makeLink()
         let poster = notifications.poster
         let showsPreview = notifications.showsPreview
-        return await model.withBackgroundLink(to: id) { endpoint in
+        return await model.backgroundLink(to: id) { endpoint in
             link.setEndpoint(endpoint)
             defer { link.setEndpoint(nil) }
             guard await waitUntilReady(link, timeout: linkTimeout) else { return false }
+            // Issue #184: after a cancel, the catch-up does not start. The cache does not change.
+            guard !Task.isCancelled else { return false }
             let refresher = CatchUpRefresher(sessions: link, chats: link, cache: cache, notifier: poster)
             guard (try? await refresher.run(showsPreview: showsPreview, server: server, setsBadge: false)) != nil
             else { return false }
