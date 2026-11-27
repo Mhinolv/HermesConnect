@@ -79,7 +79,10 @@ final class AppModel {
     /// Counts connect attempts. A result from an old attempt is dropped (the server changed, or a disconnect ran).
     @ObservationIgnored private var attempt = 0
     /// Issue #83: the close of the old server link. The next connect waits for it, so two links never overlap.
+    /// Issue #184: for a background link, it waits only for the close of the link, not for the end of its job.
     @ObservationIgnored private var pendingClose: Task<Void, Never>?
+    /// Issue #184: the background link to another server (issue #84) and its job, while the job runs.
+    @ObservationIgnored private var backgroundLink: (work: Task<Bool, Never>, closer: BackgroundLinkCloser)?
     /// Issue #83: counts switches. Only the last of fast switches connects.
     @ObservationIgnored private var switchCount = 0
     /// Issue #182: the clock of the connect time limits. Tests move a fake clock.
@@ -244,6 +247,8 @@ final class AppModel {
     /// the new server. Fast switches end on the last choice: an earlier switch does not connect.
     func switchServer(to id: UUID) async {
         guard id != profile?.id, serverList.server(id: id) != nil else { return }
+        // Issue #184: the owner's choice comes first. The background link closes now, not at the end of its job.
+        cancelBackgroundLink()
         let old = profile?.id
         var list = serverList
         list.activate(id: id)
@@ -329,6 +334,23 @@ final class AppModel {
     /// No pin: show the trust sheet. A changed key: show the error screen. The app never authenticates in those cases.
     func connect() async {
         guard isSetUp, !isConnecting, pendingTrust == nil else { return }
+        // Issue #184: the active server comes first. Cancel the background link to another server, and show
+        // "Connecting…" while it closes, so the subtitle never shows "Offline" or nothing in that time.
+        if cancelBackgroundLink() {
+            attempt += 1
+            let mine = attempt
+            connection = .connecting
+            await closeSession()
+            // A disconnect, a server change or a restart during the close wins.
+            guard mine == attempt else { return }
+            guard isSetUp, pendingTrust == nil, let profile, let deviceKey else {
+                connection = .idle
+                return
+            }
+            attempt += 1
+            await connectWithTimeLimit(attempt: attempt, profile: profile, deviceKey: deviceKey)
+            return
+        }
         await closeSession()
         // Issue #83: the active server can change while the old link closes. Read it after the close.
         guard let profile, let deviceKey, !isConnecting, pendingTrust == nil else { return }
@@ -506,42 +528,74 @@ final class AppModel {
 
     // MARK: Background refresh of another server (issue #84)
 
+    /// The end of a background link (issue #184).
+    enum BackgroundLinkOutcome: Equatable {
+        /// The job ended. `true` when `body` returned true.
+        case finished(Bool)
+        /// The app cancelled the link for the active server (`cancelBackgroundLink()`). The job did not end.
+        case cancelled
+    }
+
     /// Connect to a server that is not active, run `body` with its Hermes endpoint, then close that link.
     /// - The active server stays active. Its link closes first: one link at a time (owner decision on #66).
     /// - A server with no pin, a changed host key, or any error is skipped. Nothing asks the owner in the background.
     /// - A connect of the active server waits until this link is closed.
     func withBackgroundLink(to id: UUID, _ body: @escaping @MainActor (GatewayEndpoint) async -> Bool) async -> Bool {
+        await backgroundLink(to: id, body) == .finished(true)
+    }
+
+    /// Issue #184: the same as `withBackgroundLink(to:_:)`, and it tells when the app cancelled the link.
+    /// A cancel closes the link at once. The next connect waits only for that close, not for `body`.
+    func backgroundLink(to id: UUID,
+                        _ body: @escaping @MainActor (GatewayEndpoint) async -> Bool) async -> BackgroundLinkOutcome {
         guard isSetUp, id != profile?.id, let server = serverList.server(id: id), server.hostKey != nil,
-              let deviceKey else { return false }
+              let deviceKey else { return .finished(false) }
         await disconnect()
         let connector = self.connector
         let serve = self.serve
         // Issue #173: send the stored token of that server, so the gate does not stop its live turn.
         let reuse = storedToken(for: id)
         let previous = pendingClose
+        let closer = BackgroundLinkCloser()
         let work = Task { @MainActor [weak self] () -> Bool in
             await previous?.value
-            guard !Task.isCancelled,
-                  let result = try? await connector.connect(profile: server, key: deviceKey) else { return false }
             var ok = false
-            let pinsPort = ServeBootstrap.pinsPort(gateVersion: result.gateVersion)
-            if !Task.isCancelled {
-                do throws(SSHConnectionError) {
-                    let running = try await serve.start(on: result.session, reuse: reuse,
-                                                        pinnedPort: pinsPort ? server.servePort : nil)
-                    self?.updateServer(id: id) { $0.servePort = pinsPort ? running.remotePort : nil }
-                    if running.token != reuse { self?.saveStoredToken(running.token, for: id) }
-                    ok = await body(running.endpoint)
-                    await running.forward.close()
-                } catch .sessionTokenRejected {
-                    self?.deleteStoredToken(for: id)
-                } catch {}
+            if !Task.isCancelled, let result = try? await connector.connect(profile: server, key: deviceKey) {
+                await closer.adopt(result.session)
+                let pinsPort = ServeBootstrap.pinsPort(gateVersion: result.gateVersion)
+                if !Task.isCancelled {
+                    do throws(SSHConnectionError) {
+                        let running = try await serve.start(on: result.session, reuse: reuse,
+                                                            pinnedPort: pinsPort ? server.servePort : nil)
+                        await closer.adopt(running.forward)
+                        self?.updateServer(id: id) { $0.servePort = pinsPort ? running.remotePort : nil }
+                        if running.token != reuse { self?.saveStoredToken(running.token, for: id) }
+                        if !Task.isCancelled { ok = await body(running.endpoint) }
+                    } catch .sessionTokenRejected {
+                        self?.deleteStoredToken(for: id)
+                    } catch {}
+                }
             }
-            await result.session.close()
+            await closer.close()
             return ok
         }
-        pendingClose = Task { _ = await work.value }
-        return await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
+        backgroundLink = (work, closer)
+        pendingClose = Task { await closer.waitUntilClosed() }
+        let ok = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
+        if backgroundLink?.closer === closer { backgroundLink = nil }
+        return closer.isCancelled ? .cancelled : .finished(ok)
+    }
+
+    /// Issue #184: the scene became active, or a foreground connect or switch starts. Cancel the background link
+    /// to another server: its forward and its SSH session close at once. A job that ignores the cancel can run on,
+    /// but the next connect does not wait for it.
+    /// - Returns: true while a background link closes.
+    @discardableResult
+    func cancelBackgroundLink() -> Bool {
+        guard let link = backgroundLink, !link.closer.isClosed else { return false }
+        link.work.cancel()
+        link.closer.cancel()
+        return true
     }
 
     // MARK: Foreground reconcile (issue #15)
@@ -589,6 +643,8 @@ final class AppModel {
     /// Issue #176: `probe` tests the link (one ping with a time limit). `true` keeps the link.
     func reconnectOnForeground(link: ChatLinkStatus?, away: TimeInterval,
                                probe: @MainActor () async -> Bool = { false }) async {
+        // Issue #184: the active server comes first. The background link to another server closes now.
+        cancelBackgroundLink()
         guard isSetUp, pendingTrust == nil else { return }
         let connectAge = activeConnect.map { clock.now - $0.startedAt }
         switch Self.foregroundAction(connection: connection, link: link, away: away, connectAge: connectAge) {
@@ -704,6 +760,62 @@ final class AppModel {
     func didEnterBackground(at date: Date = .now) { lock.didEnterBackground(at: date) }
     func willEnterForeground(at date: Date = .now) { lock.willEnterForeground(at: date) }
     func unlockSucceeded() { lock.unlockSucceeded() }
+}
+
+/// Issue #184: the SSH session and the forward of one background link. A cancel closes them at once. The waiters
+/// go on when the link is closed, or when it can never open. The job of the link can still run after that.
+@MainActor
+final class BackgroundLinkCloser {
+    private(set) var isCancelled = false
+    /// True after the close. A new connect can start.
+    private(set) var isClosed = false
+    private var session: (any SSHSession)?
+    private var forward: (any LoopbackForward)?
+    private var closes = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    /// The job opened the session. After a cancel, it closes at once.
+    func adopt(_ session: any SSHSession) async {
+        self.session = session
+        if isCancelled { await close() }
+    }
+
+    /// The job opened the forward. After a cancel, it closes at once.
+    func adopt(_ forward: any LoopbackForward) async {
+        self.forward = forward
+        if isCancelled { await close() }
+    }
+
+    /// Close the open link now. A connect that runs closes its session when it returns (`adopt`).
+    func cancel() {
+        guard !isCancelled else { return }
+        isCancelled = true
+        guard session != nil else { return }
+        Task { await close() }
+    }
+
+    /// Close the forward, then the session, one time each. The job calls it last.
+    func close() async {
+        closes += 1
+        let forward = self.forward
+        let session = self.session
+        self.forward = nil
+        self.session = nil
+        await forward?.close()
+        await session?.close()
+        closes -= 1
+        // Another close can still wait for its session. The last close lets the waiters go on.
+        guard closes == 0, !isClosed else { return }
+        isClosed = true
+        let waiting = waiters
+        waiters = []
+        waiting.forEach { $0.resume() }
+    }
+
+    func waitUntilClosed() async {
+        guard !isClosed else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
 }
 
 extension AppModel {
